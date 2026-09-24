@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "locket"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Keeps an AI agent's memory from holding the same fact twice."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -20,6 +20,9 @@ locket = "locket.locket:cli"
 
 [project.urls]
 Homepage = "https://github.com/JACK-COM/locket"
+
+[tool.setuptools.dynamic]
+version = {attr = "locket.locket.__version__"}
 
 [tool.setuptools.package-data]
 locket = ["INSTALL-locket.md"]
