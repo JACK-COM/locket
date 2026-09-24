@@ -548,7 +548,15 @@ def cmd_doctor():
         row("warn", "embedder", "none; `find` falls back to word overlap and misses paraphrases",
             "ollama pull nomic-embed-text  (or fastembed: `locket help install`)")
 
-    unindexed = [n for n, r in stores.items() if not (r / ".memfind").is_dir()]
+    # an empty store (an auto-memory folder no session has written to) has nothing to
+    # index and `index all` skips it, so it never counts against this check
+    def _has_md(r):
+        try:
+            return bool(memscan.md_files(r))
+        except OSError:                     # an unreadable store (pathlib raises before 3.13)
+            return False
+    unindexed = [n for n, r in stores.items()
+                 if not (r / ".memfind").is_dir() and _has_md(r)]
     if unindexed:
         row("warn", "index", f"not built for {', '.join(sorted(unindexed))}", "locket index all")
     elif stores:
