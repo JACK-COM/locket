@@ -2496,6 +2496,12 @@ def selftest():
         assert bw("cat > MEMORY.md <<EOF")[1], "a redirect into a corpus file must block"
         assert bw("sed -i '' 's/a/b/' MEMORY.md")[1], "sed -i must block"
         assert bw(f"echo x >> {cmem}/topic_note.md")[1], "an absolute corpus path must block"
+        rel = Path(cmem).relative_to(HOME)
+        for spelt in (f"~/{rel}", f"$HOME/{rel}", f"${{HOME}}/{rel}", f'"$HOME/{rel}"', f"'~/{rel}'"):
+            assert bw(f"echo x >> {spelt}/topic_note.md")[1], f"a home-relative path must block: {spelt}"
+        assert bw(f"cd ~/{rel} && echo x >> topic_note.md")[1], "a cd through ~ resolves a bare name"
+        assert bw(f"cd ~nosuchuser9/x && echo x >> {cmem}/topic_note.md")[1], \
+            "an unknown ~user elsewhere in the command must not disable the check"
         msg, blk = bw("python3 - <<'EOF'\npathlib.Path('MEMORY.md').write_text(s)\nEOF")
         assert msg and not blk, "a scripted write warns rather than blocks"
         for quiet in (
@@ -4105,10 +4111,23 @@ BASH_WRITE_OPAQUE = re.compile(
     r"write_text\(|open\([^)]*['\"][wa]['\"]|\.writelines\(|shutil\.(?:copy|move)")
 
 
+def _expand_home(tok):
+    """A shell path with its home spelling expanded: `~`, `$HOME` and `${HOME}`,
+    the forms a command writes a memory path in most often, which a literal
+    `startswith("/")` test read as relative and resolved to nothing."""
+    tok = tok.replace('"', "").replace("'", "")     # `"$HOME/dir"/f.md` quotes mid-token
+    for pre in ("${HOME}", "$HOME"):
+        if tok == pre or tok.startswith(pre + "/"):
+            tok = str(HOME) + tok[len(pre):]
+    # os.path, not Path: an unknown `~user` stays literal, as the shell leaves it,
+    # where Path.expanduser raises and silently disables the guard for the command
+    return os.path.expanduser(tok) if tok.startswith("~") else tok
+
+
 def _cd_targets(command, cwd):
     """Directories this command may resolve a bare filename against."""
     roots = [cwd] if cwd else []
-    roots += re.findall(r"\bcd\s+([^\s;&|]+)", command)
+    roots += [_expand_home(d) for d in re.findall(r"\bcd\s+([^\s;&|]+)", command)]
     return roots
 
 
@@ -4121,7 +4140,7 @@ def bash_write_targets(command, cwd):
     a corpus and nothing at all from outside one.
     """
     def resolve(tok):
-        tok = tok.strip("'\"")
+        tok = _expand_home(tok)
         cands = ([tok] if tok.startswith("/")
                  else [str(Path(r) / tok) for r in _cd_targets(command, cwd)])
         for c in cands:
