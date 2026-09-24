@@ -36,4 +36,4 @@ Python 3.9 or later, standard library only. `locket find` ranks by meaning when 
 
 ## Releasing
 
-`scripts/release.sh X.Y.Z` stamps `__version__`, runs the selftests, tags and pushes, then moves the formula in [the tap](https://github.com/JACK-COM/homebrew-panoply) to the new tarball.
+`make version` (or `version-minor`, `version-major`) computes the next version from `__version__` and hands it to `scripts/release.sh X.Y.Z`, which stamps it, runs the selftests, tags and pushes, then moves the formula in [the tap](https://github.com/JACK-COM/homebrew-panoply) to the new tarball. `make test` runs the selftests alone.
