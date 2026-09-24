@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "locket"
+version = "0.1.0"
+description = "Keeps an AI agent's memory from holding the same fact twice."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = []
+
+[project.optional-dependencies]
+fastembed = ["fastembed"]
+
+[project.scripts]
+locket = "locket.locket:cli"
+
+[project.urls]
+Homepage = "https://github.com/JACK-COM/locket"
+
+[tool.setuptools.package-data]
+locket = ["INSTALL-locket.md"]
