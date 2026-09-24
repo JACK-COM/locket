@@ -21,7 +21,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import memscan  # noqa: E402
 
-__version__ = "0.1.1"                          # the one home: pyproject.toml and the formula's test read it
+__version__ = "0.1.2"                          # the one home: pyproject.toml and the formula's test read it
 
 BIN = Path(os.environ.get("LOCKET_BIN", str(Path.home() / ".local" / "bin")))
 # A package manager owns the command and moves the scripts on every upgrade: Homebrew's
@@ -77,7 +77,7 @@ VERBS = [
     ("doctor", "", "check every install step a machine can check, with the fix for each failure", None),
     ("mcp", "", "serve the checks over MCP on stdio, for a host without hooks", None),
     ("selftest", "", "both scripts' internal checks", None),
-    ("version", "", "print the version (also --version, -V)", None),
+    ("version", "", "print the version (also --version, -V, -v)", None),
     ("help", "find | scan | install", "the full help of either script, or the agent's install steps", None),
 ]
 HOOK_VERBS = ("hook", "bashguard", "grepassist", "deliver")   # PreToolUse entry points, JSON on stdin
@@ -620,7 +620,7 @@ def main(argv):
         _parser()[0].print_help()
         return 0 if len(argv) > 1 else 1
     verb, rest = argv[1], argv[2:]
-    if verb in ("--version", "-V", "version"):
+    if verb in ("--version", "-V", "-v", "version"):
         print(f"locket {__version__}"); return 0
     if verb == "help":
         which = rest[0] if rest else ""
