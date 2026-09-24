@@ -10,6 +10,7 @@ It checks structure. It cannot tell whether a fact is still true or whether two 
 
 ```
 brew tap jack-com/panoply
+brew trust --formula jack-com/panoply/locket
 brew install locket
 ```
 

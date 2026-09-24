@@ -22,7 +22,7 @@ One sentence you may give the user when you are done: *"Locket is installed: I n
 
 If you cannot run a command on this machine, you are on a hookless host: skip to Step 4 and take the MCP branch, then come back to Step 5 through the `locket_*` tools once the app has restarted. `locket_status` stands in for `doctor` there. Do not report a result for a command you could not run.
 
-- **Homebrew (macOS, Linux).** `brew tap jack-com/panoply` once, then `brew install locket`. Upgrades come with `brew upgrade`.
+- **Homebrew (macOS, Linux).** `brew tap jack-com/panoply` and `brew trust --formula jack-com/panoply/locket` once, then `brew install locket`; Homebrew refuses a formula from an untrusted tap. Upgrades come with `brew upgrade`.
 - **From the scripts.** Copy `memscan.py`, `memfind.py`, `locket.py`, `locket_mcp.py` and this file together into one stable directory (`~/.claude/scripts/` on Claude Code, `~/.hermes/scripts/` on Hermes); the scripts import each other from their own directory. If they already sit in one of those places, use them there, because two copies drift. On macOS files in Downloads are unreadable to an agent until the user grants access; if a read there is refused, ask the user to move them. Then run `python3 <that directory>/locket.py install`, which links `locket` into `~/.local/bin` (or `LOCKET_BIN`) and prints an `export` line when that directory is not on `PATH`. On Windows the interpreter is usually `python`, and an alias stands in for the link.
 
 Then run `locket doctor` and read it. It will fail on the hooks until Step 4; that is expected.
