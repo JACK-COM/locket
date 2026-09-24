@@ -1,3 +1,10 @@
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/locket-dark.svg">
+  <img src="docs/locket-light.svg" alt="Locket" width="112">
+</picture>
+</p>
+
 # Locket
 
 *Remember who you are.* One piece of [the Panoply](https://github.com/JACK-COM/homebrew-panoply).
