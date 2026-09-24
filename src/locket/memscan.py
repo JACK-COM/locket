@@ -2900,6 +2900,22 @@ def selftest():
     assert msg and not blocking and "cannot read" in msg, msg
     assert ledger_bash_decision(f"cat {hist}", None) == (None, False), "a read is nothing"
     assert ledger_bash_decision("echo hi >> other.csv", str(led)) == (None, False)
+    # a body counts only against the ledger its own pipeline writes
+    msg, blocking = ledger_bash_decision(f"printf '{good.strip()}\\n' >> {hist} && echo '# t' > a.md", None)
+    assert (msg, blocking) == (None, False), f"a second redirect is not the ledger's content: {msg}"
+    msg, blocking = ledger_bash_decision(f"printf 'not-a-date,t,s,,,,,\\n' | tee -a {hist}; echo '# t' > a.md", None)
+    assert blocking and "date" in msg and "header" not in msg, msg
+    msg, blocking = ledger_bash_decision(f"echo '# t' > a.md; python3 gen.py >> {hist}", None)
+    assert msg and not blocking and "cannot read" in msg, "an unrelated echo does not vouch for an opaque append"
+    msg, blocking = ledger_bash_decision(f"cat <<'EOF' > {hist}\n{long_row}EOF\n", None)
+    assert blocking and "cap 90" in msg, "a redirect after the heredoc opener is the same pipeline"
+    hist2 = led / "HISTORY-Other-Sessions.csv"; hist2.write_text(hdr)
+    msg, blocking = ledger_bash_decision(
+        f"python3 gen.py >> {hist} && printf 'not-a-date,t,s,,,,,\\n' >> {hist2}", None)
+    assert blocking and "date" in msg, "an opaque write first never excuses a readable bad row after it"
+    msg, blocking = ledger_bash_decision(f"cat <<'EOF' \\\n  >> {hist}\n{long_row}EOF\n", None)
+    assert blocking and "cap 90" in msg, "a redirect on a continued opener line is the same pipeline"
+    hist2.unlink()
     # a manifest overrides the built-in for its store, and governs another CSV
     (led / MANIFEST).write_text(json.dumps({"ledgers": [
         {"path": "HISTORY-*-Sessions.csv", "caps": {"summary": 20}},
@@ -4008,53 +4024,82 @@ def source_row_decision(path, tool_input, prior, append=False):
 
 
 _QUOTED = re.compile(r"""(?:echo|printf)\s+(?:-[a-zA-Z]+\s+)*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
+_CSV_REDIRECT = re.compile(r"(?:>>?|\btee\s+(?:-a\s+)?)\s*(?P<p>[^\s;&|]+\.csv)")
+# a pipeline boundary: a pipe stays inside, because `printf ... | tee -a x.csv` is one write,
+# and so does a backslash-continued newline
+_PIPELINE_END = re.compile(r"\|\||&&|;|(?<!\\)\n")
+
+
+def _pipeline_around(command, start, end):
+    """The text of the pipeline holding command[start:end]."""
+    before = [m.end() for m in _PIPELINE_END.finditer(command, 0, start)]
+    after = _PIPELINE_END.search(command, end)
+    return command[before[-1] if before else 0:after.start() if after else len(command)]
 
 
 def ledger_bash_decision(command, cwd):
     """(message, blocking) for a shell command appending to a schema-governed CSV.
 
     A heredoc body or an echo/printf string is read as rows and checked, and a
-    violation blocks. A redirect into the ledger whose rows cannot be read off
-    the command (a script, a variable) warns instead, because the check cannot
+    violation blocks. Each body counts only against the ledger its own pipeline
+    redirects into, so a second redirect elsewhere in a compound command is never
+    read as the ledger's rows. A redirect into the ledger whose rows cannot be read
+    off the command (a script, a variable) warns instead, because the check cannot
     decide it, and names the sweep that can."""
     if ".csv" not in command:
         return None, False
-    targets = {}
-    for m in re.finditer(r"(?:>>?|\btee\s+(?:-a\s+)?)\s*(?P<p>[^\s;&|]+\.csv)", command):
+    targets, owner = {}, {}
+    for m in _CSV_REDIRECT.finditer(command):
         tok = m.group("p").strip("'\"")
         cands = [tok] if tok.startswith("/") else [str(Path(r) / tok) for r in _cd_targets(command, cwd)]
         for c in cands:
             schema, glob = ledger_schema_for(c)
             if schema is not None:
+                owner[tok] = c
                 targets[c] = (schema, glob)
                 break
     if not targets:
         return None, False
-    bodies = []
-    lines, i = command.split("\n"), 0
+    # keyed by resolved path, so two spellings of one ledger share one verdict
+    bodies = {c: [] for c in targets}
+
+    def attribute(pipeline, body):
+        for c in {owner.get(m.group("p").strip("'\"")) for m in _CSV_REDIRECT.finditer(pipeline)}:
+            if c in bodies:
+                bodies[c].append(body)
+
+    lines, i, starts = command.split("\n"), 0, []
+    pos = 0
+    for line in lines:
+        starts.append(pos); pos += len(line) + 1
     while i < len(lines):
         m = HEREDOC.search(lines[i])
         if m:
-            delim, body = m.group(1), []
+            at, delim, body = starts[i], m.group(1), []
             i += 1
             while i < len(lines) and lines[i].strip() != delim:
                 body.append(lines[i]); i += 1
-            bodies.append("\n".join(body))
+            # the opener's pipeline in the full command, so a redirect on a continued line counts
+            attribute(_pipeline_around(command, at + m.start(), at + m.end()), "\n".join(body))
         i += 1
     for m in _QUOTED.finditer(command):
-        bodies.append((m.group(1) if m.group(1) is not None else m.group(2))
-                      .replace("\\n", "\n").replace('\\"', '"'))
+        attribute(_pipeline_around(command, m.start(), m.end()),
+                  (m.group(1) if m.group(1) is not None else m.group(2))
+                  .replace("\\n", "\n").replace('\\"', '"'))
+    # every target is checked before any warns: an opaque write earlier in the command
+    # must never stand in for a readable, violating one later
     for path, (schema, glob) in targets.items():
         header = _ledger_header(path)
         findings = []
-        for body in bodies:
+        for body in bodies[path]:
             if header is None:
                 findings += check_ledger_text(schema, body)
             else:
                 findings += check_ledger_text(schema, body, header)
         if findings:
             return ledger_message(path, glob, schema, findings, "bashguard"), True
-        if not bodies:
+    for path in targets:
+        if not bodies[path]:
             return (f"This appends to a schema-governed ledger ({Path(path).name}) with rows the "
                     f"guard cannot read off the command, so the caps go unchecked here. Run "
                     f"`locket ledgers` after it, or write the row through Write/Edit, "
