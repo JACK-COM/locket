@@ -33,3 +33,7 @@ locket doctor                                 is the install healthy
 ## Requirements
 
 Python 3.9 or later, standard library only. `locket find` ranks by meaning when an embedder answers: [ollama](https://ollama.com) serving `nomic-embed-text`, or `fastembed` in a venv at `~/.locket/venv`. Without one it falls back to word overlap and says so. Supported hosts are Claude Code, Hermes Agent and any MCP client (`locket mcp`). Tested on macOS.
+
+## Releasing
+
+`scripts/release.sh X.Y.Z` stamps `__version__`, runs the selftests, tags and pushes, then moves the formula in [the tap](https://github.com/JACK-COM/homebrew-panoply) to the new tarball.
