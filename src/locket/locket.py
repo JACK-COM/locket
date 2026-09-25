@@ -30,7 +30,7 @@ BIN = Path(os.environ.get("LOCKET_BIN", str(Path.home() / ".local" / "bin")))
 # path survives an upgrade, and leaves the link in BIN to the package manager.
 PACKAGED = os.environ.get("LOCKET_PACKAGED") == "1"
 LINKS = ("locket", "memscan", "memfind")      # the last two are older spellings this replaces
-SCRIPTS = ("memscan.py", "memfind.py", "locket.py", "locket_mcp.py", "trigger.py")
+SCRIPTS = ("memscan.py", "memfind.py", "locket.py", "locket_mcp.py", "trigger.py", "usage.py")
 
 # memfind verbs, in memfind's own spelling; `find` is the bare statement form.
 FIND = {"find": None, "siblings": "--siblings", "index": "--index", "embedder": "--embedder"}
@@ -66,6 +66,11 @@ VERBS = [
      "put the row's question to the agent; `check` lints the rows files, `schema` prints their schema",
      "locket trigger check                  the rows that can fire from here\n"
      "locket trigger check council          one store's rows"),
+    ("usage", "[today | week | month | record] [--by project|model|day] [--json]",
+     "tokens Claude Code and Hermes spent, per source and project, against a typical day; "
+     "keeps a ledger that outlives the transcripts",
+     "locket usage                          the last 7 days\n"
+     "locket usage month --by model         30 days, per model"),
     ("corpora", "", "every store on this machine", None),
     ("init", "<dir> [--parent <corpus> [--name <label>]]", "make a folder of markdown a store", "locket init ~/notes"),
     ("migrate", "[<dir>|all]", "rename an older memfind.json manifest to locket.json", "locket migrate all"),
@@ -76,15 +81,16 @@ VERBS = [
      "settings.json, --desktop registers the MCP server with Claude Desktop" % BIN,
      "locket install --hooks"),
     ("uninstall", "[--yes] [--purge] [--dry-run]",
-     "remove the command, ~/.locket, every cache, and the shared venv when no other piece uses it; with --purge every manifest; print what is left",
+     "remove the command, ~/.locket, every cache, and the shared venv when no other piece uses it; "
+     "with --purge every manifest and the usage ledger; print what is left",
      "locket uninstall --dry-run"),
     ("status", "", "where the command points and what it can reach", None),
     ("doctor", "", "check every install step a machine can check, with the fix for each failure", None),
     ("mcp", "", "serve the checks over MCP on stdio, for a host without hooks", None),
     ("selftest", "", "both scripts' internal checks", None),
     ("version", "", "print the version (also --version, -V, -v)", None),
-    ("help", "find | scan | trigger | install",
-     "the full help of either script, how trigger rows work, or the agent's install steps", None),
+    ("help", "find | scan | trigger | usage | install",
+     "the full help of either script, how trigger rows or usage work, or the agent's install steps", None),
 ]
 VERB_NAMES = frozenset(v[0] for v in VERBS)
 HOOK_VERBS = ("hook", "bashguard", "grepassist", "deliver")   # PreToolUse entry points, JSON on stdin
@@ -150,6 +156,8 @@ def _ours(link):
 CLAUDE_HOOKS = (("Write|Edit", "hook", 10), ("Bash", "bashguard", 5), ("Grep|Bash", "grepassist", 10))
 # `locket trigger` reads every tool call and every prompt, since a row can name any tool.
 CLAUDE_TRIGGER = (("PreToolUse", "*"), ("UserPromptSubmit", None))
+# `locket usage hook` records the ledger as each session ends, before its transcript can age out.
+CLAUDE_USAGE = ("SessionEnd", "usage hook", 30)
 # Where Claude Desktop keeps its config: macOS and Windows only. Elsewhere
 # it is None, so `--desktop` refuses rather than write a file Desktop never reads.
 DESKTOP_CONFIG = (Path.home() / "Library/Application Support/Claude/claude_desktop_config.json" if sys.platform == "darwin"
@@ -184,7 +192,7 @@ def _merge_json(path, merge):
 
 def _is_locket_hook(cmd, verb=None):
     """A hook command that runs Locket: memscan.py by path, or the `locket` command."""
-    verbs = [verb] if verb else (*HOOK_VERBS, "trigger")
+    verbs = [verb] if verb else (*HOOK_VERBS, "trigger", CLAUDE_USAGE[1])
     cmd = cmd.replace("'", "").replace('"', "").rstrip()   # a quoted path, as _hook_command writes one
     return any(f"memscan.py {v}" in cmd or cmd.endswith((f"locket {v}", f"locket.py {v}")) for v in verbs)
 
@@ -197,7 +205,7 @@ def _command():
 
 def _hook_command(verb):
     cmd = _command()
-    script = HERE / ("locket.py" if verb == "trigger" else "memscan.py")
+    script = HERE / ("locket.py" if verb in ("trigger", CLAUDE_USAGE[1]) else "memscan.py")
     return f"{shlex.quote(cmd)} {verb}" if cmd else f"python3 {script} {verb}"
 
 
@@ -219,17 +227,26 @@ def _add_claude_hooks(data):
         entry = {"hooks": [{"type": "command", "timeout": 5, "command": _hook_command("trigger")}]}
         entries.append({"matcher": matcher, **entry} if matcher else entry)
         added.append(f"trigger ({event})")
+    event, verb, timeout = CLAUDE_USAGE
+    entries = data["hooks"].setdefault(event, [])
+    if not _event_command(entries, verb):
+        entries.append({"hooks": [{"type": "command", "timeout": timeout, "command": _hook_command(verb)}]})
+        added.append(f"usage ({event})")
     return added
 
 
-def _trigger_command(entries):
-    """The registered `locket trigger` command among one event's hook entries, or None."""
+def _event_command(entries, verb):
+    """The registered Locket `verb` command among one event's hook entries, or None."""
     for e in entries if isinstance(entries, list) else []:
         for h in (e.get("hooks") or []) if isinstance(e, dict) else []:
             cmd = str(h.get("command", "")) if isinstance(h, dict) else ""
-            if _is_locket_hook(cmd, "trigger"):
+            if _is_locket_hook(cmd, verb):
                 return cmd
     return None
+
+
+def _trigger_command(entries):
+    return _event_command(entries, "trigger")
 
 
 # Claude Code runs a hook through the user's shell, so `python3` survives an interpreter
@@ -410,11 +427,16 @@ def cmd_uninstall(argv):
     # an older install's venv stays only while it is the one in use; beside ~/.panoply/venv
     # nothing reads it, and it goes with ~/.locket
     keep = venv.is_dir() and venv == _embed.VENV and shared != venv
+    # the usage ledger holds days no source can give back, so only --purge takes it
+    import usage
+    ledger = usage.LEDGER if usage.LEDGER.is_file() and usage.LEDGER.parent == locket_dir and not purge else None
+    spare = [p for p in (venv if keep else None, ledger) if p]
     print("uninstall will remove:")
     for l in links:
         print(f"  link      {l}")
     if locket_dir.is_dir():
-        print(f"  directory {locket_dir}  (registry, schema{'; its venv stays' if keep else ''})")
+        stays = " and ".join(n for n, p in (("its venv", keep), ("the usage ledger", ledger)) if p)
+        print(f"  directory {locket_dir}  (registry, schema{f'; {stays} stays' if stays else ''})")
     if shared:
         print(f"  directory {shared}  (the fastembed venv; no other Panoply piece is on PATH)")
     for c in caches:
@@ -439,11 +461,11 @@ def cmd_uninstall(argv):
 
     for l in links:
         l.unlink(); print(f"removed {l}")
-    if locket_dir.is_dir() and keep:
+    if locket_dir.is_dir() and spare:
         for child in locket_dir.iterdir():
-            if child != venv:
+            if child not in spare:
                 shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
-        print(f"removed {locket_dir}, all but {venv}")
+        print(f"removed {locket_dir}, all but {', '.join(map(str, spare))}")
     elif locket_dir.is_dir():
         shutil.rmtree(locket_dir); print(f"removed {locket_dir}")
     if shared and shared.is_dir():
@@ -600,6 +622,22 @@ def _selftest_uninstall():
                            env={"HOME": t, "PATH": "/usr/bin:/bin", "MEMFIND_NO_AUTOSTART": "1"})
         assert " checks: " in r.stdout and "Traceback" not in r.stderr, f"doctor did not finish:\n{r.stderr[-600:]}"
         assert "triggers" in r.stdout, "doctor skipped a host rows file"
+        assert "usage" in r.stdout and "never recorded" in r.stdout, "doctor skipped the usage row"
+    run = lambda t, *a: subprocess.run([sys.executable, str(HERE / "locket.py"), *a], capture_output=True, text=True,
+                                       env={"HOME": t, "PATH": "/usr/bin:/bin", "MEMFIND_NO_AUTOSTART": "1"})
+    for purge in (False, True):     # the ledger survives uninstall, the SessionEnd hook does not
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / ".claude").mkdir()
+            (Path(t) / ".locket").mkdir()
+            (Path(t) / ".locket/usage.csv").write_text("date\n")
+            r = run(t, "install", "--hooks")
+            hooks = json.loads((Path(t) / ".claude/settings.json").read_text())["hooks"]
+            assert _event_command(hooks.get("SessionEnd"), "usage hook"), f"install registered no usage hook:\n{r.stdout}"
+            r = run(t, "uninstall", "--yes", *(["--purge"] if purge else []))
+            hooks = json.loads((Path(t) / ".claude/settings.json").read_text())["hooks"]
+            assert not _event_command(hooks.get("SessionEnd"), "usage hook"), "uninstall left the usage hook"
+            assert (Path(t) / ".locket/usage.csv").is_file() != purge, \
+                f"uninstall {'kept' if purge else 'removed'} the usage ledger with purge={purge}\n{r.stdout}{r.stderr}"
 
 
 def _probe_trigger(cmd):
@@ -716,6 +754,26 @@ def cmd_doctor():
                     ("stayed silent on a known row" if probe is False else f"failed: {probe}"),
                     f"run it by hand: {_trigger_command(events.get('PreToolUse'))}")
 
+    import time
+    import usage
+    if memscan.CLAUDE.is_dir():
+        try:
+            events = (json.loads(settings.read_text()).get("hooks") or {}) if settings.is_file() else {}
+            registered = _event_command(events.get(CLAUDE_USAGE[0]), CLAUDE_USAGE[1])
+        except (OSError, json.JSONDecodeError, ValueError, AttributeError):
+            registered = None
+        age = (time.time() - usage.LEDGER.stat().st_mtime) / 86400 if usage.LEDGER.is_file() else None
+        seen = "never recorded" if age is None else f"last recorded {age:.1f} days ago"
+        stale = registered and (p := _script_in(registered)) and not p.is_file()
+        if stale:
+            row("fail", "usage", f"the SessionEnd hook names a missing script: {p}",
+                "locket uninstall --dry-run, then remove the stale entry and locket install --hooks")
+        elif not registered:
+            row("warn", "usage", f"{seen}; nothing records it as a session ends, so a day older than "
+                "Claude Code keeps its transcripts is lost unless `locket usage` ran within it", "locket install --hooks")
+        else:
+            row("ok", "usage", f"recorded as each session ends; {seen}")
+
     hermes_cfg = memscan.HERMES / "config.yaml"
     if hermes_cfg.is_file():
         text = hermes_cfg.read_text(errors="replace")
@@ -779,7 +837,7 @@ def main(argv):
         print(f"locket {__version__}"); return 0
     if verb == "help":
         which = rest[0] if rest else ""
-        if which in _parser()[1].choices and which not in ("find", "install", "trigger"):
+        if which in _parser()[1].choices and which not in ("find", "install", "trigger", "usage"):
             _parser()[1].choices[which].print_help(); return 0
         if which in ("find", "memfind"):
             return _memfind().main(["memfind.py", "--help"])
@@ -789,6 +847,10 @@ def main(argv):
             import trigger
             _parser()[1].choices["trigger"].print_help()
             print("\n" + trigger.__doc__.split("\n\n", 1)[1].rstrip()); return 0
+        if which == "usage":
+            import usage
+            _parser()[1].choices["usage"].print_help()
+            print("\n" + usage.__doc__.split("\n\n", 1)[1].rstrip()); return 0
         if which == "install":              # the agent's half of the install, shipped beside the scripts
             doc = HERE / "INSTALL-locket.md"
             if not doc.is_file():
@@ -840,7 +902,8 @@ def main(argv):
                     os.chdir(here)
             _selftest_uninstall()
             import trigger
-            rc = trigger.selftest()
+            import usage
+            rc = trigger.selftest() or usage.selftest()
         return rc or _memfind().main(["memfind.py", "--selftest"])
     if verb == "install":
         return cmd_install(rest)
@@ -862,6 +925,9 @@ def main(argv):
     if verb == "trigger":
         import trigger
         return trigger.main(rest)
+    if verb == "usage":
+        import usage
+        return usage.hook() if rest == ["hook"] else usage.main(rest)
     _parser()[0].print_usage(sys.stderr)
     print(f"locket: unknown command {verb!r}; `locket -h` lists them", file=sys.stderr)
     return 1

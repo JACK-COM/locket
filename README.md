@@ -15,6 +15,8 @@ It checks structure. It cannot tell whether a fact is still true or whether two 
 
 It also asks a question at the moment a mistake is about to repeat. A store's `triggers.json` holds rows such as "this command discards uncommitted work", each matched against a tool call or a prompt and pointing at the file that owns the fact; `locket trigger` puts the row's question to the agent before the call runs, or refuses the call when the row says to.
 
+And it counts what the agents spent. `locket usage` reads the token counts Claude Code and Hermes already keep and copies them into a ledger that outlives them, because Claude Code deletes a transcript after 30 days and Hermes prunes a session after 90. It reports each source and project against a typical day, and how much of the input came from the cache. Tokens only: no prices, and no plan limits, since neither has a source Locket can check. [ccusage](https://github.com/ccusage/ccusage) does more for Claude Code alone.
+
 ## Install
 
 ```
@@ -35,10 +37,11 @@ locket audit                                  claims two files both state
 locket graduated && locket links && locket across
                                               the session-close checks
 locket trigger check                          lint the trigger rows that can fire from here
+locket usage                                  tokens spent in the last 7 days, against a typical day
 locket doctor                                 is the install healthy
 ```
 
-`locket -h` lists every command; `locket help scan`, `locket help find` and `locket help trigger` explain what a store is, how to read a ranking and how trigger rows work.
+`locket -h` lists every command; `locket help scan`, `locket help find`, `locket help trigger` and `locket help usage` explain what a store is, how to read a ranking, how trigger rows work and what the usage report counts.
 
 ## Requirements
 
