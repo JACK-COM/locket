@@ -70,12 +70,15 @@ hooks:
       matcher: "search_files|terminal"
       timeout: 10
       fail_closed: false
+    - command: "$LOCKET trigger"
+      timeout: 5
+      fail_closed: false
   pre_llm_call:
-    - command: "$LOCKET deliver"
+    - command: "$LOCKET trigger"
       timeout: 5
 ```
 
-Hermes asks the user once, at the next launch, to approve each new hook; tell them to expect it, and do not set `hooks_auto_accept` for them. A Hermes tool hook can block a write but cannot add advice to one, so advice is parked and `deliver` hands it to you on your next model call; register all four or the advice is lost.
+Hermes asks the user once, at the next launch, to approve each new hook; tell them to expect it, and do not set `hooks_auto_accept` for them. A Hermes tool hook can refuse a call but cannot add advice to one, so where Claude Code would add advice, Locket refuses the call once, leading with how to proceed: repeat the same call unchanged. `locket trigger` is silent until `~/.hermes/triggers.json` holds rows (`locket help trigger`); on `pre_llm_call` its prompt rows reach you with the message they matched. A config written for an older Locket registers `$LOCKET deliver` on `pre_llm_call`, which now does nothing; replace it with the `trigger` entry.
 
 **Claude Desktop, or any host that can attach a local MCP server.** `locket install --desktop` registers the server by absolute path, since the app spawns servers with a minimal `PATH` where a bare `python3` can be an installer stub that hangs. Where you cannot run it, add `"locket": {"command": "<the absolute path of locket>", "args": ["mcp"]}` under `mcpServers` by hand. Ask the user to restart the app once, then call `locket_init` on any directory from Step 2. Nothing fires by itself on such a host: put one line in the project's instructions, *before writing a durable fact to memory, call `locket_check_before_write`, and run `locket_audit`, `locket_graduated` and `locket_links` at session close*. Pass `append: true` when the text goes on the end of a file and `old_text` when it is an edit. The app shares one server across its conversations until it restarts.
 

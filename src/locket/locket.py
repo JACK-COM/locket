@@ -11,6 +11,7 @@ by absolute path, which is why this file adds nothing they depend on.
 
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -94,6 +95,9 @@ VERBS = [
 ]
 VERB_NAMES = frozenset(v[0] for v in VERBS)
 HOOK_VERBS = ("hook", "bashguard", "grepassist", "deliver")   # PreToolUse entry points, JSON on stdin
+# The (event, verb) entries Hermes's config.yaml needs. `deliver` is retired and does nothing.
+HERMES_HOOKS = (("pre_tool_call", "hook"), ("pre_tool_call", "bashguard"), ("pre_tool_call", "grepassist"),
+                ("pre_tool_call", "trigger"), ("pre_llm_call", "trigger"))
 
 EPILOG = """examples:
   locket find "the fact you are about to write" council
@@ -393,11 +397,34 @@ def _settings_hooks(path):
     return drop, data
 
 
-def _grep_lines(path, needle):
+def _hermes_lines(path):
+    """`path:line` for every Hermes hook line that runs Locket, by script or command."""
     try:
-        return [f"{path}:{i}" for i, l in enumerate(path.read_text().splitlines(), 1) if needle in l]
+        return [f"{path}:{i}" for i, l in enumerate(path.read_text().splitlines(), 1)
+                if (c := re.search(r"command:\s*(.+?)\s*$", l)) and _is_locket_hook(c.group(1))]
     except OSError:
         return []
+
+
+def _hermes_hooks(text):
+    """{event: [command]} from config.yaml's top-level `hooks:` block, read by indentation
+    in the shape Step 4 prints, so doctor needs no YAML parser."""
+    out, inside, event, depth = {}, False, None, None
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[0].isspace():
+            inside, event, depth = line.rstrip() == "hooks:", None, None
+            continue
+        if not inside:
+            continue
+        indent = len(line) - len(line.lstrip())
+        depth = indent if depth is None else depth
+        if indent == depth and (m := re.fullmatch(r"\s+([\w-]+):\s*", line)):
+            event = m.group(1)
+        elif (c := re.search(r"command:\s*(.+?)\s*$", line)) and event:
+            out.setdefault(event, []).append(c.group(1).strip("'\""))
+    return out
 
 
 def cmd_uninstall(argv):
@@ -409,7 +436,7 @@ def cmd_uninstall(argv):
     settings = memscan.CLAUDE / "settings.json"
     hook_lines, new_settings = _settings_hooks(settings) if settings.is_file() else ([], None)
     hermes_cfg = memscan.HERMES / "config.yaml"
-    hermes_lines = _grep_lines(hermes_cfg, "memscan.py") if hermes_cfg.is_file() else []
+    hermes_lines = _hermes_lines(hermes_cfg) if hermes_cfg.is_file() else []
     desktop = DESKTOP_CONFIG
     mcp = False
     if desktop and desktop.is_file():
@@ -640,23 +667,26 @@ def _selftest_uninstall():
                 f"uninstall {'kept' if purge else 'removed'} the usage ledger with purge={purge}\n{r.stdout}{r.stderr}"
 
 
-def _probe_trigger(cmd):
+def _probe_trigger(cmd, hermes=False):
     """Run a registered `trigger` command against a throwaway home whose host store holds
     one row the payload matches. True when the row's question came back, False when the
-    command was silent, a string when it failed to run."""
+    command was silent, a string when it failed to run. On Hermes the row refuses the call
+    once, so the answer is exit 2 with the question in the block message."""
     import subprocess, tempfile
     with tempfile.TemporaryDirectory() as t:
-        (Path(t) / ".claude").mkdir()
-        (Path(t) / ".claude/triggers.json").write_text(json.dumps({"rows": [
+        home = Path(t) / (".hermes" if hermes else ".claude")
+        home.mkdir()
+        (home / "triggers.json").write_text(json.dumps({"rows": [
             {"id": "doctor-probe", "tools": "Bash", "content": "locket-doctor-probe", "question": "probe"}]}))
-        payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": t,
+        payload = json.dumps({"hook_event_name": "pre_tool_call" if hermes else "PreToolUse",
+                              "tool_name": "terminal" if hermes else "Bash", "cwd": t, "session_id": "",
                               "tool_input": {"command": "echo locket-doctor-probe"}})
-        try:
+        try:        # TMPDIR too: the refusal record must not outlive the probe
             r = subprocess.run(cmd, shell=True, input=payload, capture_output=True, text=True, timeout=30,
-                               env={**os.environ, "HOME": t})
+                               env={**os.environ, "HOME": t, "TMPDIR": t})
         except subprocess.TimeoutExpired:
             return "timed out after 30s"
-        if r.returncode != 0:
+        if r.returncode != (2 if hermes else 0):
             return (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1]
         return "[doctor-probe] probe" in r.stdout
 
@@ -776,11 +806,31 @@ def cmd_doctor():
 
     hermes_cfg = memscan.HERMES / "config.yaml"
     if hermes_cfg.is_file():
-        text = hermes_cfg.read_text(errors="replace")
-        lines = text.splitlines()
-        missing = [v for v in HOOK_VERBS if not any(_is_locket_hook(ln, v) for ln in lines)]
-        row("warn", "hermes hooks", f"not in config.yaml: {', '.join(missing)}", "`locket help install`, Step 4") \
-            if missing else row("ok", "hermes hooks", "all four registered")
+        events = _hermes_hooks(hermes_cfg.read_text(errors="replace"))
+        missing = [f"{v} on {e}" for e, v in HERMES_HOOKS
+                   if not any(_is_locket_hook(c, v) for c in events.get(e, []))]
+        retired = any(_is_locket_hook(c, "deliver") for cmds in events.values() for c in cmds)
+        if missing:
+            row("warn", "hermes hooks", f"not in config.yaml: {', '.join(missing)}"
+                + ("; `locket deliver` is retired, remove it" if retired else ""), "`locket help install`, Step 4")
+        elif retired:
+            row("warn", "hermes hooks", "`locket deliver` is retired and does nothing", "remove its pre_llm_call entry")
+        else:
+            row("ok", "hermes hooks", "all five registered")
+        cmd = next((c for c in events.get("pre_tool_call", []) if _is_locket_hook(c, "trigger")), None)
+        hermes_rows = trigger.rows_file(memscan.HERMES)
+        problems = trigger.findings(memscan.HERMES)
+        if problems:
+            row("fail", "hermes triggers", f"{len(problems)} problem(s) in {hermes_rows}: {problems[0]}",
+                "locket trigger check hermes")
+        elif hermes_rows.is_file() and cmd:
+            probe = _probe_trigger(cmd, hermes=True)
+            if probe is True:
+                row("ok", "hermes triggers", f"{hermes_rows} lints clean; the hook refuses a call on a known row")
+            else:
+                row("fail", "hermes triggers", "registered, but the hook " +
+                    ("stayed silent on a known row" if probe is False else f"failed: {probe}"),
+                    f"run it by hand: {cmd}")
 
     if DESKTOP_CONFIG is not None and DESKTOP_CONFIG.is_file():
         try:
@@ -877,6 +927,19 @@ def main(argv):
             live_trigger = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'locket.py'))} trigger"
             assert _probe_trigger(live_trigger) is True, "doctor's trigger probe does not fire through this locket.py"
             assert _probe_trigger("true") is False, "doctor's trigger probe reads a silent command as firing"
+            assert _probe_trigger(live_trigger, hermes=True) is True, \
+                "doctor's trigger probe does not fire through this locket.py on Hermes"
+            assert _probe_trigger("echo '[doctor-probe] probe'", hermes=True) is not True, \
+                "doctor's Hermes trigger probe reads a call that was not refused as firing"
+            assert _probe_trigger("exit 2", hermes=True) is False, \
+                "doctor's Hermes trigger probe reads a bare refusal as firing"
+            yaml = ('model: x\nhooks:\n  pre_tool_call:\n    - command: "/opt/homebrew/bin/locket hook"\n'
+                    '      matcher:\n        nested: x\n    - command: /opt/homebrew/bin/locket trigger\n'
+                    '  pre_llm_call:\n    - command: "/opt/homebrew/bin/locket trigger"\n'
+                    'other:\n  pre_tool_call:\n    - command: "locket bashguard"\n')
+            assert _hermes_hooks(yaml) == {"pre_tool_call": ["/opt/homebrew/bin/locket hook",
+                                                             "/opt/homebrew/bin/locket trigger"],
+                                           "pre_llm_call": ["/opt/homebrew/bin/locket trigger"]}, _hermes_hooks(yaml)
             assert isinstance(_probe_hook(f"{shlex.quote(sys.executable)} /nonexistent/memscan.py hook"), str), \
                 "doctor's probe reads a missing script as firing"
             import contextlib

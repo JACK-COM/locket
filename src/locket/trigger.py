@@ -7,9 +7,16 @@ tool call or a prompt matches it, the row's question is put in front of the agen
 the call runs, and a `block` row refuses the call until its escape hatch is used.
 
 Rows live in a store's `triggers.json`, or the file its manifest names under `triggers`.
-The host's own store (Claude Code's `~/.claude`) fires everywhere; any other store fires
-when the working directory is inside it. `locket trigger check` lints every such file, and
-`locket trigger schema` prints every row key with what it does.
+The host's own store (Claude Code's `~/.claude`, Hermes's `~/.hermes`) fires everywhere;
+any other store fires when the working directory is inside it. `locket trigger check`
+lints every such file, and `locket trigger schema` prints every row key with what it does.
+
+A row names Claude Code's tools, and Hermes's are mapped onto them (`terminal` is `Bash`,
+`write_file` and `patch` are `Write` and `Edit`, `read_file` is `Read`); a Hermes tool
+with no Claude Code twin is matched by its own name. Hermes has no way to add advice to a
+tool call, so there a row that does not block refuses the call once instead: the agent
+reads the question, and the same call repeated passes. A prompt row answers `pre_llm_call`
+and reaches the model with the message it matched.
 
 A rows file's cheapness is its failure mode: a nudge the agent has learned to skim is no
 nudge. So a file holds at most `cap` rows (default 12) and the hook names any beyond it
@@ -21,6 +28,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import memscan
@@ -35,8 +43,10 @@ ROW_SCHEMA = {
     "required": ["id", "tools", "content", "question"],
     "properties": {
         "id": {"type": "string", "description": "Short name, printed in brackets before the question."},
-        "tools": {"type": "string", "description": "Regex that must match the whole tool name; "
-                                                   "`UserPromptSubmit` matches the user's prompt instead."},
+        "tools": {"type": "string", "description": "Regex that must match the whole tool name, in Claude "
+                                                   "Code's names, which Hermes's tools are mapped onto; a Hermes "
+                                                   "name also matches. `UserPromptSubmit` matches the user's "
+                                                   "prompt instead."},
         "content": {"type": "string", "description": "Regex searched over the tool input's strings, or the prompt."},
         "question": {"type": "string", "description": "What the agent is asked at that moment."},
         "cwd": {"type": "string", "description": "Regex the working directory must contain."},
@@ -44,10 +54,12 @@ ROW_SCHEMA = {
         "unless": {"type": "string", "description": "Regex over the same text that silences the row: the "
                                                     "right form, or a stated decision, is already there."},
         "unless_transcript": {"type": "string", "description": "Regex that silences the row for the rest of "
-                                                               "the session once it appears in the transcript."},
+                                                               "the session once it appears in the transcript "
+                                                               "(on Hermes, in a stored message or tool call)."},
         "ignorecase": {"type": "boolean", "description": "Match `content` without case."},
         "block": {"type": "boolean", "description": "Refuse the tool call (exit 2) rather than add context; "
-                                                   "the question must name the escape hatch. Ignored on a prompt."},
+                                                   "the question must name the escape hatch. Ignored on a prompt. "
+                                                   "On Hermes a row without it refuses the call once."},
         "everywhere": {"type": "boolean", "description": "Fire under `quiet_under` too."},
         "owner": {"type": "string", "description": "The file owning this row's fact, store-relative or "
                                                    "absolute, or `<file>.csv#<label>` for rows of a reference "
@@ -118,10 +130,57 @@ def _transcript_has(path, pattern):
         return False
 
 
-def matches(row, tool, cwd, tool_input, transcript=None):
-    """Conjunctive over whatever the row specifies; the transcript is read last, only
-    after the cheap matches pass."""
-    if not re.fullmatch(row["tools"], tool):
+def _session_has(db, session_id, pattern):
+    """`_transcript_has` for Hermes, whose session lives in state.db: True when a stored
+    message or tool call of this session carries `pattern`, "not yet" on any failure."""
+    if not session_id or not pattern or not Path(db).is_file():
+        return False
+    try:
+        import sqlite3
+        rx = re.compile(pattern)
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+        try:
+            rows = con.execute("select content, tool_calls from messages where session_id=?",
+                               (session_id,)).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return False
+    return any(isinstance(v, str) and rx.search(v) for r in rows for v in r)
+
+
+def _seen(payload, host, pattern):
+    """Whether this session already carries `pattern`, from whichever record the host keeps."""
+    if payload.get("transcript_path"):
+        return _transcript_has(payload["transcript_path"], pattern)
+    if payload.get("_host") == "hermes":
+        return _session_has(Path(host) / "state.db", payload.get("session_id"), pattern)
+    return False
+
+
+def _hermes(payload):
+    """A Hermes payload in the shape `fire` reads; any other payload unchanged. A tool
+    event is normalised as every Locket hook normalises it, keeping the Hermes tool name;
+    `pre_llm_call` carries the user's message under `extra` and is read as a prompt."""
+    if "_host" in payload:
+        return payload
+    event = payload.get("hook_event_name")
+    if event == "pre_llm_call":
+        extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+        msg = extra.get("user_message")
+        if isinstance(msg, list):           # multimodal: the text parts
+            msg = " ".join(p["text"] for p in msg if isinstance(p, dict) and isinstance(p.get("text"), str))
+        return dict(payload, hook_event_name="UserPromptSubmit", _host="hermes",
+                    prompt=msg if isinstance(msg, str) else "")
+    if event == "pre_tool_call":
+        return dict(memscan.normalise(payload), _hermes_tool=payload.get("tool_name"))
+    return payload
+
+
+def matches(row, tools, cwd, tool_input, seen=lambda pattern: False):
+    """Conjunctive over whatever the row specifies; `tools` is every name the call goes by,
+    and `seen` reads the session last, only after the cheap matches pass."""
+    if not any(re.fullmatch(row["tools"], t) for t in tools):
         return False
     if row.get("cwd") and not re.search(row["cwd"], cwd):
         return False
@@ -130,7 +189,7 @@ def matches(row, tool, cwd, tool_input, transcript=None):
         return False
     if row.get("unless") and re.search(row["unless"], hay):
         return False
-    return not _transcript_has(transcript, row.get("unless_transcript"))
+    return not (row.get("unless_transcript") and seen(row["unless_transcript"]))
 
 
 def _quiet(cwd, dirs):
@@ -175,13 +234,17 @@ def _show(path):
 
 
 def fire(payload, host=None):
-    """(message, block) for a hook payload; message is "" when nothing fired."""
+    """(message, block) for a hook payload from either host; message is "" when nothing fired."""
+    payload = _hermes(payload)
+    if host is None:
+        host = memscan.HERMES if payload.get("_host") == "hermes" else memscan.CLAUDE
     cwd = payload.get("cwd") or os.getcwd()
     event = payload.get("hook_event_name") or "PreToolUse"
     if event == "UserPromptSubmit":
-        tool, tool_input = "UserPromptSubmit", {"prompt": payload.get("prompt") or ""}
+        tools, tool_input = ["UserPromptSubmit"], {"prompt": payload.get("prompt") or ""}
     else:
-        tool, tool_input = payload.get("tool_name") or "", payload.get("tool_input") or {}
+        tools = [payload.get("tool_name") or "", payload.get("_hermes_tool") or ""]
+        tool_input = payload.get("tool_input") or {}
     if not isinstance(tool_input, dict):
         return "", False
     parts, block = [], False
@@ -201,7 +264,8 @@ def fire(payload, host=None):
             if quiet and not row.get("everywhere"):
                 continue
             try:
-                if not matches(row, tool, cwd, tool_input, payload.get("transcript_path")):
+                if not matches(row, [t for t in tools if t], cwd, tool_input,
+                               lambda pattern: _seen(payload, host, pattern)):
                     continue
             except (re.error, TypeError):
                 continue    # a malformed row disables itself, never the rest of the file
@@ -220,19 +284,31 @@ def fire(payload, host=None):
     return "\n".join(parts), block
 
 
-def hook(stdin=None):
+def hook(stdin=None, host=None):
     """The hook entry: JSON on stdin; context on stdout, or the question on stderr and
-    exit 2 for a block. Any failure exits 0, because a hook that breaks the tool it
-    guards is worse than no hook."""
+    exit 2 for a block. On Hermes a prompt's context is stdout JSON, and a tool call is
+    answered through `memscan.emit`, which refuses it once for a row that does not block.
+    Any failure exits 0, because a hook that breaks the tool it guards is worse than none."""
     try:
         payload = json.load(stdin or sys.stdin)
         if not isinstance(payload, dict):
             return 0
-        message, block = fire(payload)
+        payload = _hermes(payload)
+        message, block = fire(payload, host)
     except Exception:
         return 0
     if not message:
         return 0
+    if payload.get("_host") == "hermes":
+        if payload["hook_event_name"] == "UserPromptSubmit":
+            # Hermes moves a context over 10,000 characters to a file; keep the rows inline.
+            print(json.dumps({"context": message[:9000]}))
+            return 0
+        try:
+            return memscan.emit(payload, message, block, "trigger",
+                                Path(host or memscan.HERMES) / "state.db")
+        except Exception:
+            return 0
     if block:
         print(message, file=sys.stderr)
         return 2
@@ -285,6 +361,8 @@ def check(argv):
         roots = [root]
     else:
         roots = stores_for(os.getcwd())
+        if memscan.HERMES.is_dir() and memscan.HERMES not in roots:
+            roots.insert(1, memscan.HERMES)
     problems, files = [], 0
     for root in roots:
         path = rows_file(root)
@@ -341,6 +419,7 @@ def selftest():
                  "question": "Sift it first."},
                 {"id": "prompt", "tools": "UserPromptSubmit", "content": "hermes", "ignorecase": True,
                  "block": True, "question": "Load the skill."},
+                {"id": "hermes-raw", "tools": "browser_navigate|patch", "content": "https|zzz", "question": "Raw name."},
             ]}))
         (proj / "rules.json").write_text(json.dumps({"cap": 1, "rows": [
             {"id": "proj-row", "tools": "Write", "content": "enum", "question": "Name, not value.",
@@ -374,6 +453,81 @@ def selftest():
         msg, block = fire({"hook_event_name": "UserPromptSubmit", "prompt": "Ask Hermes", "cwd": str(other)},
                           host=host)
         assert "[prompt]" in msg and not block, "a prompt row matched wrongly, or blocked a prompt"
+
+        # Hermes: its tool names map onto the rows', a prompt arrives on pre_llm_call
+        def herm(tool, inp, **kw):
+            return fire({"hook_event_name": "pre_tool_call", "tool_name": tool, "tool_input": inp,
+                         "cwd": str(other), "session_id": "s1", **kw}, host=host)
+        assert "[git-reset]" in herm("terminal", {"command": "git reset --hard"})[0], "terminal is not Bash"
+        assert herm("terminal", {"command": "rm -rf /"})[1], "a block row did not block on Hermes"
+        assert "[once]" in herm("read_file", {"path": "a.pdf"})[0], "read_file is not Read, or path was lost"
+        assert "[proj-row]" in fire({"hook_event_name": "pre_tool_call", "tool_name": "write_file",
+                                     "tool_input": {"path": "x.py", "content": "enum"}, "cwd": str(proj)},
+                                    host=host)[0], "write_file is not Write"
+        assert "[hermes-raw]" in herm("browser_navigate", {"url": "https://x"})[0], \
+            "a Hermes tool with no Claude Code twin was not matched by its own name"
+        assert "[hermes-raw]" in herm("patch", {"path": "x.md", "new_string": "zzz"})[0], \
+            "a row naming a mapped Hermes tool by its own name did not fire"
+        saved_homes = memscan.CLAUDE, memscan.HERMES
+        memscan.CLAUDE, memscan.HERMES = other, host
+        try:
+            assert "[git-reset]" in fire({"hook_event_name": "pre_tool_call", "tool_name": "terminal",
+                                          "tool_input": {"command": "git reset --hard"}, "cwd": str(other)})[0], \
+                "a Hermes call did not read Hermes's own rows"
+        finally:
+            memscan.CLAUDE, memscan.HERMES = saved_homes
+        import sqlite3
+        con = sqlite3.connect(host / "state.db")
+        con.execute("create table messages (session_id text, role text, content text, tool_calls text)")
+        con.execute("""insert into messages values ('s1', 'tool', '{"skill": "loaded"}', null)""")
+        con.commit()
+        con.close()
+        assert herm("read_file", {"path": "a.pdf"})[0] == "", "unless_transcript did not read state.db"
+        assert "[once]" in herm("read_file", {"path": "a.pdf"}, session_id="s2")[0], \
+            "another session's messages silenced a row"
+        llm = lambda m: {"hook_event_name": "pre_llm_call", "session_id": "s1", "cwd": str(other),
+                         "extra": {"user_message": m}}
+        msg, block = fire(llm("Ask Hermes"), host=host)
+        assert "[prompt]" in msg and not block, "a Hermes prompt row did not fire, or blocked"
+        assert "[prompt]" in fire(llm([{"type": "text", "text": "hermes?"}, {"type": "image_url"}]), host=host)[0], \
+            "a multimodal prompt's text was not read"
+
+        def hook_out(payload):
+            out, err = io.StringIO(), io.StringIO()
+            saved_out, saved_err = sys.stdout, sys.stderr
+            sys.stdout, sys.stderr = out, err
+            try:
+                rc = hook(io.StringIO(json.dumps(payload)), host=host)
+            finally:
+                sys.stdout, sys.stderr = saved_out, saved_err
+            return rc, out.getvalue()
+        rc, out = hook_out(llm("hermes"))
+        assert rc == 0 and "[prompt]" in json.loads(out)["context"], "a prompt row's context was not stdout JSON"
+        saved_pending, memscan.PENDING_DIR = memscan.PENDING_DIR, Path(t) / "pending"
+        try:
+            advise = {"hook_event_name": "pre_tool_call", "tool_name": "terminal", "session_id": "s9",
+                      "tool_input": {"command": "git reset --hard"}, "cwd": str(other)}
+            rc, out = hook_out(advise)
+            sent = json.loads(out)
+            assert rc == 2 and sent["action"] == "block" and sent["message"].startswith(memscan.ONCE_NOTE) \
+                and "[git-reset]" in sent["message"], "an advisory row did not refuse the Hermes call once"
+            other_call = dict(advise, tool_input={"command": "git reset --hard HEAD"})
+            assert hook_out(other_call)[0] == 2 and hook_out(other_call)[0] == 2, \
+                "the repeat passed before state.db showed the question"
+            con = sqlite3.connect(host / "state.db")
+            con.execute("alter table messages add column timestamp real")
+            con.execute("insert into messages values ('s9', 'tool', ?, null, ?)",
+                        (json.dumps({"error": json.loads(out)["message"]}), time.time()))
+            con.commit()
+            con.close()
+            assert hook_out(dict(advise, tool_input={"command": "git reset --hard ."}))[0] == 2, \
+                "a different call passed on another call's record"
+            assert hook_out(advise) == (0, ""), "the host's state.db showing the question did not lift it"
+            rc, out = hook_out(dict(advise, tool_input={"command": "rm -rf /"}))
+            assert rc == 2 and memscan.ONCE_NOTE not in json.loads(out)["message"], \
+                "a block row was worded as refuse-once"
+        finally:
+            memscan.PENDING_DIR = saved_pending
 
         assert findings(host) == [] and findings(other) == [], findings(host)
         bad = json.loads((host / TRIGGERS).read_text())

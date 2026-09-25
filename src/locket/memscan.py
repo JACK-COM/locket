@@ -35,6 +35,7 @@ Stdlib only, by design: this runs inside a PreToolUse hook on every memory
 write, so it pays interpreter startup and nothing else.
 """
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -3018,17 +3019,53 @@ def selftest():
         "a relative path resolves against the payload cwd, or the write escapes the gate"
     assert session_asked({"_host": "hermes"}), "no session source at all fails open"
 
-    # a Hermes nudge that cannot block is stashed and delivered on the next model call
+    # a Hermes nudge refuses the call once, and the repeat passes once state.db shows it
     global PENDING_DIR
     saved, PENDING_DIR = PENDING_DIR, d / "pending"
     try:
-        import contextlib, io
-        with contextlib.redirect_stderr(io.StringIO()):
-            assert emit({"_host": "hermes", "session_id": "s1"}, "nudge one", False) == 0
-            assert emit({"_host": "hermes"}, "nudge for anyone", False) == 0
-        assert deliver_pending("other") == "nudge for anyone", "another session gets only the unowned one"
-        assert deliver_pending("s1") == "nudge one", "the owner gets its own"
-        assert deliver_pending("s1") == "", "delivered once, then gone"
+        import contextlib, io, sqlite3
+        db = d / "shown.db"
+        con = sqlite3.connect(db)
+        con.execute("create table messages (session_id text, role text, content text, timestamp real)")
+        con.commit()
+        store = lambda text: (con.execute("insert into messages values ('s1','tool',?,?)",
+                                          (json.dumps({"error": text}), time.time())), con.commit())
+        call = lambda cmd: {"_host": "hermes", "session_id": "s1", "tool_name": "Bash",
+                            "tool_input": {"command": cmd}}
+        first = refuse_once(call("a"), "nudge A", "hook", db)
+        assert first and first.startswith(ONCE_NOTE) and first.endswith("nudge A"), first
+        assert refuse_once(call("a"), "nudge A", "hook", db) == first, "an unseen refusal passed"
+        assert refuse_once(call("a"), "nudge A", "hook", db) is None, "the refusal cap did not hold"
+        assert refuse_once(call("a"), "nudge A", "hook", db) == first, "a passed call stayed passed"
+        store(first)
+        assert refuse_once(call("a"), "nudge A", "hook", db) is None, "a delivered refusal refused again"
+        # two modes refuse one call; Hermes shows only the first block
+        b_hook = refuse_once(call("b"), "from hook", "hook", db)
+        b_trig = refuse_once(call("b"), "from trigger", "trigger", db)
+        assert b_hook and b_trig, "a second mode's refusal was swallowed"
+        store(b_hook)
+        assert refuse_once(call("b"), "from hook", "hook", db) is None, "the shown mode refused again"
+        assert refuse_once(call("b"), "from trigger", "trigger", db) == b_trig, \
+            "a mode whose message Hermes never showed let the retry pass"
+        assert refuse_once(call("f"), "m1", "hook", db) and refuse_once(call("f"), "m2", "trigger", db) and \
+            refuse_once(call("f"), "m2", "trigger", db), "one mode's refusal counted against another's cap"
+        assert refuse_once(dict(call("c"), session_id="s2"), "n", "hook", db) and \
+            refuse_once(dict(call("c"), session_id="s2"), "n", "hook", db), "another session's result counted"
+        nodb = d / "none.db"
+        assert refuse_once(call("d"), "n", "hook", nodb) and refuse_once(call("d"), "n", "hook", nodb) and \
+            refuse_once(call("d"), "n", "hook", nodb) is None, "a state.db that cannot say must fall to the cap"
+        con.close()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = emit(call("e"), LEAD_WARNING + " more", False, db=db)
+        sent = json.loads(out.getvalue())
+        assert rc == 2 and sent["action"] == "block", "a Hermes nudge did not refuse the call"
+        assert LEAD_BLOCKING in sent["message"] and LEAD_WARNING not in sent["message"], \
+            "a refused write was described as landed"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert emit({"_host": "claude-code"}, "advice", False) == 0
+        assert "additionalContext" in out.getvalue(), "Claude Code lost its non-blocking channel"
     finally:
         PENDING_DIR = saved
 
@@ -3712,11 +3749,11 @@ HOOK MODES (PreToolUse entry points, JSON on stdin; not for manual use)
   Claude Code (matcher: tool names below) and Hermes (`pre_tool_call`, matcher
   write_file|patch, terminal, search_files) hand the same payload; the tool
   names are mapped on the way in. Hermes can hear a BLOCK and nothing else on a
-  tool event, so a nudge there is stashed and handed over by `deliver`.
-  deliver     Hermes `pre_llm_call` only. Prints every nudge stashed for this
-              session as `context`, which Hermes prepends to the model call that
-              follows the tool result. One hop later than Claude Code, never
-              lost. Stashes older than an hour are purged unread.
+  tool event, so a nudge there refuses the call once, leading with how to
+  proceed: the same call repeated passes once state.db shows the nudge was
+  delivered, and the third attempt passes regardless.
+  deliver     retired; does nothing, so an older Hermes config that still
+              registers it on `pre_llm_call` keeps running. Remove the entry.
   hook        Write|Edit. On a `.csv` path a schema governs, the ledger check:
               a row over a cap, outside its enum or off its pattern BLOCKS,
               the one refusal here on a question the tool can decide (§2d).
@@ -4387,7 +4424,7 @@ def grep_assist(pattern, root, top=4):
 # ---------------------------------------------------------------------------
 # Hermes tool name -> the Claude Code tool the hook modes are written against.
 HERMES_TOOLS = {"write_file": "Write", "patch": "Edit", "terminal": "Bash",
-                "search_files": "Grep"}
+                "search_files": "Grep", "read_file": "Read"}
 
 
 def read_payload():
@@ -4454,32 +4491,33 @@ def normalise(payload):
     return payload
 
 
-def emit(payload, msg, blocking):
+def emit(payload, msg, blocking, source="memscan", db=None):
     """Deliver a hook decision the way THIS host can hear it; returns the exit code.
 
     Claude Code: exit 2 with the message on stderr blocks; stdout JSON carrying
     `additionalContext` reaches the model without blocking. Hermes: exit 2 blocks,
     and the message travels as stdout JSON so it is not cut at the 400 characters
-    Hermes keeps of stderr. ⚠ Hermes has NO channel for a non-blocking message on
-    a tool event: `pre_tool_call` honours only block and modify, and a
-    `post_tool_call` context is parsed and then discarded. What it does have is
-    `pre_llm_call`, whose `context` is prepended to the next model call, so a
-    warning is STASHED here and the `deliver` mode, registered on that event,
-    hands it to the model one hop later, after the tool result and before the
-    model reasons on it. Without `deliver` registered the stash is purged unread.
+    Hermes keeps of stderr. ⚠ Hermes
+    has NO same-turn channel for a non-blocking message on a tool event:
+    `pre_tool_call` honours only block, modify and approve, a `post_tool_call`
+    context is discarded, and `pre_llm_call` runs once per user turn, so advice
+    parked for it arrives after the agent has finished. Advice is therefore
+    refused once (`refuse_once`), and `source` names the mode so two modes
+    refusing one call keep separate records; `db` is the state.db to read.
     """
     if not msg:
         return 0
     host = payload.get("_host", "claude-code")
+    if host == "hermes" and not blocking:
+        msg = refuse_once(payload, msg.replace(LEAD_WARNING, LEAD_BLOCKING, 1), source, db)
+        if msg is None:
+            return 0
+        blocking = True
     if blocking:
         if host == "hermes":
             print(json.dumps({"action": "block", "message": msg}))
         print(msg, file=sys.stderr)
         return 2
-    if host == "hermes":
-        stash(payload.get("session_id"), msg)
-        print(msg, file=sys.stderr)
-        return 0
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse", "additionalContext": msg}}))
     return 0
@@ -4488,12 +4526,14 @@ def emit(payload, msg, blocking):
 # Keyed by uid and created owner-only: a shared temp dir lets another user make the
 # path first, as a readable directory or a symlink elsewhere.
 PENDING_DIR = Path(tempfile.gettempdir()) / f"memscan-pending-{os.getuid() if hasattr(os, 'getuid') else 'u'}"
-PENDING_TTL = 3600      # seconds; a stash nobody delivered is stale, not owed
+PENDING_TTL = 3600      # seconds; a refusal record older than this is stale
+ONCE_NOTE = "Locket asks this once; to proceed, repeat the same call unchanged."
+ONCE_MAX = 2            # refusals of one call before it passes whatever state.db says
 
 
 def _pending_ours():
-    """The stash directory exists, is no symlink, and is this user's. `deliver` hands its
-    files to the model, so a directory someone else made would be an injection route."""
+    """The record directory exists, is no symlink, and is this user's. A directory
+    someone else made could forge or erase the records that let a call through."""
     try:
         return (PENDING_DIR.is_dir() and not PENDING_DIR.is_symlink()
                 and (not hasattr(os, "getuid") or PENDING_DIR.stat().st_uid == os.getuid()))
@@ -4501,38 +4541,83 @@ def _pending_ours():
         return False
 
 
-def stash(session_id, msg):
-    """Park a non-blocking message for `deliver` to hand to the next model call."""
+def _strings(value):
+    """Every string inside a parsed JSON value."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _strings(v)
+
+
+def hermes_shown(session_id, message, since, db=None):
+    """Whether a tool result Hermes stored for this session at or after `since`
+    carries the start of `message`: True, False, or None when state.db cannot say.
+    Hermes stores a blocked call's message as that call's result, JSON-encoded,
+    before the next tool round runs."""
+    db = HERMES / "state.db" if db is None else Path(db)
+    if not session_id or not db.is_file():
+        return None
+    head = message[:300]            # stored JSON-encoded, so it is read back through json
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+        try:
+            rows = con.execute("select content from messages where session_id=? and role='tool' "
+                               "and timestamp>=?", (session_id, since - 1)).fetchall()
+        finally:
+            con.close()
+    except Exception:                        # locked, missing table, schema drift
+        return None
+    for (content,) in rows:
+        if not isinstance(content, str):
+            continue
+        try:
+            if any(head in s for s in _strings(json.loads(content))):
+                return True
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return False
+
+
+def refuse_once(payload, msg, source, db=None):
+    """The message to refuse a Hermes tool call with, or None to let it pass.
+
+    The same call from the same mode is refused until state.db shows the message
+    reached the model, and at most ONCE_MAX times. Hermes runs every pre_tool_call
+    hook but shows the model only the first block, so a record alone would let a
+    retry pass a second mode's message nobody saw; the cap keeps a result Hermes
+    moved to a file, or a state.db that cannot be read, from refusing forever. The
+    note leads so the model reads how to proceed before the advice.
+    """
+    shown = f"{ONCE_NOTE}\n\n{msg}"
     try:
         PENDING_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         if not _pending_ours():
-            return
-        sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(session_id or "any"))
-        (PENDING_DIR / f"{sid}.{time.time_ns()}.txt").write_text(msg)
-    except OSError:
-        pass                                 # a guardrail never breaks the write it watched
-
-
-def deliver_pending(session_id):
-    """Every message stashed for this session (and for no session), joined; the
-    files are removed on read and stale ones purged, so nothing is delivered twice."""
-    if not _pending_ours():
-        return ""
-    sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(session_id or "any"))
-    now, out = time.time(), []
-    for p in sorted(PENDING_DIR.iterdir()):
-        try:
-            owner = p.name.split(".", 1)[0]
-            if now - p.stat().st_mtime > PENDING_TTL:
-                p.unlink()
+            return None                      # no record means no retry could pass
+        now = time.time()
+        for p in PENDING_DIR.iterdir():
+            try:
+                if now - p.stat().st_mtime > PENDING_TTL:
+                    p.unlink()
+            except OSError:
                 continue
-            if owner not in (sid, "any"):
-                continue
-            out.append(p.read_text())
-            p.unlink()
-        except OSError:
-            continue
-    return "\n\n".join(out)
+        call = json.dumps([source, payload.get("tool_name"), payload.get("tool_input")],
+                          sort_keys=True, default=str)
+        sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(payload.get("session_id") or "any"))
+        record = PENDING_DIR / f"once-{sid}-{hashlib.sha256(call.encode()).hexdigest()[:32]}"
+        count = int(record.read_text() or 0) if record.is_file() else 0
+        if count and (count >= ONCE_MAX or hermes_shown(payload.get("session_id"), shown,
+                                                        record.stat().st_mtime, db) is True):
+            record.unlink()
+            return None
+        record.write_text(str(count + 1))
+        return shown
+    except Exception:                        # a guardrail never breaks the call it watched
+        return None
 
 
 def gate_status():
@@ -4548,8 +4633,7 @@ def gate_status():
                                               if db.is_file() else
                                               "UNARMED, state.db not found, so every "
                                               "write passes the question silently")
-                     + "; nudges reach the model one call later, only if `deliver` "
-                       "is registered on pre_llm_call")
+                     + "; a nudge refuses the call once and the same call repeated passes")
     return "\n".join(lines) if lines else "no known host home found; CLI modes only"
 
 
@@ -4578,7 +4662,7 @@ def main(argv):
                     msg = source_row_decision(path, ti, prior)[0]
             except Exception:               # a guardrail must never break a write
                 return 0
-            return emit(payload, msg, blocking)
+            return emit(payload, msg, blocking, mode)
         root = corpus_for(path)
         if root is None:
             return 0
@@ -4613,21 +4697,10 @@ def main(argv):
         if gate:
             warn = msg.replace(LEAD_WARNING, LEAD_BLOCKING, 1) if msg else None
             return emit(payload, "\n\n".join(x for x in (warn, gate) if x), True)
-        return emit(payload, msg, False)
+        return emit(payload, msg, False, mode)
 
-    if mode == "deliver":                   # Hermes pre_llm_call: the stashed nudges
-        raw = sys.stdin.read()              # drain it; the history inside is not needed
-        try:
-            sid = (json.loads(raw) or {}).get("session_id")
-        except (json.JSONDecodeError, ValueError, AttributeError):
-            sid = None
-        msg = deliver_pending(sid)
-        if msg:
-            # Hermes caps a hook's context at 10,000 characters and spills the
-            # rest to a file the model is told about; keep the whole nudge inline.
-            if len(msg) > 9000:
-                msg = msg[:9000] + "\n[nudges truncated; run memscan/memfind directly for the rest]"
-            print(json.dumps({"context": msg}))
+    if mode == "deliver":                   # retired: an older Hermes config still calls it
+        sys.stdin.read()
         return 0
 
     if mode == "bashguard":                 # PreToolUse on Bash: the writes it misses
@@ -4643,7 +4716,7 @@ def main(argv):
                     autonomous=os.environ.get("CLAUDE_AUTONOMOUS") == "1")
         except Exception:                   # a guardrail must never break the shell
             return 0
-        return emit(payload, msg, blocking)
+        return emit(payload, msg, blocking, mode)
 
     if mode == "grepassist":                # PreToolUse on Grep|Bash: 2e, automatic
         try:
@@ -4674,7 +4747,7 @@ def main(argv):
             out = grep_assist(pattern, root)
         except Exception:                   # ollama down, bad payload, anything
             return 0
-        return emit(payload, out, False)
+        return emit(payload, out, False, mode)
 
     if mode == "init":                      # needs no corpus of its own: it makes one
         rest, flags = list(argv[2:]), {}
