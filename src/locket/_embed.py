@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/embed.py (d1f5833) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/embed.py (33fe5d9) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """embed: the embedder ladder the Panoply's pieces share.
 
 Ranks text by meaning on whatever this machine can serve, in order: ollama as it
@@ -109,9 +109,18 @@ def tag(backend):
     return MODEL if backend == "ollama" else f"fastembed:{FE_MODEL}"
 
 
+def _open(req, timeout):
+    """urllib with proxies from the environment only. The default also asks macOS's
+    SystemConfiguration, and after that lookup on a remote plain-http request every child
+    this process starts died of SIGSEGV before exec (an `ollama serve` spawn, a piece's
+    pdftotext). Measured under Python 3.9 and 3.14; HTTP_PROXY and NO_PROXY still apply."""
+    proxies = urllib.request.ProxyHandler(urllib.request.getproxies_environment())
+    return urllib.request.build_opener(proxies).open(req, timeout=timeout)
+
+
 def _ollama_up(timeout=1.5):
     try:
-        with urllib.request.urlopen(f"{OLLAMA}/api/tags", timeout=timeout):
+        with _open(f"{OLLAMA}/api/tags", timeout):
             return True
     except (urllib.error.URLError, OSError, ValueError):
         return False
@@ -145,7 +154,7 @@ def _embed_ollama(texts, quiet):
             data=json.dumps({"model": MODEL, "input": chunk}).encode(),
             headers={"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            with _open(req, TIMEOUT) as r:
                 out.extend(json.load(r)["embeddings"])
         except urllib.error.URLError as e:
             raise RuntimeError(f"cannot reach ollama at {OLLAMA} ({e.reason})") from None

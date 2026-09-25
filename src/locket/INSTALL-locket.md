@@ -51,7 +51,7 @@ Then `locket index all`.
 
 The hooks make the checks fire at write time instead of only when you remember to run them.
 
-**Claude Code.** `locket install --hooks` merges three `PreToolUse` entries into `~/.claude/settings.json`, keeping every entry already there and a copy of the file beside it. If `doctor` then says the write hook is registered but silent, ask the user to run `/reload-plugins`, and failing that to restart the session.
+**Claude Code.** `locket install --hooks` merges three `PreToolUse` entries into `~/.claude/settings.json`, plus `locket trigger` on every tool call and every prompt, keeping every entry already there and a copy of the file beside it. The trigger hook is silent until a store holds a `triggers.json`: rows the user writes for mistakes that have already happened, each asking the agent a question at the moment it is about to repeat one (`locket help trigger`). Mention it; do not write rows for them. If `doctor` then says the write hook is registered but silent, ask the user to run `/reload-plugins`, and failing that to restart the session.
 
 **Hermes.** Merge this into `~/.hermes/config.yaml` at the top level, keeping any `hooks:` already there, with `$LOCKET` the absolute path `locket status` names as `command`:
 

@@ -501,6 +501,9 @@ MANIFEST_SCHEMA = {
                                    "description": "{column: allowed values}; include \"\" where empty is allowed."},
                           "pattern": {"type": "object", "additionalProperties": {"type": "string"},
                                       "description": "{column: regex the whole value must match}."}}}},
+        "triggers": {"type": "string",
+                     "description": "The rows file `locket trigger` reads for this store, store-relative or "
+                                    "absolute. Default: triggers.json at the store root."},
         "belongs_to": {"type": "string",
                        "description": "Name of another corpus this directory JOINS, as `corpora` lists it; "
                                       "written by `init <dir> --parent <name>`."},

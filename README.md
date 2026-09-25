@@ -13,6 +13,8 @@ Locket keeps an AI agent's memory from holding the same fact twice. It reads eve
 
 It checks structure. It cannot tell whether a fact is still true or whether two files contradict each other.
 
+It also asks a question at the moment a mistake is about to repeat. A store's `triggers.json` holds rows such as "this command discards uncommitted work", each matched against a tool call or a prompt and pointing at the file that owns the fact; `locket trigger` puts the row's question to the agent before the call runs, or refuses the call when the row says to.
+
 ## Install
 
 ```
@@ -32,10 +34,11 @@ locket find "a fact you are about to write"   which file already holds it, by me
 locket audit                                  claims two files both state
 locket graduated && locket links && locket across
                                               the session-close checks
+locket trigger check                          lint the trigger rows that can fire from here
 locket doctor                                 is the install healthy
 ```
 
-`locket -h` lists every command; `locket help scan` and `locket help find` explain what a store is and how to read a ranking.
+`locket -h` lists every command; `locket help scan`, `locket help find` and `locket help trigger` explain what a store is, how to read a ranking and how trigger rows work.
 
 ## Requirements
 

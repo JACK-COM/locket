@@ -30,7 +30,7 @@ BIN = Path(os.environ.get("LOCKET_BIN", str(Path.home() / ".local" / "bin")))
 # path survives an upgrade, and leaves the link in BIN to the package manager.
 PACKAGED = os.environ.get("LOCKET_PACKAGED") == "1"
 LINKS = ("locket", "memscan", "memfind")      # the last two are older spellings this replaces
-SCRIPTS = ("memscan.py", "memfind.py", "locket.py", "locket_mcp.py")
+SCRIPTS = ("memscan.py", "memfind.py", "locket.py", "locket_mcp.py", "trigger.py")
 
 # memfind verbs, in memfind's own spelling; `find` is the bare statement form.
 FIND = {"find": None, "siblings": "--siblings", "index": "--index", "embedder": "--embedder"}
@@ -61,6 +61,11 @@ VERBS = [
      "locket cites myapp models.py"),
     ("against", "[corpus] < text", "rank files by how much of stdin they already assert",
      'echo "a sentence" | locket against council'),
+    ("trigger", "[check [corpus] | schema]",
+     "the tool-boundary hook: when a tool call or prompt matches a row in a store's triggers.json, "
+     "put the row's question to the agent; `check` lints the rows files, `schema` prints their schema",
+     "locket trigger check                  the rows that can fire from here\n"
+     "locket trigger check council          one store's rows"),
     ("corpora", "", "every store on this machine", None),
     ("init", "<dir> [--parent <corpus> [--name <label>]]", "make a folder of markdown a store", "locket init ~/notes"),
     ("migrate", "[<dir>|all]", "rename an older memfind.json manifest to locket.json", "locket migrate all"),
@@ -78,7 +83,8 @@ VERBS = [
     ("mcp", "", "serve the checks over MCP on stdio, for a host without hooks", None),
     ("selftest", "", "both scripts' internal checks", None),
     ("version", "", "print the version (also --version, -V, -v)", None),
-    ("help", "find | scan | install", "the full help of either script, or the agent's install steps", None),
+    ("help", "find | scan | trigger | install",
+     "the full help of either script, how trigger rows work, or the agent's install steps", None),
 ]
 VERB_NAMES = frozenset(v[0] for v in VERBS)
 HOOK_VERBS = ("hook", "bashguard", "grepassist", "deliver")   # PreToolUse entry points, JSON on stdin
@@ -142,6 +148,8 @@ def _ours(link):
 
 # Claude Code's PreToolUse entries, the three `locket install --hooks` merges.
 CLAUDE_HOOKS = (("Write|Edit", "hook", 10), ("Bash", "bashguard", 5), ("Grep|Bash", "grepassist", 10))
+# `locket trigger` reads every tool call and every prompt, since a row can name any tool.
+CLAUDE_TRIGGER = (("PreToolUse", "*"), ("UserPromptSubmit", None))
 # Where Claude Desktop keeps its config: macOS and Windows only. Elsewhere
 # it is None, so `--desktop` refuses rather than write a file Desktop never reads.
 DESKTOP_CONFIG = (Path.home() / "Library/Application Support/Claude/claude_desktop_config.json" if sys.platform == "darwin"
@@ -176,9 +184,9 @@ def _merge_json(path, merge):
 
 def _is_locket_hook(cmd, verb=None):
     """A hook command that runs Locket: memscan.py by path, or the `locket` command."""
-    verbs = [verb] if verb else HOOK_VERBS
+    verbs = [verb] if verb else (*HOOK_VERBS, "trigger")
     cmd = cmd.replace("'", "").replace('"', "").rstrip()   # a quoted path, as _hook_command writes one
-    return any(f"memscan.py {v}" in cmd or cmd.endswith(f"locket {v}") for v in verbs)
+    return any(f"memscan.py {v}" in cmd or cmd.endswith((f"locket {v}", f"locket.py {v}")) for v in verbs)
 
 
 def _command():
@@ -189,7 +197,8 @@ def _command():
 
 def _hook_command(verb):
     cmd = _command()
-    return f"{shlex.quote(cmd)} {verb}" if cmd else f"python3 {HERE / 'memscan.py'} {verb}"
+    script = HERE / ("locket.py" if verb == "trigger" else "memscan.py")
+    return f"{shlex.quote(cmd)} {verb}" if cmd else f"python3 {script} {verb}"
 
 
 def _add_claude_hooks(data):
@@ -203,7 +212,24 @@ def _add_claude_hooks(data):
         pre.append({"matcher": matcher, "hooks": [{"type": "command", "timeout": timeout,
                     "command": _hook_command(verb)}]})
         added.append(verb)
+    for event, matcher in CLAUDE_TRIGGER:
+        entries = data["hooks"].setdefault(event, [])
+        if _trigger_command(entries):
+            continue
+        entry = {"hooks": [{"type": "command", "timeout": 5, "command": _hook_command("trigger")}]}
+        entries.append({"matcher": matcher, **entry} if matcher else entry)
+        added.append(f"trigger ({event})")
     return added
+
+
+def _trigger_command(entries):
+    """The registered `locket trigger` command among one event's hook entries, or None."""
+    for e in entries if isinstance(entries, list) else []:
+        for h in (e.get("hooks") or []) if isinstance(e, dict) else []:
+            cmd = str(h.get("command", "")) if isinstance(h, dict) else ""
+            if _is_locket_hook(cmd, "trigger"):
+                return cmd
+    return None
 
 
 # Claude Code runs a hook through the user's shell, so `python3` survives an interpreter
@@ -567,6 +593,13 @@ def _selftest_uninstall():
             assert r.returncode == 0 and left == kept, \
                 f"made {made}, grille on PATH {other}: left {left}, expected {kept}\n{r.stdout}{r.stderr}"
             assert kept or not (h / ".panoply").exists(), "an empty ~/.panoply outlived its venv"
+    with tempfile.TemporaryDirectory() as t:     # doctor runs to its summary, rows file and all
+        (Path(t) / ".claude").mkdir()
+        (Path(t) / ".claude/triggers.json").write_text('{"rows": []}\n')
+        r = subprocess.run([sys.executable, str(HERE / "locket.py"), "doctor"], capture_output=True, text=True,
+                           env={"HOME": t, "PATH": "/usr/bin:/bin", "MEMFIND_NO_AUTOSTART": "1"})
+        assert " checks: " in r.stdout and "Traceback" not in r.stderr, f"doctor did not finish:\n{r.stderr[-600:]}"
+        assert "triggers" in r.stdout, "doctor skipped a host rows file"
 
 
 def cmd_doctor():
@@ -638,6 +671,24 @@ def cmd_doctor():
                         ("stayed silent on a known fork" if probe is False else f"failed: {probe}"),
                         f"run it by hand: {hooks['hook']}")
 
+    import trigger
+    rows_path = trigger.rows_file(memscan.CLAUDE)
+    if rows_path.is_file():
+        try:
+            events = (json.loads(settings.read_text()).get("hooks") or {}) if settings.is_file() else {}
+        except (OSError, json.JSONDecodeError, ValueError, AttributeError):
+            events = None
+        unregistered = [e for e, _m in CLAUDE_TRIGGER
+                        if events is not None and not _trigger_command(events.get(e) if isinstance(events, dict) else None)]
+        problems = trigger.findings(memscan.CLAUDE)
+        if unregistered:
+            row("fail", "triggers", f"{rows_path} has rows, but the hook is not registered for "
+                f"{' or '.join(unregistered)}", "locket install --hooks")
+        elif problems:
+            row("fail", "triggers", f"{len(problems)} problem(s) in {rows_path}: {problems[0]}", "locket trigger check")
+        elif events is not None:
+            row("ok", "triggers", f"{rows_path} lints clean; the hook is registered")
+
     hermes_cfg = memscan.HERMES / "config.yaml"
     if hermes_cfg.is_file():
         text = hermes_cfg.read_text(errors="replace")
@@ -701,12 +752,16 @@ def main(argv):
         print(f"locket {__version__}"); return 0
     if verb == "help":
         which = rest[0] if rest else ""
-        if which in _parser()[1].choices and which not in ("find", "install"):
+        if which in _parser()[1].choices and which not in ("find", "install", "trigger"):
             _parser()[1].choices[which].print_help(); return 0
         if which in ("find", "memfind"):
             return _memfind().main(["memfind.py", "--help"])
         if which in ("scan", "memscan"):
             return memscan.main(["memscan.py", "--help"])
+        if which == "trigger":
+            import trigger
+            _parser()[1].choices["trigger"].print_help()
+            print("\n" + trigger.__doc__.split("\n\n", 1)[1].rstrip()); return 0
         if which == "install":              # the agent's half of the install, shipped beside the scripts
             doc = HERE / "INSTALL-locket.md"
             if not doc.is_file():
@@ -754,6 +809,8 @@ def main(argv):
                 finally:
                     os.chdir(here)
             _selftest_uninstall()
+            import trigger
+            rc = trigger.selftest()
         return rc or _memfind().main(["memfind.py", "--selftest"])
     if verb == "install":
         return cmd_install(rest)
@@ -772,6 +829,9 @@ def main(argv):
         return memscan.main(["memscan.py", verb, *rest])
     if verb in HOOK_VERBS:
         return memscan.main(["memscan.py", verb, *rest])
+    if verb == "trigger":
+        import trigger
+        return trigger.main(rest)
     _parser()[0].print_usage(sys.stderr)
     print(f"locket: unknown command {verb!r}; `locket -h` lists them", file=sys.stderr)
     return 1
