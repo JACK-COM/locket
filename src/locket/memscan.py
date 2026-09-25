@@ -2487,6 +2487,35 @@ def selftest():
         assert bw(f"cd ~/{rel} && echo x >> topic_note.md")[1], "a cd through ~ resolves a bare name"
         assert bw(f"cd ~nosuchuser9/x && echo x >> {cmem}/topic_note.md")[1], \
             "an unknown ~user elsewhere in the command must not disable the check"
+        assert bw(f"cd /Users/x/elsewhere && cd ~/{rel} && echo x >> topic_note.md")[1], "the last cd wins"
+        assert bw("cd .. && cd memory && echo x >> topic_note.md")[1], "a relative cd chains from the cwd"
+        assert bw("echo x >> topic_note.md && cd /Users/x/elsewhere")[1], "a cd after the write does not move it"
+        for sed in ("sed -Ei 's/a/b/' MEMORY.md", "sed --in-place 's/a/b/' MEMORY.md",
+                    "sed -ibak 's/a/b/' MEMORY.md", "sed -in 's/a/b/p' MEMORY.md", "sed -i.bak 's/a/b/' MEMORY.md"):
+            assert bw(sed)[1], f"an in-place sed must block: {sed}"
+        # a `cd` that is not a command moves nothing: each of these still writes into the cwd's corpus
+        for loud in (
+            'echo "cd /Users/x/elsewhere to look at notes" >> topic_note.md',
+            'grep -rn "cd /Users/x" README.md >> topic_note.md',
+            "# cd /Users/x/elsewhere if this breaks\necho x >> topic_note.md",
+            'echo "notes; cd /Users/x/elsewhere" >> topic_note.md',          # a separator inside quotes
+            "true  # then; cd /Users/x/elsewhere\necho y >> topic_note.md",   # a separator inside a comment
+            "echo see cd /Users/x/elsewhere >> topic_note.md",               # cd as an argument
+            "cat <<'EOF' > /Users/x/script.sh\ncd /Users/x/elsewhere\nEOF\necho x >> topic_note.md",
+            "pushd /Users/x/elsewhere && popd && cd ~/" + str(rel) + " && echo x >> topic_note.md",
+        ):
+            assert bw(loud)[1], f"a real corpus write passed: {loud!r}"
+        assert bw("pushd /Users/x/elsewhere && echo x >> topic_note.md") == (None, False), "pushd moves like cd"
+        # the false positives that taught the resolver: each is silent
+        for quiet in (
+            "cd /Users/x/elsewhere && sed -i '' 's/a/b/' make-it-yours.md",   # a cd away from the corpus
+            "cd /Users/x/elsewhere && echo x > topic_note.md",
+            "sed -n '/a/,/b/p' make-it-yours.md",                             # `-i` inside a file name
+            "sed -e 's/-i/x/' notes.txt > /Users/x/out.txt",
+            'cd "$(mktemp -d)" && echo x > a.md',                              # a cd computed at run time
+            "cd - && echo x > topic_note.md",                                  # the previous dir, untracked
+        ):
+            assert bw(quiet) == (None, False), f"decoy fired: {quiet}"
         msg, blk = bw("python3 - <<'EOF'\npathlib.Path('MEMORY.md').write_text(s)\nEOF")
         assert msg and not blk, "a scripted write warns rather than blocks"
         for quiet in (
@@ -4034,7 +4063,7 @@ def ledger_bash_decision(command, cwd):
     targets, owner = {}, {}
     for m in _CSV_REDIRECT.finditer(command):
         tok = m.group("p").strip("'\"")
-        cands = [tok] if tok.startswith("/") else [str(Path(r) / tok) for r in _cd_targets(command, cwd)]
+        cands = [tok] if tok.startswith("/") else [str(Path(r) / tok) for r in _cd_targets(command, cwd, m.start("p"))]
         for c in cands:
             schema, glob = ledger_schema_for(c)
             if schema is not None:
@@ -4130,7 +4159,9 @@ MEMWRITE_ESCAPE = "MEMWRITE-OK:"
 BASH_WRITE = (
     re.compile(r">>?\s*(?P<p>[^\s;&|]+\.md)"),
     re.compile(r"\btee\b[^;&|]*?(?P<p>[^\s;&|]+\.md)"),
-    re.compile(r"\bsed\b[^;&|]*?-i[^;&|]*?(?P<p>[^\s;&|]+\.md)"),
+    # `-i` in a flag cluster of its own (`-i`, `-Ei`, `-i.bak`, `-ibak`, `--in-place`), never
+    # the `-i` inside `make-it-yours.md`, which read a `sed -n` as a write to `t-yours.md`
+    re.compile(r"\bsed\b[^;&|]*?(?<!\S)-(?:[A-Za-z]*i|-in-place)[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|]+\.md)"),
     re.compile(r"\b(?:cp|mv|rsync)\b[^;&|]+?\s(?P<p>[^\s;&|]+\.md)\s*(?:$|[;&|])"),
 )
 # Destination computed at run time, so it cannot be read off the command text.
@@ -4152,25 +4183,103 @@ def _expand_home(tok):
     return os.path.expanduser(tok) if tok.startswith("~") else tok
 
 
-def _cd_targets(command, cwd):
-    """Directories this command may resolve a bare filename against."""
-    roots = [cwd] if cwd else []
-    roots += [_expand_home(d) for d in re.findall(r"\bcd\s+([^\s;&|]+)", command)]
-    return roots
+def _shell_code(command):
+    """`command` with quoted text, heredoc bodies and comments blanked to spaces, every
+    offset kept, so a scan for shell syntax sees only what the shell runs. Quote
+    characters themselves stay, so a quoted argument still reads as one."""
+    out, i, n = list(command), 0, len(command)
+    pending = []                            # heredoc delimiters opened on the current line
+    while i < n:
+        c = command[i]
+        if c in "'\"":
+            j = i + 1
+            while j < n and command[j] != c:
+                j += 2 if c == '"' and command[j] == "\\" else 1
+            for k in range(i + 1, min(j, n)):
+                if command[k] != "\n":
+                    out[k] = " "
+            i = j + 1
+            continue
+        if c == "#" and (i == 0 or command[i - 1] in " \t\n;&|("):
+            while i < n and command[i] != "\n":
+                out[i] = " "
+                i += 1
+            continue
+        if c == "<" and command.startswith("<<", i) and not command.startswith("<<<", i):
+            m = HEREDOC.match(command, i)
+            if m:
+                pending.append((m.group(1), command.startswith("<<-", i)))
+                i = m.end()
+                continue
+        if c == "\n" and pending:
+            i += 1
+            for word, dash in pending:      # blank each body up to its delimiter line
+                while i < n:
+                    end = command.find("\n", i)
+                    end = n if end < 0 else end
+                    line = command[i:end]
+                    if (line.lstrip("\t") if dash else line) == word:
+                        i = end
+                        break
+                    for k in range(i, end):
+                        out[k] = " "
+                    i = end + 1
+            pending = []
+            continue
+        i += 1
+    return "".join(out)
+
+
+# `cd` or `pushd` in command position only; the argument runs to the next separator,
+# so `"$(mktemp -d)"` is one argument
+_CD = re.compile(r"(?:^|(?<=[;&|({]))[ \t]*(cd|pushd|popd)(?=[ \t;&|)\n]|$)(?:[ \t]+([^;&|\n)]*?))?[ \t]*(?=$|[;&|\n)])",
+                 re.M)
+
+
+def _cd_targets(command, cwd, pos=None):
+    """The directory a bare filename at `pos` resolves against, as a one-item list, or []
+    when it cannot be known.
+
+    The shell resolves against the last `cd` before the name, so that is the one
+    taken: resolving against the session cwd first read `cd /elsewhere && sed -i … x.md`
+    as a write to the session's own `x.md`. A `cd` whose target is computed at run time
+    (`cd "$(mktemp -d)"`) makes every later bare name unknowable, and an unknowable
+    target is not claimed as a corpus write. The scan runs over `_shell_code`: a
+    `cd /elsewhere` inside a string, a comment or a heredoc body moved nothing, and
+    reading it as a move let a real write into the cwd's corpus pass silently."""
+    here = cwd
+    for m in _CD.finditer(_shell_code(command)):
+        if pos is not None and m.start() >= pos:
+            break
+        if m.group(1) == "popd":
+            here = None                          # the stack is not tracked
+            continue
+        d = command[m.start(2):m.end(2)].strip() if m.group(2) is not None else ""
+        d = d or None
+        if d is None or d == "~":
+            here = str(HOME)
+        elif any(c in d for c in "$`(") and not d.strip("'\"").startswith(("$HOME", "${HOME}")):
+            here = None
+        elif d == "-":
+            here = None                          # the previous directory; not tracked
+        else:
+            d = _expand_home(d)
+            here = d if d.startswith("/") else (str(Path(here) / d) if here else None)
+    return [here] if here else []
 
 
 def bash_write_targets(command, cwd):
     """(blocking, opaque) corpus files a Bash command appears to write.
 
-    Resolves a bare `MEMORY.md` against the payload cwd and any `cd` in the
-    command, because that is the shape a heredoc rewrite actually takes. Resolving
-    rather than name-matching is why the same command is a corpus write from inside
-    a corpus and nothing at all from outside one.
+    Resolves a bare `MEMORY.md` against the payload cwd, or the last `cd` before it
+    in the command, because that is the shape a heredoc rewrite actually takes.
+    Resolving rather than name-matching is why the same command is a corpus write
+    from inside a corpus and nothing at all from outside one.
     """
-    def resolve(tok):
+    def resolve(tok, pos):
         tok = _expand_home(tok)
         cands = ([tok] if tok.startswith("/")
-                 else [str(Path(r) / tok) for r in _cd_targets(command, cwd)])
+                 else [str(Path(r) / tok) for r in _cd_targets(command, cwd, pos)])
         for c in cands:
             if corpus_for(c) is not None:
                 return Path(c)
@@ -4179,13 +4288,13 @@ def bash_write_targets(command, cwd):
     blocking = []
     for pat in BASH_WRITE:
         for m in pat.finditer(command):
-            hit = resolve(m.group("p"))
+            hit = resolve(m.group("p"), m.start("p"))
             if hit:
                 blocking.append(hit)
     opaque = []
     if BASH_WRITE_OPAQUE.search(command):
-        for tok in re.findall(r"[\w./~-]+\.md", command):
-            hit = resolve(tok)
+        for m in re.finditer(r"[\w./~-]+\.md", command):
+            hit = resolve(m.group(), m.start())
             if hit and hit not in blocking:
                 opaque.append(hit)
     return blocking, opaque
