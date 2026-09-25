@@ -80,6 +80,7 @@ VERBS = [
     ("version", "", "print the version (also --version, -V, -v)", None),
     ("help", "find | scan | install", "the full help of either script, or the agent's install steps", None),
 ]
+VERB_NAMES = frozenset(v[0] for v in VERBS)
 HOOK_VERBS = ("hook", "bashguard", "grepassist", "deliver")   # PreToolUse entry points, JSON on stdin
 
 EPILOG = """examples:
@@ -623,6 +624,19 @@ def cmd_doctor():
 
 # --- dispatch -----------------------------------------------------------------
 
+def _wants_help(verb, rest):
+    """A help request anywhere after a documented verb, trailing included, so none reaches
+    a script as a corpus or path: `-h` or `--help`, or a bare `help` unless something
+    named `help` exists here to be the directory or file it names. find's statement may be
+    any word, so it never counts. Cheap on purpose: the hook verbs dispatch through here
+    on every tool call and never build the parser."""
+    if verb not in VERB_NAMES:
+        return False
+    if {"-h", "--help"} & set(rest):
+        return True
+    return "help" in (rest[1:] if verb == "find" else rest) and not Path("help").exists()
+
+
 def main(argv):
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
         _parser()[0].print_help()
@@ -632,6 +646,8 @@ def main(argv):
         print(f"locket {__version__}"); return 0
     if verb == "help":
         which = rest[0] if rest else ""
+        if which in _parser()[1].choices and which not in ("find", "install"):
+            _parser()[1].choices[which].print_help(); return 0
         if which in ("find", "memfind"):
             return _memfind().main(["memfind.py", "--help"])
         if which in ("scan", "memscan"):
@@ -644,10 +660,8 @@ def main(argv):
         _parser()[0].print_help(); return 0
     if verb.startswith("-"):
         verb = verb.lstrip("-")               # memfind's own spelling: --index, --siblings, --selftest
-    if rest[:1] in (["-h"], ["--help"]):
-        p, sub = _parser()
-        if verb in sub.choices:
-            sub.choices[verb].print_help(); return 0
+    if _wants_help(verb, rest):
+        _parser()[1].choices[verb].print_help(); return 0
     if verb == "find":
         if not rest or rest[0].startswith("-"):
             print('find needs a statement:  locket find "<statement>" [corpus] [-n N]', file=sys.stderr)
@@ -663,6 +677,27 @@ def main(argv):
             assert _probe_hook("true") is False, "doctor's probe reads a silent command as firing"
             assert isinstance(_probe_hook(f"{shlex.quote(sys.executable)} /nonexistent/memscan.py hook"), str), \
                 "doctor's probe reads a missing script as firing"
+            import contextlib
+            import io
+            for form in (["audit", "council", "-h"], ["audit", "help"], ["help", "audit"],
+                         ["dupes", "x", "--help"], ["find", "a statement", "help"]):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                    code = main(["locket", *form])
+                assert code == 0 and out.getvalue().startswith(f"usage: locket {form[1] if form[0] == 'help' else form[0]}"), \
+                    f"`locket {' '.join(form)}` did not print that command's help"
+            import tempfile
+            here = os.getcwd()
+            with tempfile.TemporaryDirectory() as t:
+                os.chdir(t)
+                try:
+                    assert _wants_help("init", ["help"]), "a bare help with nothing named help is not help"
+                    os.mkdir("help")
+                    assert not _wants_help("init", ["help"]), "a directory named help was read as a help request"
+                    assert not _wants_help("hook", ["-h"]) and not _wants_help("find", ["help"]), \
+                        "a hook verb or find's statement was read as a help request"
+                finally:
+                    os.chdir(here)
         return rc or _memfind().main(["memfind.py", "--selftest"])
     if verb == "install":
         return cmd_install(rest)
