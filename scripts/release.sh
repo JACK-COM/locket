@@ -53,3 +53,5 @@ git -C "$tap" push -q origin main
 
 echo "released $version ($sha)"
 echo "upgrade:  brew update && brew upgrade locket"
+# Names each guide page this release moved past; it warns and never blocks
+[[ -x "$tap/scripts/guides-behind.sh" ]] && "$tap/scripts/guides-behind.sh" locket "$version" || true
