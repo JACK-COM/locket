@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/embed.py (33fe5d9) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/embed.py (5e1713d) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """embed: the embedder ladder the Panoply's pieces share.
 
 Ranks text by meaning on whatever this machine can serve, in order: ollama as it
@@ -261,6 +261,13 @@ def _selftest():
             except RuntimeError as e:
                 assert "no embedder available" in str(e), e
     assert OLLAMA != "http://127.0.0.1:1", "settings() did not restore OLLAMA"
+    saved_proxies = urllib.request.getproxies
+    urllib.request.getproxies = lambda: (_ for _ in ()).throw(AssertionError("the default opener was used"))
+    try:
+        with settings(OLLAMA="http://127.0.0.1:1"):
+            assert not _ollama_up(timeout=0.2), "a closed port answered"
+    finally:
+        urllib.request.getproxies = saved_proxies
     try:
         with settings(TIMEOUT=1, NOPE=2):
             pass

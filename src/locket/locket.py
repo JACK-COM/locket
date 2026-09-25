@@ -602,6 +602,27 @@ def _selftest_uninstall():
         assert "triggers" in r.stdout, "doctor skipped a host rows file"
 
 
+def _probe_trigger(cmd):
+    """Run a registered `trigger` command against a throwaway home whose host store holds
+    one row the payload matches. True when the row's question came back, False when the
+    command was silent, a string when it failed to run."""
+    import subprocess, tempfile
+    with tempfile.TemporaryDirectory() as t:
+        (Path(t) / ".claude").mkdir()
+        (Path(t) / ".claude/triggers.json").write_text(json.dumps({"rows": [
+            {"id": "doctor-probe", "tools": "Bash", "content": "locket-doctor-probe", "question": "probe"}]}))
+        payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": t,
+                              "tool_input": {"command": "echo locket-doctor-probe"}})
+        try:
+            r = subprocess.run(cmd, shell=True, input=payload, capture_output=True, text=True, timeout=30,
+                               env={**os.environ, "HOME": t})
+        except subprocess.TimeoutExpired:
+            return "timed out after 30s"
+        if r.returncode != 0:
+            return (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1]
+        return "[doctor-probe] probe" in r.stdout
+
+
 def cmd_doctor():
     """Every install step a machine can check, one line each, with the command
     that fixes a failure. Exit 1 when anything fails; a warning is a rung
@@ -687,7 +708,13 @@ def cmd_doctor():
         elif problems:
             row("fail", "triggers", f"{len(problems)} problem(s) in {rows_path}: {problems[0]}", "locket trigger check")
         elif events is not None:
-            row("ok", "triggers", f"{rows_path} lints clean; the hook is registered")
+            probe = _probe_trigger(_trigger_command(events.get("PreToolUse")))
+            if probe is True:
+                row("ok", "triggers", f"{rows_path} lints clean; the hook is registered and fires on a known row")
+            else:
+                row("fail", "triggers", "registered, but the hook " +
+                    ("stayed silent on a known row" if probe is False else f"failed: {probe}"),
+                    f"run it by hand: {_trigger_command(events.get('PreToolUse'))}")
 
     hermes_cfg = memscan.HERMES / "config.yaml"
     if hermes_cfg.is_file():
@@ -785,6 +812,9 @@ def main(argv):
             live = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'memscan.py'))} hook"
             assert _probe_hook(live) is True, "doctor's probe does not fire through this memscan.py"
             assert _probe_hook("true") is False, "doctor's probe reads a silent command as firing"
+            live_trigger = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'locket.py'))} trigger"
+            assert _probe_trigger(live_trigger) is True, "doctor's trigger probe does not fire through this locket.py"
+            assert _probe_trigger("true") is False, "doctor's trigger probe reads a silent command as firing"
             assert isinstance(_probe_hook(f"{shlex.quote(sys.executable)} /nonexistent/memscan.py hook"), str), \
                 "doctor's probe reads a missing script as firing"
             import contextlib
