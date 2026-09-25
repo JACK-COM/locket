@@ -9,17 +9,13 @@
 
 *Remember who you are.* One piece of [the Panoply](https://github.com/JACK-COM/homebrew-panoply).
 
-Locket keeps an AI agent's memory from holding the same fact twice. It reads every sentence in a folder of markdown memory as a claim, finds a claim stated in two files or twice in one, and ranks which file already holds an idea before the agent writes it a second time. Hooks run the check at write time, so the agent is told which file owns a fact while it can still edit that file instead.
+Locket keeps an AI agent's memory from holding the same fact twice. When the agent goes to write a fact its markdown memory already holds, Locket names the file that holds it, so the agent edits that file instead of starting a second copy. It also puts a question to the agent at the moment a known mistake is about to repeat, and keeps a ledger of the tokens Claude Code and Hermes spend.
 
-It checks structure. It cannot tell whether a fact is still true or whether two files contradict each other.
-
-It also asks a question at the moment a mistake is about to repeat. A store's `triggers.json` holds rows such as "this command discards uncommitted work", each matched against a tool call or a prompt and pointing at the file that owns the fact; `locket trigger` puts the row's question to the agent before the call runs, or refuses the call when the row says to.
-
-And it counts what the agents spent. `locket usage` reads the token counts Claude Code and Hermes already keep and copies them into a ledger that outlives them, because Claude Code deletes a transcript after 30 days and Hermes prunes a session after 90. It reports each source and project against a typical day, and how much of the input came from the cache. Tokens only: no prices, and no plan limits, since neither has a source Locket can check. [ccusage](https://github.com/ccusage/ccusage) does more for Claude Code alone.
+**[Read the Locket guide](https://github.com/JACK-COM/homebrew-panoply/blob/main/docs/locket/README.md)**: when to use it, the first five minutes, how to tell it is working, troubleshooting, and [how to make it yours](https://github.com/JACK-COM/homebrew-panoply/blob/main/docs/locket/make-it-yours.md).
 
 ## Install
 
-```
+```sh
 brew tap jack-com/panoply
 brew trust --formula jack-com/panoply/locket
 brew install locket
@@ -27,26 +23,12 @@ brew install locket
 
 Or with [uv](https://docs.astral.sh/uv/): `uv tool install git+https://github.com/JACK-COM/locket`.
 
-Then ask your agent to run `locket help install` and follow it. The agent finds your memory stores, registers the hooks with your consent, and reports back in under ten lines. `locket doctor` checks every step a machine can check and prints the fix for each failure.
-
-## Use
-
-```
-locket find "a fact you are about to write"   which file already holds it, by meaning
-locket audit                                  claims two files both state
-locket graduated && locket links && locket across
-                                              the session-close checks
-locket trigger check                          lint the trigger rows that can fire from here
-locket usage                                  tokens spent in the last 7 days, against a typical day
-locket doctor                                 is the install healthy
-```
-
-`locket -h` lists every command; `locket help scan`, `locket help find`, `locket help trigger` and `locket help usage` explain what a store is, how to read a ranking, how trigger rows work and what the usage report counts.
+Then ask your agent to run `locket help install` and follow it. `locket doctor` checks the install and prints the fix for anything missing.
 
 ## Requirements
 
-Python 3.9 or later, standard library only. `locket find` ranks by meaning when an embedder answers: [ollama](https://ollama.com) serving `nomic-embed-text`, or `fastembed` in the venv the Panoply pieces share (`~/.panoply/venv`, or an older `~/.locket/venv`). Without one it falls back to word overlap and says so. Supported hosts are Claude Code, Hermes Agent and any MCP client (`locket mcp`). Tested on macOS and Linux (Debian, Python 3.12); on Windows, run it under WSL.
+Python 3.9 or later, standard library only. Ranking by meaning uses [ollama](https://ollama.com) serving `nomic-embed-text`, or `fastembed` in the virtualenv the Panoply pieces share; without either, Locket compares words and says so. Supported hosts are Claude Code, Hermes Agent and any MCP client (`locket mcp`). Tested on macOS and Linux (Debian, Python 3.12); on Windows, run it under WSL.
 
 ## Releasing
 
-`make version` (or `version-minor`, `version-major`) computes the next version from `__version__` and hands it to `scripts/release.sh X.Y.Z`, which stamps it, runs the selftests, tags and pushes, then moves the formula in [the tap](https://github.com/JACK-COM/homebrew-panoply) to the new tarball. `make test` runs the selftests alone.
+`make version` (or `version-minor`, `version-major`) computes the next version from `__version__` and hands it to `scripts/release.sh X.Y.Z`, which stamps it, runs the selftests, tags and pushes, then moves the formula in [the tap](https://github.com/JACK-COM/homebrew-panoply) to the new tarball and names any guide page the release has moved past. `make test` runs the selftests alone.
