@@ -523,31 +523,13 @@ def cmd_schema(quiet=False):
 
 
 def _check(value, schema, path, out):
-    """Structural check of `value` against the subset of JSON Schema the manifest
-    schema uses: type, properties, additionalProperties, required, items."""
-    import difflib
-    t = schema.get("type")
-    kinds = {"object": dict, "array": list, "string": str, "integer": int, "boolean": bool}
-    if t in kinds and (not isinstance(value, kinds[t]) or (t == "integer" and isinstance(value, bool))):
-        out.append(f"{path or 'manifest'}: expected {t}, got {type(value).__name__}")
-        return
-    if t == "object":
-        props = schema.get("properties", {})
-        for k in schema.get("required", []):
-            if k not in value:
-                out.append(f"{path or 'manifest'}: missing required key {k!r}")
-        for k, v in value.items():
-            if k in props:
-                _check(v, props[k], f"{path}.{k}" if path else k, out)
-            elif schema.get("additionalProperties") is False:
-                near = difflib.get_close_matches(k, props, n=1, cutoff=0.6)
-                out.append(f"{path or 'manifest'}: unknown key {k!r}"
-                           + (f", did you mean {near[0]!r}?" if near else ""))
-            elif isinstance(schema.get("additionalProperties"), dict):
-                _check(v, schema["additionalProperties"], f"{path}.{k}" if path else k, out)
-    elif t == "array" and "items" in schema:
-        for i, v in enumerate(value):
-            _check(v, schema["items"], f"{path}[{i}]", out)
+    """Structural check of `value` against the manifest schema's subset of JSON Schema,
+    through panoply-lib's checker, a generated copy beside this file."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import _manifest_schema
+    _manifest_schema.check_value(value, schema, path, out)
 
 
 def validate_manifest(root):
@@ -3391,17 +3373,15 @@ def semantic_neighbours(root, text, top=3, timeout=4):
     """
     try:
         import memfind
-        saved = (memfind.TIMEOUT, memfind.AUTOSTART)
-        memfind.TIMEOUT, memfind.AUTOSTART = timeout, False   # no server spawn inside a hook's budget
-        try:
+        # no server spawn inside a hook's budget; the block restores the settings, so a
+        # long-lived caller (the MCP server) keeps its own
+        with memfind.settings(TIMEOUT=timeout, AUTOSTART=False):
             idx = memfind.load_cached(root)
             if idx is None:
                 return None
             items, flat, dim, stale = idx
             rows = memfind.rank(text[:2000], root, top=top, idx=(items, flat, dim), lexical=False)
             return rows, stale
-        finally:                             # a long-lived caller (the MCP server) keeps its own
-            memfind.TIMEOUT, memfind.AUTOSTART = saved
     except Exception:                       # ollama down, cache corrupt, anything
         return None
 

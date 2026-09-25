@@ -28,6 +28,7 @@ git -C "$repo" rev-parse -q --verify "refs/tags/v$version" >/dev/null && { echo 
 sed -i.bak -E "s/^__version__ = \"[^\"]+\"/__version__ = \"$version\"/" "$src/locket.py" && rm "$src/locket.py.bak"
 grep -q "^__version__ = \"$version\"" "$src/locket.py" || { echo "could not stamp the version" >&2; exit 1; }
 
+"$repo/../panoply-lib/sync.sh" --check locket
 python3 "$src/memscan.py" selftest
 python3 "$src/locket.py" selftest
 python3 "$src/locket_mcp.py" --selftest

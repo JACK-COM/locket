@@ -7,7 +7,8 @@ help: ## | List all available commands
 	| sed -n 's/^\(.*\): \(.*\)##\(.*\)/\1\3/p' \
 	| column -t -s '|'
 
-test: ## | Run the three selftests
+test: ## | Check the panoply-lib copies, then run the three selftests
+	../panoply-lib/sync.sh --check locket
 	python3 src/locket/memscan.py selftest
 	python3 src/locket/locket.py selftest
 	python3 src/locket/locket_mcp.py --selftest

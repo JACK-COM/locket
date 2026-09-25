@@ -34,7 +34,7 @@ SCRIPTS = ("memscan.py", "memfind.py", "locket.py", "locket_mcp.py")
 
 # memfind verbs, in memfind's own spelling; `find` is the bare statement form.
 FIND = {"find": None, "siblings": "--siblings", "index": "--index", "embedder": "--embedder"}
-SCAN = ("audit", "across", "dupes", "graduated", "ledgers", "budget", "pointers", "hooks", "links", "cites",
+SCAN = ("audit", "across", "dupes", "graduated", "ledgers", "budget", "pointers", "links", "cites",
         "corpora", "init", "schema", "migrate", "forget", "against")
 
 # The verb table: (name, argument metavar, one-line help, examples). argparse renders
@@ -71,7 +71,7 @@ VERBS = [
      "settings.json, --desktop registers the MCP server with Claude Desktop" % BIN,
      "locket install --hooks"),
     ("uninstall", "[--yes] [--purge] [--dry-run]",
-     "remove the command, ~/.locket and every cache; with --purge every manifest; print what is left",
+     "remove the command, ~/.locket but a shared venv, and every cache; with --purge every manifest; print what is left",
      "locket uninstall --dry-run"),
     ("status", "", "where the command points and what it can reach", None),
     ("doctor", "", "check every install step a machine can check, with the fix for each failure", None),
@@ -97,7 +97,7 @@ directory sits in. `--index`, `--siblings`, `--embedder` and `--selftest` are
 accepted as verbs too. `locket help scan` explains what a store is and how a
 manifest shapes it; `locket help find` explains how to read a ranking.
 Needs nothing but Python 3 for the checks; `find` needs an embedder (ollama with
-nomic-embed-text, or fastembed in ~/.locket/venv) and says so when none answers.
+nomic-embed-text, or fastembed in the venv the Panoply pieces share) and says so when none answers.
 """
 
 
@@ -375,11 +375,15 @@ def cmd_uninstall(argv):
         except (OSError, json.JSONDecodeError, ValueError):
             mcp = False
 
+    # a fastembed venv here is the one every Panoply piece shares (panoply-lib's embed.py
+    # finds it), so removing Locket leaves it for the others
+    venv = locket_dir / "venv"
+    keep = venv.is_dir()
     print("uninstall will remove:")
     for l in links:
         print(f"  link      {l}")
     if locket_dir.is_dir():
-        print(f"  directory {locket_dir}  (registry, schema{', venv' if (locket_dir / 'venv').is_dir() else ''})")
+        print(f"  directory {locket_dir}  (registry, schema{'; its venv stays' if keep else ''})")
     for c in caches:
         print(f"  cache     {c}")
     if purge:
@@ -402,7 +406,12 @@ def cmd_uninstall(argv):
 
     for l in links:
         l.unlink(); print(f"removed {l}")
-    if locket_dir.is_dir():
+    if locket_dir.is_dir() and keep:
+        for child in locket_dir.iterdir():
+            if child != venv:
+                shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
+        print(f"removed {locket_dir}, all but {venv}")
+    elif locket_dir.is_dir():
         shutil.rmtree(locket_dir); print(f"removed {locket_dir}")
     for c in caches:
         shutil.rmtree(c, ignore_errors=True); print(f"removed {c}")
@@ -432,6 +441,8 @@ def cmd_uninstall(argv):
     print(f"  the scripts:  rm {' '.join(str(HERE / s) for s in SCRIPTS if (HERE / s).exists())} "
           f"{HERE / 'INSTALL-locket.md' if (HERE / 'INSTALL-locket.md').exists() else ''}".rstrip())
     print("  an editor `json.schemas` entry pointing at ~/.locket/locket.schema.json, if you added one")
+    if keep:
+        print(f"  the fastembed venv other Panoply pieces share:  rm -r {venv}  (only once none uses it)")
     return 0
 
 
@@ -642,6 +653,8 @@ def main(argv):
         _parser()[0].print_help()
         return 0 if len(argv) > 1 else 1
     verb, rest = argv[1], argv[2:]
+    if verb == "hooks" or (verb == "help" and rest[:1] == ["hooks"]):   # pointers' older name
+        verb, rest = ("pointers", rest) if verb == "hooks" else ("help", ["pointers", *rest[1:]])
     if verb in ("--version", "-V", "-v", "version"):
         print(f"locket {__version__}"); return 0
     if verb == "help":
@@ -679,7 +692,7 @@ def main(argv):
                 "doctor's probe reads a missing script as firing"
             import contextlib
             import io
-            for form in (["audit", "council", "-h"], ["audit", "help"], ["help", "audit"],
+            for form in (["audit", "council", "-h"], ["audit", "help"], ["help", "audit"], ["help", "pointers"],
                          ["dupes", "x", "--help"], ["find", "a statement", "help"]):
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):

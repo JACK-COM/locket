@@ -42,7 +42,7 @@ Two folders that are one memory, such as a project's documents beside its code a
 `doctor` names the embedder that answers, or warns that `find` has fallen back to word overlap, which cannot see a paraphrase. Change nothing the machine already has; stop at the first rung that answers:
 
 1. **ollama is installed but has no model:** `ollama pull nomic-embed-text`. The server need not be running; `memfind.py` starts it.
-2. **No ollama:** prefer `fastembed`, in-process with no server. A system `pip install` is refused on Homebrew and distro Pythons, so give Locket its own venv with the same `python3` that runs it: `python3 -m venv ~/.locket/venv && ~/.locket/venv/bin/python -m pip install fastembed` (`LOCKET_VENV` if elsewhere). The model downloads on first use, about 130 MB. Offer ollama instead only if the user would rather run a server than a venv.
+2. **No ollama:** prefer `fastembed`, in-process with no server. A system `pip install` is refused on Homebrew and distro Pythons, so make the venv every Panoply piece shares, with the same `python3` that runs Locket: `python3 -m venv ~/.panoply/venv && ~/.panoply/venv/bin/python -m pip install fastembed` (`PANOPLY_VENV` if elsewhere). An existing `~/.locket/venv` is found and used as it stands. The model downloads on first use, about 130 MB. Offer ollama instead only if the user would rather run a server than a venv.
 3. **Nothing could be installed:** say what that loses, that a fact restated in different words will not be found.
 
 Then `locket index all`.
