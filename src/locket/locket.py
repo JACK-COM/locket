@@ -71,7 +71,7 @@ VERBS = [
      "settings.json, --desktop registers the MCP server with Claude Desktop" % BIN,
      "locket install --hooks"),
     ("uninstall", "[--yes] [--purge] [--dry-run]",
-     "remove the command, ~/.locket but a shared venv, and every cache; with --purge every manifest; print what is left",
+     "remove the command, ~/.locket, every cache, and the shared venv when no other piece uses it; with --purge every manifest; print what is left",
      "locket uninstall --dry-run"),
     ("status", "", "where the command points and what it can reach", None),
     ("doctor", "", "check every install step a machine can check, with the fix for each failure", None),
@@ -375,15 +375,22 @@ def cmd_uninstall(argv):
         except (OSError, json.JSONDecodeError, ValueError):
             mcp = False
 
-    # a fastembed venv here is the one every Panoply piece shares (panoply-lib's embed.py
-    # finds it), so removing Locket leaves it for the others
+    # the fastembed venv every Panoply piece shares goes only with the last piece on PATH;
+    # an older install made it inside ~/.locket, the rest in ~/.panoply
+    import contextlib
+    import _embed
+    shared, others = _embed.shared_venv("locket")
     venv = locket_dir / "venv"
-    keep = venv.is_dir()
+    # an older install's venv stays only while it is the one in use; beside ~/.panoply/venv
+    # nothing reads it, and it goes with ~/.locket
+    keep = venv.is_dir() and venv == _embed.VENV and shared != venv
     print("uninstall will remove:")
     for l in links:
         print(f"  link      {l}")
     if locket_dir.is_dir():
         print(f"  directory {locket_dir}  (registry, schema{'; its venv stays' if keep else ''})")
+    if shared:
+        print(f"  directory {shared}  (the fastembed venv; no other Panoply piece is on PATH)")
     for c in caches:
         print(f"  cache     {c}")
     if purge:
@@ -393,7 +400,7 @@ def cmd_uninstall(argv):
         print(f"  hook      {settings}: {h}")
     if mcp:
         print(f"  mcp       {desktop}: mcpServers.locket")
-    if not any((links, locket_dir.is_dir(), caches, hook_lines, mcp, purge and manifests)):
+    if not any((links, locket_dir.is_dir(), shared, caches, hook_lines, mcp, purge and manifests)):
         print("  nothing; Locket is not installed here")
     if dry:
         return 0
@@ -413,6 +420,10 @@ def cmd_uninstall(argv):
         print(f"removed {locket_dir}, all but {venv}")
     elif locket_dir.is_dir():
         shutil.rmtree(locket_dir); print(f"removed {locket_dir}")
+    if shared and shared.is_dir():
+        shutil.rmtree(shared); print(f"removed {shared}")
+        with contextlib.suppress(OSError):
+            shared.parent.rmdir()           # ~/.panoply, once nothing else is in it
     for c in caches:
         shutil.rmtree(c, ignore_errors=True); print(f"removed {c}")
     if purge:
@@ -441,8 +452,10 @@ def cmd_uninstall(argv):
     print(f"  the scripts:  rm {' '.join(str(HERE / s) for s in SCRIPTS if (HERE / s).exists())} "
           f"{HERE / 'INSTALL-locket.md' if (HERE / 'INSTALL-locket.md').exists() else ''}".rstrip())
     print("  an editor `json.schemas` entry pointing at ~/.locket/locket.schema.json, if you added one")
-    if keep:
-        print(f"  the fastembed venv other Panoply pieces share:  rm -r {venv}  (only once none uses it)")
+    if others:
+        print(f"  the fastembed venv {_embed.VENV}, which {' and '.join(others)} still use{'s' if len(others) == 1 else ''}")
+    elif _embed.VENV.is_dir() and not shared:
+        print(f"  the fastembed venv you named: {_embed.VENV}")
     return 0
 
 
@@ -525,6 +538,35 @@ def _probe_hook(cmd):
         return bool(r.stdout.strip())
     finally:
         shutil.rmtree(store, ignore_errors=True)
+
+
+def _selftest_uninstall():
+    """`uninstall --yes` in throwaway homes, in a child process because Locket's paths are
+    fixed from HOME at import: the shared venv goes only with the last piece on PATH, at
+    either location, and an older ~/.locket/venv beside ~/.panoply/venv goes with ~/.locket."""
+    import subprocess, tempfile
+    cases = (  # venvs made, another piece on PATH, venvs that must survive
+        ((".panoply/venv",), False, ()),
+        ((".panoply/venv",), True, (".panoply/venv",)),
+        ((".locket/venv",), False, ()),
+        ((".locket/venv",), True, (".locket/venv",)),
+        ((".panoply/venv", ".locket/venv"), True, (".panoply/venv",)),
+    )
+    for made, other, kept in cases:
+        with tempfile.TemporaryDirectory() as t:
+            h = Path(t)
+            for v in made:
+                (h / v).mkdir(parents=True)
+            (h / "bin").mkdir()
+            if other:
+                (h / "bin/grille").write_text("#!/bin/sh\n")
+                (h / "bin/grille").chmod(0o755)
+            r = subprocess.run([sys.executable, str(HERE / "locket.py"), "uninstall", "--yes"],
+                               env={"HOME": t, "PATH": str(h / "bin")}, capture_output=True, text=True)
+            left = tuple(v for v in (".panoply/venv", ".locket/venv") if (h / v).is_dir())
+            assert r.returncode == 0 and left == kept, \
+                f"made {made}, grille on PATH {other}: left {left}, expected {kept}\n{r.stdout}{r.stderr}"
+            assert kept or not (h / ".panoply").exists(), "an empty ~/.panoply outlived its venv"
 
 
 def cmd_doctor():
@@ -711,6 +753,7 @@ def main(argv):
                         "a hook verb or find's statement was read as a help request"
                 finally:
                     os.chdir(here)
+            _selftest_uninstall()
         return rc or _memfind().main(["memfind.py", "--selftest"])
     if verb == "install":
         return cmd_install(rest)

@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/embed.py (45501ba) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/embed.py (d1f5833) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """embed: the embedder ladder the Panoply's pieces share.
 
 Ranks text by meaning on whatever this machine can serve, in order: ollama as it
@@ -20,6 +20,7 @@ that comparison without register-matched negatives; easy ones measure topic.
 import contextlib
 import json
 import os
+import shutil
 import sys
 import time
 import urllib.error
@@ -59,6 +60,25 @@ def _find_venv():
 
 
 VENV = _find_venv()
+
+# Every piece that ranks through the venv, by its command. A new piece that does adds
+# its name here, or another piece's uninstall will take the venv from under it.
+VENV_USERS = ("locket", "grille")
+
+
+def shared_venv(me):
+    """What `<me> uninstall` may do with the shared venv: (path, others). `path` is the
+    venv when it exists at a default location, None when there is none or the user named
+    it (PANOPLY_VENV, LOCKET_VENV), which leaves it theirs to remove. `others` are the
+    pieces whose command is still on PATH, and any one of them means keep it. PATH is
+    probed rather than a list of users kept, because `brew uninstall` runs none of a
+    piece's code and such a list would go stale; the miss is a piece on a PATH this
+    shell lacks, whose ranking then falls back down the ladder and says so."""
+    others = [n for n in VENV_USERS if n != me and shutil.which(n)]
+    named = any(os.environ.get(v) for v in ("PANOPLY_VENV", "LOCKET_VENV"))
+    home = Path.home()
+    ours = VENV in (home / ".panoply/venv", home / ".locket/venv")
+    return (VENV if VENV.is_dir() and ours and not named and not others else None), others
 
 _ACTIVE = None          # ("ollama", MODEL) | ("fastembed", FE_MODEL), once resolved
 _FE = None              # the fastembed model object, loaded once per process
@@ -252,6 +272,20 @@ def _selftest():
             assert _find_venv() == Path(h) / ".locket/venv", "Locket's existing venv not shared"
             (Path(h) / ".panoply/venv").mkdir(parents=True)
             assert _find_venv() == Path(h) / ".panoply/venv", "the shared venv lost to Locket's"
+            saved_path, os.environ["PATH"] = os.environ.get("PATH", ""), h
+            try:
+                with settings(VENV=_find_venv()):
+                    assert shared_venv("locket") == (Path(h) / ".panoply/venv", []), \
+                        "the last piece was not offered the shared venv"
+                    (Path(h) / "grille").write_text("#!/bin/sh\n")
+                    (Path(h) / "grille").chmod(0o755)
+                    assert shared_venv("locket") == (None, ["grille"]), \
+                        "the venv was offered while another piece still uses it"
+                    (Path(h) / "grille").unlink()
+                    os.environ["LOCKET_VENV"] = str(Path(h) / ".panoply/venv")
+                    assert shared_venv("locket")[0] is None, "a venv the user named was offered"
+            finally:
+                os.environ["PATH"] = saved_path
             os.environ["LOCKET_VENV"] = "/x/locket"
             assert _find_venv() == Path("/x/locket"), "LOCKET_VENV ignored"
             os.environ["PANOPLY_VENV"] = "/x/panoply"
@@ -262,6 +296,20 @@ def _selftest():
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+    with tempfile.TemporaryDirectory() as d:
+        fake = Path(d) / "grille"
+        fake.write_text("#!/bin/sh\n")
+        fake.chmod(0o755)
+        saved_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = d
+        try:
+            with settings(VENV=Path(d)):
+                path, others = shared_venv("locket")
+                assert others == ["grille"], f"a piece on PATH not seen: {others}"
+                assert path is None, "a venv outside the default locations offered for removal"
+                assert shared_venv("grille")[1] == [], "a piece counted itself as another user"
+        finally:
+            os.environ["PATH"] = saved_path
     print("embed selftest ok")
     return 0
 
