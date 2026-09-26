@@ -22,7 +22,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import memscan  # noqa: E402
 
-__version__ = "0.5.0"                          # the one home: pyproject.toml and the formula's test read it
+__version__ = "0.6.0"                          # the one home: pyproject.toml and the formula's test read it
 
 BIN = Path(os.environ.get("LOCKET_BIN", str(Path.home() / ".local" / "bin")))
 # A package manager owns the command and moves the scripts on every upgrade: Homebrew's
