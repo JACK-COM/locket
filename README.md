@@ -27,7 +27,7 @@ Then ask your agent to run `locket help install` and follow it. `locket doctor` 
 
 ## Requirements
 
-Python 3.9 or later, standard library only. Ranking by meaning uses [ollama](https://ollama.com) serving `nomic-embed-text`, or `fastembed` in the virtualenv the Panoply pieces share; without either, Locket compares words and says so. Supported hosts are Claude Code, Hermes Agent and any MCP client (`locket mcp`). Tested on macOS and Linux (Debian, Python 3.12); on Windows, run it under WSL.
+Python 3.9 or later, standard library only. Ranking by meaning uses [ollama](https://ollama.com) serving `nomic-embed-text`, or `fastembed` in the virtualenv the Panoply pieces share; without either, Locket compares words and says so. Supported hosts are Claude Code, Codex, Hermes Agent and any MCP client (`locket mcp`). Tested on macOS and Linux (Debian, Python 3.12); on Windows, run it under WSL.
 
 ## Releasing
 

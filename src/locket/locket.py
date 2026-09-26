@@ -77,9 +77,10 @@ VERBS = [
     ("migrate", "[<dir>|all]", "rename an older memfind.json manifest to locket.json", "locket migrate all"),
     ("schema", "[<dir>]", "write the manifest schema, or check a manifest", "locket schema ~/notes"),
     ("forget", "<dir>", "drop a store's registry row", None),
-    ("install", "[--hooks] [--desktop]",
+    ("install", "[--hooks] [--codex] [--desktop]",
      "put `locket` on PATH (%s); --hooks merges the write-time hooks into Claude Code's "
-     "settings.json, --desktop registers the MCP server with Claude Desktop" % BIN,
+     "settings.json, --codex into Codex's hooks.json, --desktop registers the MCP server "
+     "with Claude Desktop" % BIN,
      "locket install --hooks"),
     ("uninstall", "[--yes] [--purge] [--dry-run]",
      "remove the command, ~/.locket, every cache, and the shared venv when no other piece uses it; "
@@ -107,7 +108,7 @@ EPILOG = """examples:
                                             the session-close trio
   locket init ~/notes                       any folder of markdown becomes a store
 
-The corpus argument takes a shorthand (council, hermes) or registered name, a project slug
+The corpus argument takes a shorthand (council, hermes, codex) or registered name, a project slug
 substring, a literal path, or `all`; omitted, it is the store the current
 directory sits in. `--index`, `--siblings`, `--embedder` and `--selftest` are
 accepted as verbs too. `locket help scan` explains what a store is and how a
@@ -213,7 +214,10 @@ def _hook_command(verb):
     return f"{shlex.quote(cmd)} {verb}" if cmd else f"python3 {script} {verb}"
 
 
-def _add_claude_hooks(data):
+def _add_claude_hooks(data, usage=True):
+    """Merge Locket's hooks into a Claude Code settings.json, or into a Codex
+    hooks.json, which takes the same schema; `usage` adds the SessionEnd recorder,
+    which reads Claude Code's and Hermes's sessions and not Codex's."""
     pre = data.setdefault("hooks", {}).setdefault("PreToolUse", [])
     present = [str(h.get("command", "")) for e in pre if isinstance(e, dict)
                for h in e.get("hooks", []) if isinstance(h, dict)]
@@ -232,11 +236,17 @@ def _add_claude_hooks(data):
         entries.append({"matcher": matcher, **entry} if matcher else entry)
         added.append(f"trigger ({event})")
     event, verb, timeout = CLAUDE_USAGE
+    if not usage:
+        return added
     entries = data["hooks"].setdefault(event, [])
     if not _event_command(entries, verb):
         entries.append({"hooks": [{"type": "command", "timeout": timeout, "command": _hook_command(verb)}]})
         added.append(f"usage ({event})")
     return added
+
+
+def _add_codex_hooks(data):
+    return _add_claude_hooks(data, usage=False)
 
 
 def _event_command(entries, verb):
@@ -286,6 +296,10 @@ def cmd_install(argv=()):
     print(_embedder_line())
     if "--hooks" in argv:
         rc |= _merge_json(memscan.CLAUDE / "settings.json", _add_claude_hooks)
+    if "--codex" in argv:
+        rc |= _merge_json(memscan.CODEX / "hooks.json", _add_codex_hooks)
+        print("Codex runs a hook only once it is trusted: start `codex`, run /hooks, and trust "
+              "each Locket entry. A later change to an entry asks again; an upgrade does not")
     if "--desktop" in argv and DESKTOP_CONFIG is None:
         print("--desktop: no known Claude Desktop config path on this platform; add the "
               "mcpServers entry by hand (`locket help install`, Step 4)", file=sys.stderr)
@@ -435,6 +449,8 @@ def cmd_uninstall(argv):
     manifests = _manifests()
     settings = memscan.CLAUDE / "settings.json"
     hook_lines, new_settings = _settings_hooks(settings) if settings.is_file() else ([], None)
+    codex_cfg = memscan.CODEX / "hooks.json"
+    codex_lines, new_codex = _settings_hooks(codex_cfg) if codex_cfg.is_file() else ([], None)
     hermes_cfg = memscan.HERMES / "config.yaml"
     hermes_lines = _hermes_lines(hermes_cfg) if hermes_cfg.is_file() else []
     desktop = DESKTOP_CONFIG
@@ -473,9 +489,11 @@ def cmd_uninstall(argv):
             print(f"  manifest  {m}")
     for h in hook_lines:
         print(f"  hook      {settings}: {h}")
+    for h in codex_lines:
+        print(f"  hook      {codex_cfg}: {h}")
     if mcp:
         print(f"  mcp       {desktop}: mcpServers.locket")
-    if not any((links, locket_dir.is_dir(), shared, caches, hook_lines, mcp, purge and manifests)):
+    if not any((links, locket_dir.is_dir(), shared, caches, hook_lines, codex_lines, mcp, purge and manifests)):
         print("  nothing; Locket is not installed here")
     if dry:
         return 0
@@ -509,6 +527,11 @@ def cmd_uninstall(argv):
         shutil.copy2(settings, bak)
         settings.write_text(json.dumps(new_settings, indent=2) + "\n")
         print(f"edited {settings} ({len(hook_lines)} hook entries removed; copy at {bak})")
+    if codex_lines and new_codex is not None:
+        bak = codex_cfg.with_suffix(".json.locket-uninstall.bak")
+        shutil.copy2(codex_cfg, bak)
+        codex_cfg.write_text(json.dumps(new_codex, indent=2) + "\n")
+        print(f"edited {codex_cfg} ({len(codex_lines)} hook entries removed; copy at {bak})")
     if mcp:
         bak = desktop.with_suffix(".json.locket-uninstall.bak")
         shutil.copy2(desktop, bak)
@@ -587,10 +610,11 @@ def _script_in(cmd):
     return None
 
 
-def _probe_hook(cmd):
+def _probe_hook(cmd, codex=False):
     """Run a registered `hook` command on a write that must fire: a new file in a
     throwaway store repeating a paragraph the store already holds. True when it
-    answered, False when it was silent, a string when it failed to run."""
+    answered, False when it was silent, a string when it failed to run. For Codex
+    the write arrives as the patch Codex sends, so the probe crosses the parser."""
     import subprocess, tempfile
     base = memscan.REGISTRY.parent
     base.mkdir(parents=True, exist_ok=True)
@@ -599,7 +623,11 @@ def _probe_hook(cmd):
         (store / memscan.MANIFEST).write_text("{}\n")
         (store / "harbour.md").write_text(_PROBE + "\n")
         payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Write",
-                              "tool_input": {"file_path": str(store / "zz-probe.md"), "content": _PROBE}})
+                              "tool_input": {"file_path": str(store / "zz-probe.md"), "content": _PROBE}}
+                             if not codex else
+                             {"hook_event_name": "PreToolUse", "tool_name": "apply_patch", "turn_id": "doctor",
+                              "cwd": str(store), "tool_input": {"command": "*** Begin Patch\n*** Add File: "
+                              "zz-probe.md\n+" + _PROBE + "\n*** End Patch"}})
         # supervised, so a firing hook nudges on stdout and exits 0; exit 2 would
         # also be what python prints for a script path that is gone
         env = {k: v for k, v in os.environ.items() if k != "CLAUDE_AUTONOMOUS"}
@@ -759,6 +787,26 @@ def cmd_doctor():
                     row("fail", "claude hooks", "registered, but the write hook " +
                         ("stayed silent on a known fork" if probe is False else f"failed: {probe}"),
                         f"run it by hand: {hooks['hook']}")
+
+    codex_cfg = memscan.CODEX / "hooks.json"
+    if memscan.CODEX.is_dir():
+        hooks = _registered_hooks(codex_cfg) if codex_cfg.is_file() else {}
+        missing = [v for _, v, _t in CLAUDE_HOOKS if v not in hooks] if hooks is not None else []
+        if hooks is None:
+            row("fail", "codex hooks", f"{codex_cfg} is not valid JSON", f"fix {codex_cfg}, then locket install --codex")
+        elif missing:
+            row("warn", "codex hooks", f"not registered: {', '.join(missing)}", "locket install --codex")
+        else:
+            probe = _probe_hook(hooks["hook"], codex=True)
+            if probe is True:
+                # where Codex records hook trust is not documented, so the trust step is named, never
+                # checked; the probe runs the command directly, so it proves the hook, not Codex's dispatch
+                row("warn", "codex hooks", "registered, and the write hook fires on a known fork in a patch; "
+                    "Codex skips them until trusted", "in codex, run /hooks and trust each Locket entry")
+            else:
+                row("fail", "codex hooks", "registered, but the write hook " +
+                    ("stayed silent on a known fork" if probe is False else f"failed: {probe}"),
+                    f"run it by hand: {hooks['hook']}")
 
     import trigger
     rows_path = trigger.rows_file(memscan.CLAUDE)
@@ -924,6 +972,14 @@ def main(argv):
             live = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'memscan.py'))} hook"
             assert _probe_hook(live) is True, "doctor's probe does not fire through this memscan.py"
             assert _probe_hook("true") is False, "doctor's probe reads a silent command as firing"
+            assert _probe_hook(live, codex=True) is True, \
+                "doctor's Codex probe does not fire through a patch into this memscan.py"
+            merged = _add_codex_hooks({})
+            assert "usage (SessionEnd)" not in merged and {"hook", "bashguard", "grepassist"} <= set(merged), merged
+            data = {}
+            _add_codex_hooks(data)
+            assert _add_codex_hooks(data) == [], "a second --codex added its hooks again"
+            assert "SessionEnd" not in data["hooks"], "Codex got the usage recorder, which cannot read its sessions"
             live_trigger = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'locket.py'))} trigger"
             assert _probe_trigger(live_trigger) is True, "doctor's trigger probe does not fire through this locket.py"
             assert _probe_trigger("true") is False, "doctor's trigger probe reads a silent command as firing"

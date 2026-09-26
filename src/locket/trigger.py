@@ -7,7 +7,7 @@ tool call or a prompt matches it, the row's question is put in front of the agen
 the call runs, and a `block` row refuses the call until its escape hatch is used.
 
 Rows live in a store's `triggers.json`, or the file its manifest names under `triggers`.
-The host's own store (Claude Code's `~/.claude`, Hermes's `~/.hermes`) fires everywhere;
+The host's own store (Claude Code's `~/.claude`, Codex's `~/.codex`, Hermes's `~/.hermes`) fires everywhere;
 any other store fires when the working directory is inside it. `locket trigger check`
 lints every such file, and `locket trigger schema` prints every row key with what it does.
 
@@ -16,7 +16,9 @@ A row names Claude Code's tools, and Hermes's are mapped onto them (`terminal` i
 with no Claude Code twin is matched by its own name. Hermes has no way to add advice to a
 tool call, so there a row that does not block refuses the call once instead: the agent
 reads the question, and the same call repeated passes. A prompt row answers `pre_llm_call`
-and reaches the model with the message it matched.
+and reaches the model with the message it matched. Codex speaks Claude Code's payload, and
+its file edits are patches, which are read as the Write or Edit they amount to; a row may
+also name `apply_patch` itself.
 
 A rows file's cheapness is its failure mode: a nudge the agent has learned to skim is no
 nudge. So a file holds at most `cap` rows (default 12) and the hook names any beyond it
@@ -158,13 +160,18 @@ def _seen(payload, host, pattern):
     return False
 
 
-def _hermes(payload):
-    """A Hermes payload in the shape `fire` reads; any other payload unchanged. A tool
-    event is normalised as every Locket hook normalises it, keeping the Hermes tool name;
-    `pre_llm_call` carries the user's message under `extra` and is read as a prompt."""
+def _host_payload(payload):
+    """A Hermes or Codex payload in the shape `fire` reads; Claude Code's unchanged. A
+    tool event is normalised as every Locket hook normalises it, keeping the host's own
+    tool name; Hermes's `pre_llm_call` carries the user's message under `extra` and is
+    read as a prompt."""
     if "_host" in payload:
         return payload
     event = payload.get("hook_event_name")
+    if memscan.host_of(payload) == "codex":
+        if event == "PreToolUse":
+            return dict(memscan.normalise(payload), _host_tool=payload.get("tool_name"))
+        return dict(payload, _host="codex")
     if event == "pre_llm_call":
         extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
         msg = extra.get("user_message")
@@ -173,7 +180,7 @@ def _hermes(payload):
         return dict(payload, hook_event_name="UserPromptSubmit", _host="hermes",
                     prompt=msg if isinstance(msg, str) else "")
     if event == "pre_tool_call":
-        return dict(memscan.normalise(payload), _hermes_tool=payload.get("tool_name"))
+        return dict(memscan.normalise(payload), _host_tool=payload.get("tool_name"))
     return payload
 
 
@@ -235,15 +242,15 @@ def _show(path):
 
 def fire(payload, host=None):
     """(message, block) for a hook payload from either host; message is "" when nothing fired."""
-    payload = _hermes(payload)
+    payload = _host_payload(payload)
     if host is None:
-        host = memscan.HERMES if payload.get("_host") == "hermes" else memscan.CLAUDE
+        host = {"hermes": memscan.HERMES, "codex": memscan.CODEX}.get(payload.get("_host"), memscan.CLAUDE)
     cwd = payload.get("cwd") or os.getcwd()
     event = payload.get("hook_event_name") or "PreToolUse"
     if event == "UserPromptSubmit":
         tools, tool_input = ["UserPromptSubmit"], {"prompt": payload.get("prompt") or ""}
     else:
-        tools = [payload.get("tool_name") or "", payload.get("_hermes_tool") or ""]
+        tools = [payload.get("tool_name") or "", payload.get("_host_tool") or ""]
         tool_input = payload.get("tool_input") or {}
     if not isinstance(tool_input, dict):
         return "", False
@@ -293,7 +300,7 @@ def hook(stdin=None, host=None):
         payload = json.load(stdin or sys.stdin)
         if not isinstance(payload, dict):
             return 0
-        payload = _hermes(payload)
+        payload = _host_payload(payload)
         message, block = fire(payload, host)
     except Exception:
         return 0
@@ -309,6 +316,8 @@ def hook(stdin=None, host=None):
                                 Path(host or memscan.HERMES) / "state.db")
         except Exception:
             return 0
+    if block and payload.get("_host") == "codex" and payload.get("hook_event_name") == "PreToolUse":
+        return memscan.emit(payload, message, True, "trigger")     # Codex refuses a tool by deny JSON
     if block:
         print(message, file=sys.stderr)
         return 2
@@ -361,8 +370,9 @@ def check(argv):
         roots = [root]
     else:
         roots = stores_for(os.getcwd())
-        if memscan.HERMES.is_dir() and memscan.HERMES not in roots:
-            roots.insert(1, memscan.HERMES)
+        for other in (memscan.HERMES, memscan.CODEX):
+            if other.is_dir() and other not in roots:
+                roots.insert(1, other)
     problems, files = [], 0
     for root in roots:
         path = rows_file(root)
@@ -528,6 +538,22 @@ def selftest():
                 "a block row was worded as refuse-once"
         finally:
             memscan.PENDING_DIR = saved_pending
+
+        # Codex: Claude Code's payload with a turn id; an edit is a patch, read as the Write it amounts to
+        cx = lambda tool, inp, **kw: {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": inp,
+                                      "turn_id": "t1", "cwd": str(proj), **kw}
+        patch = "*** Begin Patch\n*** Add File: x.py\n+enum\n*** End Patch"
+        assert "[proj-row]" in fire(cx("apply_patch", {"command": patch}), host=host)[0], \
+            "a native Codex patch was not read as a Write"
+        assert "[proj-row]" in fire(cx("Bash", {"command": f"apply_patch <<'P'\n{patch}\nP"}), host=host)[0], \
+            "a Codex patch through the shell was not read as a Write"
+        rc, out = hook_out(cx("Bash", {"command": "rm -rf /"}, cwd=str(other)))
+        deny = json.loads(out)["hookSpecificOutput"]
+        assert rc == 0 and deny["permissionDecision"] == "deny" and "[blocker]" in deny["permissionDecisionReason"], \
+            "a block row did not refuse the Codex call in the deny shape"
+        rc, out = hook_out(cx("Bash", {"command": "git reset --hard"}, cwd=str(other)))
+        assert rc == 0 and "[git-reset]" in json.loads(out)["hookSpecificOutput"]["additionalContext"], \
+            "an advisory row did not reach Codex as context"
 
         assert findings(host) == [] and findings(other) == [], findings(host)
         bad = json.loads((host / TRIGGERS).read_text())

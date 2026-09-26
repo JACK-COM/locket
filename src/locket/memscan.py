@@ -39,6 +39,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -49,6 +50,7 @@ from pathlib import Path, PurePosixPath
 HOME = Path.home()
 CLAUDE = HOME / ".claude"                # Claude Code's home
 HERMES = HOME / ".hermes"                # Hermes Agent's home
+CODEX = Path(os.environ.get("CODEX_HOME") or HOME / ".codex")   # Codex's home, which CODEX_HOME moves
 # A per-corpus manifest, optional. Its presence makes ANY directory a corpus for
 # the write-time gate and for a literal path, so a memory store on a host this
 # file has never heard of is covered by writing one file into it; its absence
@@ -93,17 +95,19 @@ REGISTRY = Path(os.environ.get("LOCKET_REGISTRY", str(HOME / ".locket" / "corpor
 HOST_STORES = {
     "council": CLAUDE,
     "hermes": HERMES,
+    "codex": CODEX,
 }
 # What counts as corpus INSIDE a host's core directory. The home is mostly host
 # state (sessions, caches, plugins, transcripts, the project stores above), and
 # the host adds directories between releases, so the default is an allowlist:
 # a directory not named here is out until a manifest's `members` lets it in,
 # which fails by omission where a denylist leaks every new directory silently.
-# Root-level markdown (CLAUDE.md, SOUL.md, REBUILD.md) is always in. Hermes's
-# `skills/` is bundled with the agent rather than authored, so it is out.
+# Root-level markdown (CLAUDE.md, SOUL.md, AGENTS.md) is always in. Hermes's and
+# Codex's `skills/` are bundled with the agent rather than authored, so they are out.
 HOST_MEMBERS = {
     CLAUDE: {"memory", "rules", "skills", "agents", "agent-memory"},
     HERMES: {"memories"},
+    CODEX: {"memories"},
 }
 # Host state that lives INSIDE a member and is excluded whatever a manifest
 # says, like `.memfind`: Claude Code mirrors the account's synced skills into
@@ -587,9 +591,10 @@ def settings(root):
     m = _read_manifest(root)
     members, excluded = _own_walk(root, m)
     # A host store whose files are not this apparatus's: Hermes's MEMORY.md is
-    # the whole memory, not an index over topic files, so it must not inherit
-    # the index exemption. A manifest there still wins.
-    if root is not None and Path(root) == HOST_STORES["hermes"]:
+    # the whole memory, not an index over topic files, and Codex writes its
+    # memories/ itself, so neither inherits the index exemption. A manifest
+    # there still wins.
+    if root is not None and Path(root) in (HOST_STORES["hermes"], HOST_STORES["codex"]):
         m = {"index_files": [], "ledger_surfaces": [], "holding_spaces": [], **m}
     out = {}
     # `members`: the top-level directories that ARE corpus, everything else under
@@ -3085,6 +3090,62 @@ def selftest():
     assert not memfind_asked_db(db, "named"), "one that only names it does not"
     assert not memfind_asked_db(db, "silent"), "a session with no such call has not asked"
     assert memfind_asked_db(d / "missing.db", "asked"), "no database fails open"
+
+    # --- Codex: Claude Code's payload, a patch for every edit, a rollout transcript ---
+    rollout = str(d / "rollout-2026-09-25T18-00-40-x.jsonl")
+    codex = lambda tool, ti, **kw: normalise({"hook_event_name": "PreToolUse", "tool_name": tool,
+                                              "tool_input": ti, "turn_id": "t1", "cwd": str(COUNCIL),
+                                              "transcript_path": rollout, **kw})
+    add = "*** Begin Patch\n*** Add File: notes.md\n+first line\n+second line\n*** End Patch"
+    upd = ("*** Begin Patch\n*** Update File: /w/a.py\n@@\n-x = 1\n+x = 2\n"
+           "*** Update File: MEMORY.md\n@@\n old\n-gone\n+new fact\n*** End Patch")
+    w = codex("apply_patch", {"command": add})
+    assert w["_host"] == "codex" and w["tool_name"] == "Write", w
+    assert w["tool_input"] == {"file_path": str(COUNCIL / "notes.md"),
+                               "content": "first line\nsecond line"}, w
+    e = codex("Bash", {"command": f"apply_patch <<'PATCH'\n{upd}\nPATCH"})
+    assert e["tool_name"] == "Edit", "a patch sent through the shell (no native tool) went unseen"
+    assert e["tool_input"]["file_path"] == str(COUNCIL / "MEMORY.md"), \
+        "the file inside a store is the one judged, whatever its place in the patch"
+    assert e["tool_input"]["new_string"] == "new fact" and e["tool_input"]["old_string"] == "gone", e
+    assert parse_patch(add.replace("\n", "\r\n")) == [("add", "notes.md", "first line\nsecond line", "")], \
+        "a CRLF patch parsed to nothing, which passes the gate silently"
+    both = "*** Begin Patch\n*** Add File: MEMORY.md\n+m\n*** Add File: /w/l.csv\n+r\n*** End Patch"
+    assert codex("apply_patch", {"command": both})["tool_input"]["file_path"] == "/w/l.csv", \
+        "a ledger in the patch was not the file judged"
+    assert parse_patch("*** Begin Patch\n*** Update File: a.md\n*** Move to: b.md\n+x\n*** End Patch") \
+        == [("update", "b.md", "x", "")], "a move is judged at its destination"
+    assert codex("Bash", {"command": "echo apply_patch"})["tool_name"] == "Bash", \
+        "a shell call that only names apply_patch stays a shell call"
+    assert codex("apply_patch", {"command": "*** Begin Patch\n*** Delete File: a.md\n*** End Patch"}
+                 )["tool_name"] == "apply_patch", "a patch that adds nothing stays opaque"
+    assert normalise({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {
+        "command": f"apply_patch <<'P'\n{add}\nP"}})["tool_name"] == "Bash", \
+        "Claude Code's shell is never read as a patch"
+    assert host_of({"hook_event_name": "PreToolUse", "transcript_path": rollout}) == "codex"
+    import contextlib, io
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+        rc = emit({"_host": "codex"}, "refused", True)
+    deny = json.loads(out.getvalue())["hookSpecificOutput"]
+    assert rc == 0 and deny["permissionDecision"] == "deny" and deny["permissionDecisionReason"] == "refused", \
+        "a Codex block must be the deny shape Codex reads"
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert emit({"_host": "codex"}, "advice", False) == 0
+    assert json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"] == "advice"
+    # the rollout: a call is a function_call whose `arguments` is a JSON string
+    fc = lambda args: json.dumps({"type": "response_item", "payload": {
+        "type": "function_call", "name": "exec_command", "arguments": json.dumps(args)}})
+    out_line = json.dumps({"type": "response_item", "payload": {
+        "type": "function_call_output", "output": "locket find 'q' council"}})
+    asked, named, argv = (d / f"rollout-{n}.jsonl" for n in ("asked", "named", "argv"))
+    asked.write_text(fc({"cmd": "locket find 'a fact' council", "workdir": "/w"}) + "\n")
+    named.write_text(fc({"cmd": "grep -n locket README.md"}) + "\n" + out_line + "\n")
+    argv.write_text(fc({"command": ["bash", "-lc", "locket find 'a fact' council"]}) + "\n")
+    assert memfind_asked(str(asked)), "a Codex shell call that RUNS locket find discharges"
+    assert not memfind_asked(str(named)), "a call that names it, or a result quoting it, does not"
+    assert memfind_asked(str(argv)), "the older shell tool's argv form is read through bash -lc"
     shutil.rmtree(d, ignore_errors=True)
 
     HOST_STORES["council"] = saved_council
@@ -3415,6 +3476,11 @@ def memfind_asked(transcript):
                     rec = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
                     continue
+                if rec.get("type") == "response_item" and isinstance(rec.get("payload"), dict):
+                    parsed = True               # a Codex rollout line
+                    if _rollout_runs_memfind(rec["payload"]):
+                        return True
+                    continue
                 content = ((rec.get("message") or {}).get("content")) or []
                 if not isinstance(content, list) or not content:
                     continue
@@ -3428,6 +3494,24 @@ def memfind_asked(transcript):
     except OSError:
         return True
     return seen_marker and not parsed
+
+
+def _rollout_runs_memfind(item):
+    """Whether one Codex rollout `response_item` is a shell call that runs memfind.
+    A call is `{"type": "function_call", "name": ..., "arguments": "<JSON>"}`; the
+    unified-exec tool puts the command in `cmd`, the older shell tool in `command`,
+    as a string or an argv list. A `function_call_output` is a result, never a run."""
+    if item.get("type") != "function_call":
+        return False
+    try:
+        args = json.loads(item.get("arguments") or "{}")
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return False
+    cmd = args.get("cmd") or args.get("command") if isinstance(args, dict) else None
+    if isinstance(cmd, list):               # ["bash", "-lc", "<script>"] runs the script
+        cmd = (str(cmd[-1]) if len(cmd) >= 3 and cmd[-2] in ("-c", "-lc")
+               else shlex.join(str(c) for c in cmd))
+    return isinstance(cmd, str) and _runs_memfind(cmd)
 
 
 def semantic_neighbours(root, text, top=3, timeout=4):
@@ -3746,9 +3830,11 @@ MODES
   selftest  run the internal checks.
 
 HOOK MODES (PreToolUse entry points, JSON on stdin; not for manual use)
-  Claude Code (matcher: tool names below) and Hermes (`pre_tool_call`, matcher
-  write_file|patch, terminal, search_files) hand the same payload; the tool
-  names are mapped on the way in. Hermes can hear a BLOCK and nothing else on a
+  Claude Code (matcher: tool names below), Codex (the same, in hooks.json) and
+  Hermes (`pre_tool_call`, matcher write_file|patch, terminal, search_files)
+  hand the same payload; the tool names are mapped on the way in, and a Codex
+  patch, native or through the shell, is read as the Write or Edit it amounts
+  to. Hermes can hear a BLOCK and nothing else on a
   tool event, so a nudge there refuses the call once, leading with how to
   proceed: the same call repeated passes once state.db shows the nudge was
   delivered, and the third attempt passes regardless.
@@ -4417,23 +4503,101 @@ def grep_assist(pattern, root, top=4):
 
 
 # ---------------------------------------------------------------------------
-# Host adapters: the hook modes above speak one payload shape, and two hosts
-# produce it. Claude Code's PreToolUse and Hermes's pre_tool_call carry the same
-# stdin JSON by design (`hook_event_name`, `tool_name`, `tool_input`, `cwd`), and
-# differ in tool vocabulary and in what a reply may say.
+# Host adapters: the hook modes above speak one payload shape, and three hosts
+# produce it. Claude Code's PreToolUse, Codex's PreToolUse and Hermes's
+# pre_tool_call carry the same stdin JSON by design (`hook_event_name`,
+# `tool_name`, `tool_input`, `cwd`), and differ in tool vocabulary, in how a
+# file edit arrives, and in what a reply may say.
 # ---------------------------------------------------------------------------
+# Per host: how a decision reaches the model (`host_of` tells the payloads apart). `advice` is "context" where a non-blocking message rides the tool event,
+# "refuse-once" where the only same-turn channel is a block; `block` names the
+# reply shape a refusal takes.
+HOSTS = {
+    "claude-code": {"advice": "context", "block": "exit2"},
+    "codex": {"advice": "context", "block": "deny-json"},
+    "hermes": {"advice": "refuse-once", "block": "exit2-json"},
+}
 # Hermes tool name -> the Claude Code tool the hook modes are written against.
 HERMES_TOOLS = {"write_file": "Write", "patch": "Edit", "terminal": "Bash",
                 "search_files": "Grep", "read_file": "Read"}
+# A Codex patch, as the native `apply_patch` tool's `command` or as the body of an
+# `apply_patch` heredoc when the model has no native tool (every model Codex has no
+# metadata for, glm through Ollama among them). Same grammar either way.
+PATCH_BODY = re.compile(r"\*\*\* Begin Patch\n(.*?)\n?\*\*\* End Patch", re.S)
+PATCH_FILE = re.compile(r"\*\*\* (Add|Update|Delete) File: (.+)")
+APPLY_PATCH_CMD = re.compile(r"\s*apply_patch\b")
+
+
+def _absolute(path, cwd):
+    """`path` resolved against the SESSION's cwd, never the hook subprocess's own."""
+    return path if Path(path).expanduser().is_absolute() else str(Path(cwd or os.getcwd()) / path)
+
+
+def host_of(payload):
+    """Which host sent this hook payload. Hermes names its events differently;
+    Codex shares Claude Code's event names and is told apart by the fields only it
+    sends (`turn_id`) and by its rollout transcript's file name."""
+    event = str(payload.get("hook_event_name") or "")
+    if event in ("pre_tool_call", "post_tool_call"):
+        return "hermes"
+    if payload.get("turn_id") or Path(str(payload.get("transcript_path") or "")).name.startswith("rollout-"):
+        return "codex"
+    return "claude-code"
+
+
+def parse_patch(text):
+    """[(op, path, added, removed)] for each file a Codex patch touches, op one of
+    add | update | delete; `added` and `removed` are the `+` and `-` lines joined.
+    A `*** Move to:` retargets the update to its destination. [] where the text
+    holds no patch."""
+    # CRLF first: the body match needs a bare newline, and a stray \r would ride into
+    # every added line; a patch that fails to parse passes the gate silently
+    m = PATCH_BODY.search((text or "").replace("\r\n", "\n"))
+    if not m:
+        return []
+    out, cur = [], None
+    for line in m.group(1).split("\n"):
+        f = PATCH_FILE.fullmatch(line.rstrip())
+        if f:
+            cur = [f.group(1).lower(), f.group(2).strip(), [], []]
+            out.append(cur)
+        elif cur is None:
+            continue
+        elif line.startswith("*** Move to: "):
+            cur[1] = line[len("*** Move to: "):].strip()
+        elif line.startswith("+"):
+            cur[2].append(line[1:])
+        elif line.startswith("-"):
+            cur[3].append(line[1:])
+    return [(op, path, "\n".join(a), "\n".join(r)) for op, path, a, r in out]
+
+
+def _patch_input(patch, cwd):
+    """The Write or Edit a Codex patch amounts to, as (tool, tool_input), or None
+    when it adds nothing. A patch can touch several files and a hook judges one,
+    so a CSV (whose ledger gate is decidable and may block) is judged first, then the
+    first file inside a store; a patch whose memory edit is its second file is still seen."""
+    files = [f for f in parse_patch(patch) if f[0] != "delete"]
+    pick = (next((f for f in files if f[1].lower().endswith(".csv")), None)
+            or next((f for f in files if corpus_for(_absolute(f[1], cwd)) is not None), None)
+            or (files[0] if files else None))
+    if pick is None:
+        return None
+    op, path, added, removed = pick
+    if op == "add":
+        return "Write", {"file_path": path, "content": added}
+    return "Edit", {"file_path": path, "old_string": removed, "new_string": added}
 
 
 def read_payload():
     """The hook payload from stdin, normalised to Claude Code's shape, or None.
 
-    Sets `_host` ("claude-code" | "hermes"), maps Hermes tool names, and copies
-    Hermes's `path` into `file_path`. A `patch` call in Hermes's unadvertised V4A
-    mode carries a whole patch string and no `new_string`; it stays opaque and the
-    write modes see an empty text, which is silence rather than a wrong nudge.
+    Sets `_host` ("claude-code" | "codex" | "hermes"), maps Hermes tool names, and
+    copies Hermes's `path` into `file_path`. A Codex patch, native or through the
+    shell, becomes the Write or Edit it amounts to. A `patch` call in Hermes's
+    unadvertised V4A mode carries a whole patch string and no `new_string`; it
+    stays opaque and the write modes see an empty text, which is silence rather
+    than a wrong nudge.
     """
     try:
         payload = json.load(sys.stdin)
@@ -4450,9 +4614,13 @@ def normalise(payload):
     if not isinstance(ti, dict):
         ti = payload.get("args") if isinstance(payload.get("args"), dict) else {}
     ti = dict(ti)
-    event = str(payload.get("hook_event_name") or "")
-    host = "hermes" if event in ("pre_tool_call", "post_tool_call") else "claude-code"
+    host = host_of(payload)
     tool = payload.get("tool_name")
+    if host == "codex" and (tool == "apply_patch" or (
+            tool == "Bash" and APPLY_PATCH_CMD.match(str(ti.get("command", ""))))):
+        edit = _patch_input(str(ti.get("command", "")), payload.get("cwd"))
+        if edit:
+            tool, ti = edit
     if host == "hermes" and tool == "memory":
         # Hermes's own memory writes go through this tool, never write_file, so
         # without this mapping the store it exists for is the one it never sees.
@@ -4485,8 +4653,8 @@ def normalise(payload):
     # carries, never against the hook subprocess's own. Left relative it misses
     # every corpus and the write passes with no gate, silently.
     fp = ti.get("file_path")
-    if isinstance(fp, str) and fp and not Path(fp).expanduser().is_absolute():
-        ti["file_path"] = str(Path(payload.get("cwd") or os.getcwd()) / fp)
+    if isinstance(fp, str) and fp:
+        ti["file_path"] = _absolute(fp, payload.get("cwd"))
     payload = dict(payload, tool_input=ti, tool_name=tool, _host=host)
     return payload
 
@@ -4495,7 +4663,12 @@ def emit(payload, msg, blocking, source="memscan", db=None):
     """Deliver a hook decision the way THIS host can hear it; returns the exit code.
 
     Claude Code: exit 2 with the message on stderr blocks; stdout JSON carrying
-    `additionalContext` reaches the model without blocking. Hermes: exit 2 blocks,
+    `additionalContext` reaches the model without blocking. Codex: the same
+    `additionalContext` advises, and a block is a `permissionDecision: deny` on
+    stdout, which reaches the model as `Command blocked by PreToolUse hook:
+    <reason>` and the write does not land (measured live on codex-cli 0.157.0;
+    openai/codex#27833 reports older builds ignoring it); exit 0, since exit 2 on
+    a tool event was not measured. Hermes: exit 2 blocks,
     and the message travels as stdout JSON so it is not cut at the 400 characters
     Hermes keeps of stderr. ⚠ Hermes
     has NO same-turn channel for a non-blocking message on a tool event:
@@ -4508,7 +4681,12 @@ def emit(payload, msg, blocking, source="memscan", db=None):
     if not msg:
         return 0
     host = payload.get("_host", "claude-code")
-    if host == "hermes" and not blocking:
+    if HOSTS.get(host, {}).get("block") == "deny-json" and blocking:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "deny",
+            "permissionDecisionReason": msg}}))
+        return 0
+    if HOSTS.get(host, {}).get("advice") == "refuse-once" and not blocking:
         msg = refuse_once(payload, msg.replace(LEAD_WARNING, LEAD_BLOCKING, 1), source, db)
         if msg is None:
             return 0
@@ -4627,6 +4805,9 @@ def gate_status():
     if CLAUDE.is_dir():
         lines.append("2e gate on Claude Code: armed (reads the session transcript "
                      "Claude Code hands the hook); nudges reach the model on the write")
+    if CODEX.is_dir():
+        lines.append("2e gate on Codex: armed (reads the rollout transcript Codex hands the "
+                     "hook); nudges reach the model on the write, once /hooks has trusted them")
     if HERMES.is_dir():
         db = HERMES / "state.db"
         lines.append("2e gate on Hermes: " + ("armed (reads state.db by session_id)"
@@ -4635,6 +4816,61 @@ def gate_status():
                                               "write passes the question silently")
                      + "; a nudge refuses the call once and the same call repeated passes")
     return "\n".join(lines) if lines else "no known host home found; CLI modes only"
+
+
+def hook_mode(payload):
+    """The write-time gate on one normalised Write or Edit: the ledger schema for a
+    CSV, the lexical checks, then the 2e question. Reached from `hook`, and from
+    `bashguard` when a shell call turned out to be a Codex patch."""
+    ti = payload["tool_input"]
+    path = str(ti.get("file_path", ""))
+    if path.lower().endswith(".csv"):  # a ledger row: schema, decidable, may block
+        try:
+            msg, blocking = ledger_decision(path, ti)
+            if not blocking:
+                try:
+                    prior = Path(path).read_text(errors="ignore")
+                except OSError:
+                    prior = ""
+                msg = source_row_decision(path, ti, prior)[0]
+        except Exception:               # a guardrail must never break a write
+            return 0
+        return emit(payload, msg, blocking, "hook")
+    root = corpus_for(path)
+    if root is None:
+        return 0
+    text = str(ti.get("content") or ti.get("new_string") or "")
+    try:
+        prior = Path(path).read_text(errors="ignore")
+    except OSError:                     # new file, or unreadable
+        prior = ""
+    if ti.get("_append") and prior:     # an append is a Write of prior + entry
+        text = prior.rstrip("\n") + "\n" + text
+    name = Path(path).name
+    try:
+        msg, blocking = hook_decision(
+            name, ti, text, prior, lambda: corpus(root),
+            lambda: archived_claims(root),
+            autonomous=os.environ.get("CLAUDE_AUTONOMOUS") == "1",
+            sets=settings(root))
+    except Exception:                   # a guardrail must never break a write: a
+        return 0                        # dangling symlink in the corpus raised here
+    if msg and blocking:
+        return emit(payload, msg, True)
+    # The silent path is the paraphrase blind spot: lexical scoring found
+    # nothing, which is also what it returns for a fact restated in new words.
+    try:
+        gate = memfind_gate(payload, name, ti, text, prior, root)
+    except Exception:                   # a guardrail must never break a write
+        gate = None
+    # A non-blocking nudge must still reach the model when the 2e gate blocks,
+    # or the warning is discarded by the very write that gets refused. ⚠ It is
+    # re-led on the way: exit 2 means the write did NOT land, and a warning
+    # worded for the landed case would assert the opposite of what happened.
+    if gate:
+        warn = msg.replace(LEAD_WARNING, LEAD_BLOCKING, 1) if msg else None
+        return emit(payload, "\n\n".join(x for x in (warn, gate) if x), True)
+    return emit(payload, msg, False, "hook")
 
 
 def main(argv):
@@ -4649,55 +4885,7 @@ def main(argv):
         payload = read_payload()
         if payload is None:
             return 0
-        ti = payload["tool_input"]
-        path = str(ti.get("file_path", ""))
-        if path.lower().endswith(".csv"):  # a ledger row: schema, decidable, may block
-            try:
-                msg, blocking = ledger_decision(path, ti)
-                if not blocking:
-                    try:
-                        prior = Path(path).read_text(errors="ignore")
-                    except OSError:
-                        prior = ""
-                    msg = source_row_decision(path, ti, prior)[0]
-            except Exception:               # a guardrail must never break a write
-                return 0
-            return emit(payload, msg, blocking, mode)
-        root = corpus_for(path)
-        if root is None:
-            return 0
-        text = str(ti.get("content") or ti.get("new_string") or "")
-        try:
-            prior = Path(path).read_text(errors="ignore")
-        except OSError:                     # new file, or unreadable
-            prior = ""
-        if ti.get("_append") and prior:     # an append is a Write of prior + entry
-            text = prior.rstrip("\n") + "\n" + text
-        name = Path(path).name
-        try:
-            msg, blocking = hook_decision(
-                name, ti, text, prior, lambda: corpus(root),
-                lambda: archived_claims(root),
-                autonomous=os.environ.get("CLAUDE_AUTONOMOUS") == "1",
-                sets=settings(root))
-        except Exception:                   # a guardrail must never break a write: a
-            return 0                        # dangling symlink in the corpus raised here
-        if msg and blocking:
-            return emit(payload, msg, True)
-        # The silent path is the paraphrase blind spot: lexical scoring found
-        # nothing, which is also what it returns for a fact restated in new words.
-        try:
-            gate = memfind_gate(payload, name, ti, text, prior, root)
-        except Exception:                   # a guardrail must never break a write
-            gate = None
-        # A non-blocking nudge must still reach the model when the 2e gate blocks,
-        # or the warning is discarded by the very write that gets refused. ⚠ It is
-        # re-led on the way: exit 2 means the write did NOT land, and a warning
-        # worded for the landed case would assert the opposite of what happened.
-        if gate:
-            warn = msg.replace(LEAD_WARNING, LEAD_BLOCKING, 1) if msg else None
-            return emit(payload, "\n\n".join(x for x in (warn, gate) if x), True)
-        return emit(payload, msg, False, mode)
+        return hook_mode(payload)
 
     if mode == "deliver":                   # retired: an older Hermes config still calls it
         sys.stdin.read()
@@ -4705,6 +4893,8 @@ def main(argv):
 
     if mode == "bashguard":                 # PreToolUse on Bash: the writes it misses
         payload = read_payload()
+        if payload is not None and payload["tool_name"] in ("Write", "Edit"):
+            return hook_mode(payload)       # a Codex patch sent through the shell
         if payload is None or payload["tool_name"] != "Bash":
             return 0
         command = str(payload["tool_input"].get("command", ""))
