@@ -125,6 +125,14 @@ CORPORA = dict(HOST_STORES)
 # (prime-memory-discipline §6); `discovery-research` holds Mode-2 angle files the
 # surveillance cycle appends to on a schedule, with no session in front of it to
 # read a nudge that BLOCKS the write. The cache directory is never prose.
+# Trees a package manager or a build writes: never prose, and their READMEs and
+# changelogs would score as claims against the store they sit in. Unioned into
+# every store's exclusions rather than defaulted, because a manifest's own
+# `excluded_dirs` replaces the defaults and must not re-admit them. A dotted
+# directory (.venv, .build, .git) is already skipped by name.
+DEPENDENCY_DIRS = {"node_modules", "bower_components", "jspm_packages", "vendor",
+                   "Pods", "Carthage", "DerivedData", "venv", "site-packages",
+                   "__pycache__", "build", "dist"}
 EXCLUDED_DIRS = {"archive", "in-flight", "harness-logs", "discovery-research", ".memfind",
                  "backups", "backup"}   # a backup is a verbatim copy, so it forks by design
 
@@ -576,6 +584,7 @@ def _own_walk(root, m=None):
     if root is not None and Path(root) in HOST_EXCLUDED:
         excluded |= HOST_EXCLUDED[Path(root)]
     excluded.update({"backups", "backup"})    # nor is a backup, which forks by design
+    excluded |= DEPENDENCY_DIRS               # nor a dependency or build tree, whatever the manifest says
     return members, excluded
 
 
@@ -764,8 +773,11 @@ def md_files(root):
     return sorted(p for r in roots_of(root) for p in _own_md(r))
 
 
-def _own_md(root):
-    """The markdown physically under one store, by that store's own settings."""
+def _own_md(root, pattern="*.md", honor_excluded_files=True):
+    """The markdown physically under one store, by that store's own settings.
+    `pattern` walks another file type the same way (the ledger sweep takes
+    `*.csv`), and a sweep that must see a file the manifest hides from claims
+    passes `honor_excluded_files=False`."""
     root = Path(root)
     skip = settings(root)["excluded_dirs"]
     # A subdirectory carrying its own manifest is a corpus of its own: `_root_of`
@@ -778,13 +790,13 @@ def _own_md(root):
     # carries no manifest) belongs to itself, whatever the member list says.
     nested |= {r.relative_to(root) for r in _raw_corpora().values()
                if r != root and root in r.parents}
-    return sorted(p for p in _member_md(root)
+    return sorted(p for p in _member_md(root, pattern)
                   if not any(q.name in skip or q.name.startswith(".") or q in nested
                              for q in p.relative_to(root).parents)
-                  and not excluded_file(root, p))
+                  and not (honor_excluded_files and excluded_file(root, p)))
 
 
-def _member_md(root):
+def _member_md(root, pattern="*.md"):
     """Every markdown file under the root's member directories, plus the root's
     own. Walking only the members is what keeps a host store cheap: the council
     home holds session transcripts and plugin trees that a bare rglob would
@@ -792,13 +804,13 @@ def _member_md(root):
     root = Path(root)
     mem = settings(root)["members"]
     if mem is None:
-        yield from root.rglob("*.md")
+        yield from root.rglob(pattern)
         return
-    yield from root.glob("*.md")
+    yield from root.glob(pattern)
     for name in sorted(mem):
         d = root / name
         if d.is_dir():
-            yield from d.rglob("*.md")
+            yield from d.rglob(pattern)
 
 
 def excluded_file(root, path):
@@ -1652,16 +1664,40 @@ def cmd_init(target, index=True, parent=None, name=None):
     # A host store or a project memory is listed on sight and takes no registry
     # row; a manifest there is optional config (sources, exclusions), kept if
     # present and never written for it.
+    # A standalone store's manifest carries its `name`, the folder's unless
+    # `--name` says otherwise, so the label is visible and editable in the one
+    # file that owns it. Only the name: a default written into a manifest
+    # replaces the built-in and freezes it there, so a store would stop
+    # receiving a changed default without anyone having chosen that.
+    if name is None and not (m.is_file() or inside == d):
+        other = _raw_corpora().get(d.name)
+        if other is not None and other != d:
+            print(f"the name {d.name!r} is taken by {other}; name this store:  "
+                  f"locket init {d} --name <label>", file=sys.stderr)
+            return 1
+    if name is not None:
+        if "/" in name or name in (".", "..") or not name.strip():
+            print(f"{name!r} cannot be a name: it is prefixed to paths", file=sys.stderr)
+            return 1
+        other = _raw_corpora().get(name)
+        if other is not None and other != d:
+            print(f"the name {name!r} is taken by {other}; `corpora` lists the names", file=sys.stderr)
+            return 1
     by_convention = inside == d and not m.is_file()
     if m.is_file():
-        print(f"manifest: {m} (kept)")
         by_convention = d in set(HOST_STORES.values()) or (
             d.name == "memory" and d.parent.parent == CLAUDE / "projects")
-    elif by_convention:
+        man = _read_manifest(d)
+        if name is not None and man.get("name") != name:
+            m.write_text(json.dumps({**man, "name": name}, indent=2) + "\n")
+            print(f"manifest: {m} (kept, name {name!r})")
+        else:
+            print(f"manifest: {m} (kept)")
+    elif by_convention and name is None:
         print(f"manifest: none needed; {d} is a corpus by convention on this host")
     else:
-        m.write_text("{}\n")
-        print(f"manifest: {m} (written)")
+        m.write_text(json.dumps({"name": name or d.name}, indent=2) + "\n")
+        print(f"manifest: {m} (written, name {name or d.name!r})")
     settings.cache_clear()
     if by_convention:
         print("registry: not needed; listed by convention")
@@ -2705,7 +2741,8 @@ def selftest():
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc = cmd_init(vault, index=False)
-        assert rc == 0 and (vault / MANIFEST).read_text() == "{}\n", buf.getvalue()
+        assert rc == 0 and json.loads((vault / MANIFEST).read_text()) == {"name": "vault"}, \
+            "a standalone manifest carries the folder's name and no default"
         assert registry() == [vault] and vault in all_corpora().values(), \
             "init makes the listing see a manifest directory"
         assert corpus_here(vault) == vault and corpus_here(vault / "sub") == vault, \
@@ -2716,6 +2753,27 @@ def selftest():
         with contextlib.redirect_stdout(buf):
             assert cmd_init(vault, index=False) == 0
         assert "(kept)" in buf.getvalue() and "already listed" in buf.getvalue(), buf.getvalue()
+        # --name without --parent: a standalone label, set at init or renamed later
+        named = (d / "notes-2").resolve(); named.mkdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert cmd_init(named, index=False, name="field-notes") == 0
+        assert _read_manifest(named) == {"name": "field-notes"} and all_corpora().get("field-notes") == named
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert cmd_init(vault, index=False, name="vault-renamed") == 0
+        assert _read_manifest(vault)["name"] == "vault-renamed", "--name on a kept manifest renames it"
+        clash = (d / "clash").resolve(); clash.mkdir()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            assert cmd_init(clash, index=False, name="field-notes") == 1
+        assert "is taken by" in err.getvalue() and not (clash / MANIFEST).exists(), err.getvalue()
+        twin = (d / "other" / "field-notes").resolve(); twin.mkdir(parents=True)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            assert cmd_init(twin, index=False) == 1, "a folder name another store holds is refused, not keyed by path"
+        assert "--name" in err.getvalue(), err.getvalue()
+        assert forget(named), "the named store leaves the registry as it came"
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert cmd_init(vault, index=False, name="vault") == 0
         with contextlib.redirect_stderr(io.StringIO()):
             assert cmd_init(vault / "sub", index=False) == 1, "a directory inside a corpus is refused"
         # and so is a directory CONTAINING one, whether the inner store is listed
@@ -2988,6 +3046,45 @@ def selftest():
         n = cmd_ledgers(led)
     assert n == 0 and "1 ledger(s) checked, 0 finding(s)" in buf.getvalue(), buf.getvalue()
     (led / MANIFEST).unlink(); settings.cache_clear(); hist.write_text(hdr + good)
+    # rulings and claims: one glob covers the single-store and the project name
+    rh, ch = "Ruling,Category,Area,Date\n", "Claim,Category,Area,Source,Date\n"
+    rul = '"Pro unlocks by a one-time purchase, never a subscription.",product,pricing,2026-09-26\n'
+    for name in ("RULINGS.csv", "RULINGS-Proj.csv"):
+        assert ledger_schema_for(led / name)[1] == "RULINGS*.csv", name
+        assert ledger_decision(str(led / name), {"content": rh + rul}) == (None, False), name
+    assert ledger_schema_for(led / "CLAIMS-Proj.csv")[1] == "CLAIMS*.csv"
+    assert ledger_schema_for(led / "REFERENCE-Proj-Rulings.csv") == (None, None), \
+        "a name outside the glob is governed only through `extends`"
+    rp = led / "RULINGS-Proj.csv"; rp.write_text(rh)
+    assert ledger_decision(str(rp), {"old_string": "x", "new_string": rul.replace(",pricing,", ",pricing|release,")}) \
+        == (None, False), "a pipe-joined Area is several keys"
+    msg, blocking = ledger_decision(str(rp), {"old_string": "x", "new_string": rul.replace(",pricing,", ",Pricing,")})
+    assert blocking and "Area is 'Pricing'" in msg, "an Area is a lowercase key, because pointers query it"
+    msg, blocking = ledger_decision(str(rp), {"old_string": "x", "new_string": rul.replace(",2026-09-26", ",")})
+    assert blocking and "Date is required" in msg, msg
+    cp = led / "CLAIMS-Proj.csv"; cp.write_text(ch)
+    msg, blocking = ledger_decision(str(cp), {"old_string": "x", "new_string": '"An empty product list means the agreement is unsigned.",code,iap,,2026-09-26\n'})
+    assert blocking and "Source is required" in msg, "a claim without a source is a finding"
+    rp.unlink(); cp.unlink()
+    # the sweep walks the store: a ledger under a subdirectory is checked, one
+    # under an excluded directory is not
+    (led / MANIFEST).write_text("{}\n"); settings.cache_clear()
+    (led / "memory").mkdir(exist_ok=True)
+    (led / "memory" / "RULINGS.csv").write_text(rh + rul.replace(",pricing,", ",Pricing,"))
+    (led / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
+    (led / "node_modules" / "pkg" / "README.md").write_text("A dependency's readme is never prose of this store.\n")
+    assert not any("node_modules" in str(p) for p in md_files(led)), "a dependency tree is not walked"
+    (led / MANIFEST).write_text(json.dumps({"excluded_dirs": ["drafts"]})); settings.cache_clear()
+    assert not any("node_modules" in str(p) for p in md_files(led)), "a store's own exclusions do not re-admit it"
+    (led / MANIFEST).write_text("{}\n"); settings.cache_clear()
+    (led / "archive").mkdir(exist_ok=True)
+    (led / "archive" / "RULINGS.csv").write_text(rh + rul.replace(",pricing,", ",Pricing,"))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        n = cmd_ledgers(led)
+    assert n == 1 and "memory/RULINGS.csv" in buf.getvalue() and "archive/" not in buf.getvalue(), buf.getvalue()
+    (led / "memory" / "RULINGS.csv").unlink(); (led / "archive" / "RULINGS.csv").unlink()
+    (led / MANIFEST).unlink(); settings.cache_clear()
 
     # --- host adapters: Hermes speaks the same payload in its own vocabulary ---
     h = normalise({"hook_event_name": "pre_tool_call", "tool_name": "write_file",
@@ -3815,7 +3912,9 @@ MODES
             manifest's `name` or else the folder's; `--name LABEL` sets it,
             and a label clashing with the parent's name or one of its
             directories is refused. A host auto-memory folder is always
-            `memory`, so it takes `--name`.
+            `memory`, so it takes `--name`. A standalone store's manifest is
+            written with `name` (the folder's, or `--name LABEL`) and nothing
+            else, so every other key keeps tracking the built-in default.
   schema [DIR]  write the manifest's JSON Schema to ~/.locket/locket.schema.json
             (`init` does this too), so an editor mapped to that path hints every
             `locket.json` by filename; with DIR, check that directory's manifest
@@ -3897,10 +3996,16 @@ The module docstring carries the design rationale."""
 # do is grow a row past the shape a query can scan. The schema is the one thing
 # about a ledger that is decidable at write time (§2d: an instrument blocks only
 # on a question it can decide), so a row over a cap, outside an enum or off its
-# pattern is REFUSED, where every prose check only warns. The built-in schema is
-# the session-history ledger every project keeps; it is keyed by a basename
-# glob and applies wherever the file is, corpus or not, because the project root
-# a HISTORY file sits in is usually no store at all. A manifest's `ledgers` list
+# pattern is REFUSED, where every prose check only warns. The built-in schemas are
+# the session-history ledger every project keeps and the rulings and claims
+# ledgers a store keeps once it has earned them (`RULINGS.csv` in a single store,
+# `RULINGS-<Project>.csv` in a project, so one glob covers both). Each is keyed by
+# a basename glob and applies wherever the file is, corpus or not, because the
+# project root a ledger sits in is usually no store at all. Rulings and claims
+# carry no text cap: their rows range past 2,000 characters in live stores, and a
+# store that wants one sets it in its manifest. `Category` and `Area` take one
+# lowercase key or several joined by `|`, because `Area=X` is how every pointer
+# queries them; only a claim carries a `Source`. A manifest's `ledgers` list
 # adds a schema for any other CSV in that store, or adjusts a built-in for its
 # own file by naming the same glob or a path under it, merging onto it
 # (`_merge_schema`). This constant is each schema's one home: `usage()` renders
@@ -3909,6 +4014,7 @@ The module docstring carries the design rationale."""
 # which side of midnight it came from. `repo` names the repository the hash
 # resolves in (`group/sub/repo` allowed), `issue` is one tracker-agnostic ticket
 # key (`#12`, `ENG-42`) and `pr` a GitHub PR or GitLab MR (`#155`, `!155`).
+_LEDGER_KEYS = r"[a-z][a-z0-9-]*(?:\|[a-z][a-z0-9-]*)*"
 LEDGER_SCHEMAS = {
     "HISTORY-*-Sessions.csv": {
         "columns": ["date", "title", "summary", "area", "repo", "commit_hash", "issue", "pr"],
@@ -3919,6 +4025,16 @@ LEDGER_SCHEMAS = {
                     "commit_hash": r"(?:[0-9a-f]{7,40})?",
                     "issue": r"(?:\S{1,40})?",
                     "pr": r"(?:[#!]\d+)?"},
+    },
+    "RULINGS*.csv": {
+        "columns": ["Ruling", "Category", "Area", "Date"],
+        "required": ["Ruling", "Category", "Area", "Date"],
+        "pattern": {"Category": _LEDGER_KEYS, "Area": _LEDGER_KEYS, "Date": r"20\d\d-\d\d-\d\d"},
+    },
+    "CLAIMS*.csv": {
+        "columns": ["Claim", "Category", "Area", "Source", "Date"],
+        "required": ["Claim", "Category", "Area", "Source", "Date"],
+        "pattern": {"Category": _LEDGER_KEYS, "Area": _LEDGER_KEYS, "Date": r"20\d\d-\d\d-\d\d"},
     },
 }
 _SCHEMA_KEYS = ("columns", "required", "caps", "enum", "pattern")
@@ -4247,18 +4363,21 @@ def cmd_ledgers(root):
     prints its scope, so a zero says what it was scored against."""
     schemas = ledger_schemas(root)
     seen, files = set(), []
+    # The store's own walker, members and excluded directories honoured, so a
+    # ledger under a member directory (a store's `memory/RULINGS.csv`) is swept;
+    # a root-only glob reported such a store clean while checking nothing.
+    # `excluded_files` hides a file from claims, not from its schema.
     for r in roots_of(root):
-        for glob in schemas:
-            for p in sorted(Path(r).glob(glob) if "/" not in glob else [Path(r) / glob]):
-                rp = p.resolve()
-                if not p.is_file() or rp in seen:
-                    continue
-                seen.add(rp)
-                # the gate's own resolver, so a file an entry names inside a
-                # built-in's glob is checked once, under the entry, as it is written
-                schema, g = ledger_schema_for(p)
-                if schema is not None:
-                    files.append((p, schema, g))
+        for p in _own_md(r, "*.csv", honor_excluded_files=False):
+            rp = p.resolve()
+            if rp in seen:
+                continue
+            seen.add(rp)
+            # the gate's own resolver, so a file an entry names inside a
+            # built-in's glob is checked once, under the entry, as it is written
+            schema, g = ledger_schema_for(p)
+            if schema is not None:
+                files.append((p, schema, g))
     if not files:
         print(f"no schema-governed ledger in {root} (schemas: {', '.join(schemas)})")
         return 0
@@ -4949,11 +5068,8 @@ def main(argv):
                     return 1
                 flags[f] = rest[i + 1]; del rest[i:i + 2]
         if len(rest) != 1:
-            print("init needs a directory:  locket init <dir> [--parent <corpus> [--name <label>]]",
+            print("init needs a directory:  locket init <dir> [--name <label>] [--parent <corpus>]",
                   file=sys.stderr)
-            return 1
-        if "--name" in flags and "--parent" not in flags:
-            print("--name labels a joining store and needs --parent", file=sys.stderr)
             return 1
         return cmd_init(rest[0], parent=flags.get("--parent"), name=flags.get("--name"))
     if mode == "migrate":                   # rename memfind.json -> locket.json, one store or all

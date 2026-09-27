@@ -461,7 +461,7 @@ def selftest():
     r = call({"jsonrpc": "2.0", "id": 12, "method": "tools/call",
               "params": {"name": "locket_init", "arguments": {"path": str(vault)}}})
     txt = r["result"]["content"][0]["text"]
-    assert not r["result"]["isError"] and "(written)" in txt and "(added)" in txt, txt
+    assert not r["result"]["isError"] and "(written, name " in txt and "(added)" in txt, txt
     r = call({"jsonrpc": "2.0", "id": 13, "method": "tools/call",
               "params": {"name": "locket_corpora", "arguments": {}}})
     assert "vault" in r["result"]["content"][0]["text"], r["result"]["content"][0]["text"]
