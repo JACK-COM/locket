@@ -334,10 +334,18 @@ def load_cached(root):
 # ---------------------------------------------------------------- query
 
 def lexical_rank(statement, root, top=5, per_file=True, items=None):
-    """`rank` with no embedder: word overlap over the same claims, scored as the
-    cosine of two binary bags. Blind to a paraphrase by construction, which is
-    the gap the semantic rung exists to close; better than refusing to answer.
-    Same output shape as `rank`, so every caller reads it unchanged."""
+    """`rank` with no embedder: word overlap over the same claims, scored by BM25.
+    Blind to a paraphrase by construction, which is the gap the semantic rung
+    exists to close; better than refusing to answer. Same output shape as
+    `rank`, so every caller reads it unchanged.
+
+    Tokens are sets, so every term frequency is 1 and BM25 reduces to IDF-weighted
+    overlap with a length penalty. The IDF is the point: the unweighted cosine it
+    replaced let three shared common words ("session", "file", "claim") outrank
+    the one rare word ("hermes") the query was about. The score is divided by the
+    query's score against itself, so a claim finding itself reads 1.000 as it does
+    semantically; a query word no claim holds stays in that divisor, because its
+    absence is evidence the fact is new."""
     if items is None:
         items = [(name, s) for name, body in sorted(memscan.corpus(root, csv=False).items())
                  for s, _ in memscan.claims(body)]              # already stripped
@@ -345,18 +353,33 @@ def lexical_rank(statement, root, top=5, per_file=True, items=None):
     q = memscan.tokens(statement)
     if not q:
         return []
+    toks = [memscan.tokens(s) for _, s in items]
+    n = len(toks)
+    avgdl = (sum(map(len, toks)) / n) if n else 1.0
+    df = dict.fromkeys(q, 0)
+    for t in toks:
+        for w in q & t:
+            df[w] += 1
+    idf = {w: math.log(1 + (n - d + 0.5) / (d + 0.5)) for w, d in df.items()}
+    k1, b = 1.2, 0.75
+
+    def norm(dl):                    # the tf=1 saturation term at length dl
+        return (k1 + 1) / (1 + k1 * (1 - b + b * dl / avgdl))
+
+    ideal = sum(idf.values()) * norm(len(q))
     best = {}
-    for i, (f, s) in enumerate(items):
-        t = memscan.tokens(s)
-        shared = len(q & t)
+    for i, t in enumerate(toks):
+        shared = q & t
         if not shared:
             continue
-        c = shared / math.sqrt(len(q) * len(t))
-        key = i if (_is_row(f) or not per_file) else f
+        c = sum(idf[w] for w in shared) * norm(len(t)) / ideal
+        key = i if (_is_row(items[i][0]) or not per_file) else items[i][0]
         if c > best.get(key, (-2, -1))[0]:
             best[key] = (c, i)
     rows = sorted(best.items(), key=lambda kv: -kv[1][0])[:top]
-    return [(c, items[i][0], items[i][1]) for _, (c, i) in rows]
+    # A claim shorter than the query can score past 1 on a subset of its words;
+    # sort on the raw score, report it capped so 1.000 keeps meaning "this claim".
+    return [(min(c, 1.0), items[i][0], items[i][1]) for _, (c, i) in rows]
 
 
 def rank(statement, root, top=5, per_file=True, quiet=False, idx=None, lexical=True):
@@ -509,6 +532,7 @@ def selftest():
     # fixture carries a manifest naming its own index file, so that path is
     # exercised too, and it needs an embedder: without one it says so and stops.
     import tempfile, shutil
+    _selftest_lexical()
     try:
         resolve_backend()
     except RuntimeError as e:
@@ -589,6 +613,26 @@ def selftest():
     shutil.rmtree(d, ignore_errors=True)
     _selftest_rows()
     print("selftest ok")
+
+
+def _selftest_lexical():
+    """The no-embedder rung, which needs no embedder to test, so it runs on the
+    hosts that depend on it. The fixture is the case BM25 replaced the cosine for:
+    one claim shares three words that most claims carry, another shares the one
+    word nothing else does, and the rare word has to win. The unweighted cosine
+    ranked the common-word claim first on this fixture."""
+    common = [("chatter.md", f"session file notes number {i} appear in the daily log")
+              for i in range(20)]
+    items = common + [
+        ("common.md", "session file notes appear together every single day"),
+        ("hermes.md", "hermes runs overnight beside ollama locally"),
+    ]
+    r = lexical_rank("hermes session file notes", None, top=2, items=items)
+    assert r[0][1] == "hermes.md", f"the rare word must outrank three common ones: {r}"
+    r = lexical_rank(items[-2][1], None, top=1, items=items)
+    assert r[0][1] == "common.md" and r[0][0] > 0.99, f"a claim must find itself at 1.000: {r}"
+    assert lexical_rank("nothing here matches", None, items=items) == []
+    assert all(0 < c <= 1.0 for c, _, _ in lexical_rank("session notes", None, top=30, items=items))
 
 
 def _selftest_rows():
