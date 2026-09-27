@@ -386,7 +386,12 @@ def rank(statement, root, top=5, per_file=True, quiet=False, idx=None, lexical=T
     """Ranked (score, file-or-row, sentence). Semantic where an embedder can be
     had; with `lexical` true it falls back to word overlap and sets
     LAST_RANK_MODE so the caller can say so. A hook passes `lexical=False`,
-    because a nudge worded "by meaning" must not be produced by word overlap."""
+    because a nudge worded "by meaning" must not be produced by word overlap.
+
+    Do not fuse BM25 into the semantic ranking. Reciprocal rank fusion was tried
+    on 80 paraphrase queries over the council store and lost every variant:
+    owner-first 0.72 semantic alone, 0.55 at best fused, and 0.85 against 0.82
+    even on queries that keep an identifier verbatim."""
     global LAST_RANK_MODE
     LAST_RANK_MODE = "semantic"
     try:
