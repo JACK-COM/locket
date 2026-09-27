@@ -2558,6 +2558,20 @@ def selftest():
             "cd - && echo x > topic_note.md",                                  # the previous dir, untracked
         ):
             assert bw(quiet) == (None, False), f"decoy fired: {quiet}"
+        # a run-time variable is undecidable from the command: expanded, it may warn, never block
+        saved = {k: os.environ.get(k) for k in ("LOCKET_T_OUT", "LOCKET_T_MEM", "LOCKET_T_UNSET")}
+        os.environ.update(LOCKET_T_OUT="/Users/x/elsewhere/", LOCKET_T_MEM=cmem)
+        os.environ.pop("LOCKET_T_UNSET", None)
+        for quiet in ('cat > "$LOCKET_T_OUT/pr.md" <<EOF', "cat > ${LOCKET_T_OUT}pr.md",
+                      "echo x >> $LOCKET_T_UNSET/topic_note.md", 'echo x > "$(mktemp -d)/n.md"'):
+            assert bw(quiet) == (None, False), f"a variable outside the corpus fired: {quiet}"
+        msg, blk = bw("echo x >> $LOCKET_T_MEM/topic_note.md")
+        assert msg and not blk, "a variable expanding into a corpus warns rather than blocks"
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         msg, blk = bw("python3 - <<'EOF'\npathlib.Path('MEMORY.md').write_text(s)\nEOF")
         assert msg and not blk, "a scripted write warns rather than blocks"
         for quiet in (
@@ -4517,28 +4531,39 @@ def bash_write_targets(command, cwd):
     in the command, because that is the shape a heredoc rewrite actually takes.
     Resolving rather than name-matching is why the same command is a corpus write
     from inside a corpus and nothing at all from outside one.
+
+    A path the shell expands at run time (any variable but HOME, a substitution)
+    cannot be decided from the command, so it never blocks: it is expanded against
+    this process's environment and, if that lands in a corpus, warns. Read
+    literally, `"$TMPDIR/x.md"` is relative and joins the cwd, which would block
+    every temp-file heredoc written from inside a corpus.
     """
     def resolve(tok, pos):
+        """(path, decidable) for the corpus file `tok` names, or None."""
         tok = _expand_home(tok)
+        decidable = not any(c in tok for c in "$`")
+        if not decidable:
+            tok = os.path.expandvars(tok)
+            if any(c in tok for c in "$`"):          # unset, or a substitution
+                return None
         cands = ([tok] if tok.startswith("/")
                  else [str(Path(r) / tok) for r in _cd_targets(command, cwd, pos)])
         for c in cands:
             if corpus_for(c) is not None:
-                return Path(c)
+                return Path(c), decidable
         return None
 
-    blocking = []
+    blocking, opaque = [], []
     for pat in BASH_WRITE:
         for m in pat.finditer(command):
             hit = resolve(m.group("p"), m.start("p"))
             if hit:
-                blocking.append(hit)
-    opaque = []
+                (blocking if hit[1] else opaque).append(hit[0])
     if BASH_WRITE_OPAQUE.search(command):
         for m in re.finditer(r"[\w./~-]+\.md", command):
             hit = resolve(m.group(), m.start())
-            if hit and hit not in blocking:
-                opaque.append(hit)
+            if hit and hit[0] not in blocking and hit[0] not in opaque:
+                opaque.append(hit[0])
     return blocking, opaque
 
 
