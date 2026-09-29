@@ -74,7 +74,15 @@ VERBS = [
      "locket usage month --by model         30 days, per model"),
     ("corpora", "", "every store on this machine", None),
     ("init", "<dir> [--name <label>] [--parent <corpus>] [--ledgers[=<Name>]]",
-     "make a folder of markdown a store; --ledgers adds the three CSVs", "locket init ~/notes --ledgers"),
+     "make a folder of markdown a store; running it again changes nothing",
+     "locket init ~/notes                   the folder becomes a store, named after it\n"
+     "locket init ~/notes --name work       names the store `work`; works on a Claude Code project store too\n"
+     "locket init ~/docs --parent notes     ~/docs joins the store `notes`: two folders, one store\n"
+     "locket init ~/notes --ledgers         adds RULINGS-notes.csv (decisions), CLAIMS-notes.csv\n"
+     "                                      (facts with sources) and HISTORY-notes-Sessions.csv (one\n"
+     "                                      row per session), header only; rows off their columns\n"
+     "                                      are refused as they are written\n"
+     "locket init ~/notes --ledgers=Work    the same files, named RULINGS-Work.csv and so on"),
     ("migrate", "[<dir>|all]", "rename an older memfind.json manifest to locket.json", "locket migrate all"),
     ("schema", "[<dir>]", "write the manifest schema, or check a manifest", "locket schema ~/notes"),
     ("forget", "<dir>", "drop a store's registry row", None),
