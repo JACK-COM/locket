@@ -197,12 +197,20 @@ def _raw_corpora():
     """Every physical store on the machine, joined or not: each host store that
     exists, one per Claude Code project, and every registered directory whose
     manifest is still there. A registered store is keyed by the `name` in its
-    manifest, else its basename, else its full path where either collides."""
+    manifest, else its basename, else its full path where either collides. A
+    project store is keyed by its manifest's `name` too, else its slug, which
+    `resolve` still accepts; `init` writes the name and never registers one."""
     out = {k: v for k, v in HOST_STORES.items() if v.is_dir()}
+    reg = [p for p in registry() if has_manifest(p)]
+    # a project's name yields to a host key and to a registered store's name, which
+    # a `belongs_to` elsewhere may already point at
+    taken = set(HOST_STORES) | {_read_manifest(p).get("name") for p in reg}
     for d in sorted((CLAUDE / "projects").glob("*/memory")):
-        out[d.parent.name] = d
-    for p in registry():
-        if not has_manifest(p) or p in out.values():
+        name = _read_manifest(d).get("name")
+        ok = isinstance(name, str) and name and name not in taken and name not in out
+        out[name if ok else d.parent.name] = d
+    for p in reg:
+        if p in out.values():
             continue
         name = _read_manifest(p).get("name")
         key = name if isinstance(name, str) and name else p.name
@@ -218,6 +226,15 @@ def all_corpora():
     return {k: v for k, v in raw.items() if parent_of(v, raw) is None}
 
 
+def _by_name(raw, name):
+    """The store `raw` keys as `name`, or the project store whose slug it is: a
+    `belongs_to` written by slug keeps resolving once that store takes a name."""
+    hit = raw.get(name)
+    if hit is None and name.startswith("-"):
+        hit = next((d for d in raw.values() if d.name == "memory" and d.parent.name == name), None)
+    return hit
+
+
 def parent_of(root, raw=None):
     """The store `root` declares it belongs to, or None. `belongs_to` in the
     manifest names a corpus as `corpora` lists it; a name that resolves to no
@@ -231,7 +248,7 @@ def parent_of(root, raw=None):
     if not isinstance(name, str) or not name:
         return None
     raw = raw if raw is not None else _raw_corpora()
-    target = raw.get(name)
+    target = _by_name(raw, name)
     if target is None or target == root or root in target.parents or _walked_by(target, root):
         return None
     seen, cur = {root}, target                  # a cycle means nobody is the top
@@ -240,7 +257,7 @@ def parent_of(root, raw=None):
             return None
         seen.add(cur)
         nxt = _read_manifest(cur).get("belongs_to")
-        cur = raw.get(nxt) if isinstance(nxt, str) else None
+        cur = _by_name(raw, nxt) if isinstance(nxt, str) else None
     return target
 
 
@@ -332,7 +349,12 @@ def resolve(name):
     p = Path(name).expanduser()
     if p.is_dir():
         return top_of(p.resolve())
-    hits = {k: v for k, v in all_corpora().items() if name.lower() in k.lower()}
+    listed = all_corpora()
+    hits = {k: v for k, v in listed.items() if name.lower() in k.lower()}
+    if not hits:                            # a named project store still answers to its slug
+        tops = set(listed.values())
+        hits = {d.parent.name: d for d in (CLAUDE / "projects").glob("*/memory")
+                if d in tops and name.lower() in d.parent.name.lower()}
     exact = [v for k, v in hits.items() if k.lower() == name.lower()]
     if len(exact) == 1:                  # `devdocs` beside `devdocs-persona` is not ambiguous
         return exact[0]
@@ -442,7 +464,7 @@ def _read_manifest(root):
     try:
         data = json.loads(m.read_text())
         return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError):
+    except (ValueError, OSError):           # JSONDecodeError, and a non-UTF-8 file
         return {}
 
 
@@ -1971,13 +1993,15 @@ def cmd_budget(root):
     w = sum(1 for r in flagged if r[2] > PARA_WORDS)
     print(f"{len(rows)} files; {len(flagged)} over an §5 budget — "
           f"{b} past {ENTRY_BYTES // 1024}KB [B], {u} with {UPDATE_CAP}+ update clauses [U], "
-          f"{w} with a {PARA_WORDS}+ word paragraph [P]. Largest 25:\n")
+          f"{w} with a {PARA_WORDS}+ word paragraph [P]."
+          + (f" Largest {min(25, len(flagged))}:\n" if flagged else ""))
     def mark_of(size, upd, para):
         return "".join(c for c, hit in
                        (("B", size > ENTRY_BYTES), ("U", upd >= UPDATE_CAP), ("P", para > PARA_WORDS))
                        if hit)
 
-    print(f"  {'bytes':>7} {'upd':>4} {'para':>5}  file")
+    if flagged:
+        print(f"  {'bytes':>7} {'upd':>4} {'para':>5}  file")
     for size, upd, para, name in flagged[:25]:
         print(f"  {size:7d} {upd:4d} {para:5d}  {name}  [{mark_of(size, upd, para)}]")
 
@@ -2754,8 +2778,37 @@ def selftest():
         "a ledger named by the manifest is exempt in bashguard too"
     assert bash_write_decision("cat > facts.md", str(store))[1], \
         "a plain file in a manifest corpus blocks"
-    # --- init --ledgers: the built-in ledgers, header only, two registered as sources
+    # --- a project store answers to its manifest's name, and to its slug still
     import contextlib, io
+    real_claude, fake = CLAUDE, Path(tempfile.mkdtemp())
+    proj = fake / "projects" / "-Users-x-devdocs" / "memory"
+    proj.mkdir(parents=True); (proj / "a.md").write_text("A note about the project.\n")
+    globals()["CLAUDE"] = fake
+    try:
+        assert "-Users-x-devdocs" in all_corpora(), "an unnamed project store is keyed by its slug"
+        (proj / MANIFEST).write_text(json.dumps({"name": "devdocs-main"})); settings.cache_clear()
+        assert all_corpora().get("devdocs-main") == proj, "a named project store is keyed by its name"
+        assert resolve("devdocs-main") == proj and resolve("-Users-x-devdocs") == proj, \
+            "the name resolves, and the slug still does"
+        kid = fake / "projects" / "-Users-x-kid" / "memory"; kid.mkdir(parents=True)
+        (kid / "b.md").write_text("Another note.\n")
+        (kid / MANIFEST).write_text(json.dumps({"belongs_to": "-Users-x-devdocs"})); settings.cache_clear()
+        assert parent_of(kid) == proj, "a belongs_to written by slug still joins the named store"
+        (proj / MANIFEST).write_text(json.dumps({"name": "council"})); settings.cache_clear()
+        assert _raw_corpora().get("council") != proj and "-Users-x-devdocs" in _raw_corpora(), \
+            "a project name never takes a host key"
+        (proj / MANIFEST).write_bytes(b'{"name": "\xff"}'); settings.cache_clear()
+        assert _read_manifest(proj) == {} and "-Users-x-devdocs" in _raw_corpora(), \
+            "a manifest that is not UTF-8 degrades instead of raising"
+    finally:
+        globals()["CLAUDE"] = real_claude
+        shutil.rmtree(fake, ignore_errors=True); settings.cache_clear()
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        cmd_budget(store)
+    assert "Largest" not in out.getvalue() and "bytes" not in out.getvalue(), \
+        f"a store under budget printed an empty table: {out.getvalue()}"
+    # --- init --ledgers: the built-in ledgers, header only, two registered as sources
     man_before = (store / MANIFEST).read_text()
     with contextlib.redirect_stdout(io.StringIO()):
         assert scaffold_ledgers(store, "Brain") == 0
