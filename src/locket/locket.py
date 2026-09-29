@@ -43,35 +43,55 @@ SCAN = ("audit", "across", "dupes", "graduated", "ledgers", "budget", "pointers"
 # every flag after the verb reaches memscan or memfind untouched.
 VERBS = [
     ("find", '"<statement>" [corpus] [-n N]', "files most likely to own the statement, by meaning",
-     'locket find "a fact you are about to write" council\n'
-     'locket find "the same fact" all             every store, one list per store'),
-    ("siblings", "[corpus] [-n N]", "file pairs sharing one subject", "locket siblings notes -n 10"),
+     'locket find "a fact to write"          the 5 closest files in this directory\'s store\n'
+     'locket find "a fact" council -n 10     the 10 closest in the store `council`\n'
+     'locket find "the same fact" all        every store, one list per store'),
+    ("siblings", "[corpus] [-n N]", "file pairs sharing one subject: candidates to merge",
+     "locket siblings                       the 30 closest pairs in this directory's store\n"
+     "locket siblings notes -n 10           the 10 closest in `notes`"),
     ("index", "[corpus]", "build or refresh the semantic cache", "locket index council"),
     ("embedder", "", "which embedder answers on this machine", None),
-    ("audit", "[corpus]", "claim pairs across files that agree: fork risk", "locket audit all"),
-    ("across", "", "claim pairs split across two stores; takes no corpus", None),
-    ("dupes", "[corpus] [file ...]", "repeated claims inside one file; use on the holding spaces",
-     "locket dupes council SHORT_TERM.md"),
-    ("graduated", "[corpus] [floor]", "holding-space entries a durable file already states", "locket graduated"),
+    ("audit", "[corpus [floor]]", "claim pairs across files that agree: fork risk",
+     "locket audit                          this directory's store\n"
+     "locket audit all                      every store, one after another\n"
+     "locket audit notes 0.7                only pairs at least 0.7 alike (default 0.55, 1.0 is identical)"),
+    ("across", "[floor]", "claim pairs split across two stores; always reads every store",
+     "locket across                         pairs at least 0.55 alike\n"
+     "locket across 0.8                     only near-identical pairs"),
+    ("dupes", "[corpus] [file ...]", "claims repeated inside one file; use on scratch and inbox files",
+     "locket dupes                          the scratch and inbox files the store names\n"
+     "locket dupes council SHORT_TERM.md    one file, named as the store lists it"),
+    ("graduated", "[corpus [floor]]", "scratch-file entries a permanent file already states: ready to clear",
+     "locket graduated                      this directory's store\n"
+     "locket graduated notes 0.7            only entries at least 0.7 alike (default 0.55)"),
     ("ledgers", "[corpus]", "schema-governed CSV rows off their schema", "locket ledgers notes"),
     ("budget", "[corpus]", "files past a byte, history-clause or paragraph budget", "locket budget council"),
     ("pointers", "[corpus]", "index lines beside the files they point at, missing targets first; "
      "needs a reader", "locket pointers council"),
     ("links", "[corpus]", "wikilink targets resolving to no file", "locket links council"),
     ("cites", "[corpus] [path ...]", "path:line citations resolved against the code",
-     "locket cites myapp models.py"),
-    ("against", "[corpus] < text", "rank files by how much of stdin they already assert",
-     'echo "a sentence" | locket against council'),
+     "locket cites myapp                    every citation in `myapp`\n"
+     "locket cites myapp models.py          only citations of files whose path contains models.py"),
+    ("against", "[corpus] < text", "rank files by how much of the text on stdin they already state, "
+     "word by word; what the write hook runs",
+     'echo "a sentence" | locket against council\n'
+     "locket against notes < draft.md       a whole draft before it is written"),
     ("trigger", "[check [corpus] | schema]",
      "the tool-boundary hook: when a tool call or prompt matches a row in a store's triggers.json, "
      "put the row's question to the agent; `check` lints the rows files, `schema` prints their schema",
      "locket trigger check                  the rows that can fire from here\n"
-     "locket trigger check council          one store's rows"),
+     "locket trigger check council          one store's rows\n"
+     "locket trigger schema                 the JSON Schema a triggers.json row follows\n"
+     "locket help trigger                   how rows are written and when they fire"),
     ("usage", "[today | week | month | record] [--by project|model|day] [--json]",
      "tokens Claude Code and Hermes spent, per source and project, against a typical day; "
      "keeps a ledger that outlives the transcripts",
-     "locket usage                          the last 7 days\n"
-     "locket usage month --by model         30 days, per model"),
+     "locket usage                          the last 7 days, per project\n"
+     "locket usage today                    today; `month` is the last 30 days\n"
+     "locket usage month --by model         30 days, per model; `--by day` is one row a day\n"
+     "locket usage --json                   the same summary as JSON\n"
+     "locket usage record                   copy new sessions into the ledger now (the\n"
+     "                                      SessionEnd hook does this on its own)"),
     ("corpora", "", "every store on this machine", None),
     ("init", "<dir> [--name <label>] [--parent <corpus>] [--ledgers[=<Name>]]",
      "make a folder of markdown a store; running it again changes nothing",
@@ -83,25 +103,39 @@ VERBS = [
      "                                      row per session), header only; rows off their columns\n"
      "                                      are refused as they are written\n"
      "locket init ~/notes --ledgers=Work    the same files, named RULINGS-Work.csv and so on"),
-    ("migrate", "[<dir>|all]", "rename an older memfind.json manifest to locket.json", "locket migrate all"),
-    ("schema", "[<dir>]", "write the manifest schema, or check a manifest", "locket schema ~/notes"),
-    ("forget", "<dir>", "drop a store's registry row", None),
+    ("migrate", "[<dir>|all]", "rename an older memfind.json manifest to locket.json",
+     "locket migrate ~/notes                one store\n"
+     "locket migrate all                    every store on this machine"),
+    ("schema", "[<dir>]", "write the manifest schema, or check a manifest",
+     "locket schema                         write ~/.locket/locket.schema.json for editor hints\n"
+     "locket schema ~/notes                 check that store's locket.json against it"),
+    ("forget", "<dir>", "stop listing a store; its files and locket.json stay",
+     "locket forget ~/old-notes"),
     ("install", "[--hooks] [--codex] [--desktop]",
      "put `locket` on PATH (%s); --hooks merges the write-time hooks into Claude Code's "
      "settings.json, --codex into Codex's hooks.json, --desktop registers the MCP server "
      "with Claude Desktop" % BIN,
-     "locket install --hooks"),
+     "locket install                        the command only\n"
+     "locket install --hooks                plus the Claude Code hooks, keeping a copy of settings.json\n"
+     "locket install --codex                plus the Codex hooks; trust them with /hooks in Codex\n"
+     "locket install --desktop              plus the Claude Desktop server; restart the app after"),
     ("uninstall", "[--yes] [--purge] [--dry-run]",
      "remove the command, ~/.locket, every cache, and the shared venv when no other piece uses it; "
      "with --purge every manifest and the usage ledger; print what is left",
-     "locket uninstall --dry-run"),
+     "locket uninstall --dry-run            print what would go, remove nothing\n"
+     "locket uninstall                      remove, after asking once\n"
+     "locket uninstall --yes                remove without asking\n"
+     "locket uninstall --purge              also every store's locket.json and the usage ledger"),
     ("status", "", "where the command points and what it can reach", None),
     ("doctor", "", "check every install step a machine can check, with the fix for each failure", None),
     ("mcp", "", "serve the checks over MCP on stdio, for a host without hooks", None),
     ("selftest", "", "both scripts' internal checks", None),
     ("version", "", "print the version (also --version, -V, -v)", None),
     ("help", "find | scan | trigger | usage | install",
-     "the full help of either script, how trigger rows or usage work, or the agent's install steps", None),
+     "the full help of either script, how trigger rows or usage work, or the agent's install steps",
+     "locket help find                      how to read a ranking\n"
+     "locket help scan                      every check, every manifest key, the ledger schemas\n"
+     "locket help install                   the install steps written for an agent"),
 ]
 VERB_NAMES = frozenset(v[0] for v in VERBS)
 HOOK_VERBS = ("hook", "bashguard", "grepassist", "deliver")   # PreToolUse entry points, JSON on stdin
@@ -127,6 +161,12 @@ nomic-embed-text, or fastembed in the venv the Panoply pieces share) and says so
 """
 
 
+CORPUS_NOTE = """
+corpus: a store's name as `locket corpora` lists it, or any part of one that
+matches a single store; a folder path; or `all`. Omitted, it is the store the
+current directory sits in."""
+
+
 def _parser():
     import argparse
     fmt = dict(formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -138,6 +178,8 @@ def _parser():
         script = "memfind" if name in FIND else "memscan" if name in SCAN else None
         tail = (f"\n`locket help {'find' if script == 'memfind' else 'scan'}` has {script}.py's full help."
                 if script else "")
+        if "corpus" in args:
+            tail = CORPUS_NOTE + tail
         shown = "\n".join("  " + ln for ln in examples.split("\n")) if examples else ""
         c = sub.add_parser(name, help=help, description=help, **fmt,
                            usage=f"locket {name} {args}".rstrip(),
