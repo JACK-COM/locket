@@ -181,7 +181,7 @@ def t_check_before_write(args):
     msg, _ = memscan.hook_decision(
         p.name, ti, text, prior, lambda: memscan.corpus(root),
         lambda: memscan.archived_claims(root), autonomous=False,
-        sets=memscan.settings(root))
+        sets=memscan.settings(root), root=root)
     gate = memscan.memfind_gate({"_host": "mcp", "_asked": ASKED}, p.name, ti, text, prior, root)
     parts = [x for x in (msg, gate) if x]
     if not parts:

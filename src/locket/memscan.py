@@ -1583,7 +1583,7 @@ def _stores_under(d):
     return [hit] if hit else []
 
 
-def cmd_init(target, index=True, parent=None, name=None):
+def cmd_init(target, index=True, parent=None, name=None, ledgers=None):
     """Make a directory a corpus every mode can find: write an empty manifest
     where none exists, register the path, build the index where an embedder
     answers, print the corpora line. Running it twice changes nothing. A
@@ -1599,12 +1599,22 @@ def cmd_init(target, index=True, parent=None, name=None):
     Two folders in two places, one corpus. `name` sets the joining store's label
     in the same write, for the case the label would collide: a host's
     auto-memory is always a directory called `memory`, the name the host
-    store's own member directory takes."""
+    store's own member directory takes.
+
+    With `ledgers` (a name, or "" for the store's own), `scaffold_ledgers` adds
+    the three built-in ledgers, writing a manifest even on a store by convention,
+    because asking for ledgers is asking for configuration."""
     d = Path(target).expanduser()
     if not d.is_dir():
         print(f"{d} is not a directory", file=sys.stderr)
         return 1
     d = d.resolve()
+    if ledgers:
+        if ledger_name(ledgers) is None:
+            print(f"{ledgers!r} cannot name a ledger: it goes into file names", file=sys.stderr)
+            return 1
+    elif ledgers is not None:           # the store's own name, made safe for a file name
+        ledgers = re.sub(r"[^\w.-]+", "-", name or _label(d)).strip("-.") or "notes"
     inside = _phys_root_of(d)
     if inside is not None and inside != d:
         print(f"{d} is inside the corpus {inside} already; nothing to do", file=sys.stderr)
@@ -1665,6 +1675,8 @@ def cmd_init(target, index=True, parent=None, name=None):
                   f"through {parent!r}", file=sys.stderr)
             return 1
         print(f"manifest: {m} (belongs_to {parent!r})")
+        if ledgers is not None and scaffold_ledgers(d, ledgers):
+            return 1
         top = top_of(d)
         stale = d / ".memfind"
         if stale.is_dir():
@@ -1725,6 +1737,8 @@ def cmd_init(target, index=True, parent=None, name=None):
         print("registry: not needed; listed by convention")
     else:
         print(f"registry: {REGISTRY} ({'added' if register(d) else 'already listed'})")
+    if ledgers is not None and scaffold_ledgers(d, ledgers):
+        return 1
     n, rows = len(md_files(d)), len(csv_rows(d))
     print(f"corpus: {d}  {n} files" + (f" + {rows} csv rows" if rows else ""))
     if not index:
@@ -1740,6 +1754,74 @@ def cmd_init(target, index=True, parent=None, name=None):
         print(f"index: memfind.py not found beside memscan.py; run  locket index {d}")
     except RuntimeError as e:
         print(f"index: not built ({e}); run  locket index {d}  once an embedder answers")
+    return 0
+
+
+def session_ledger(root):
+    """The store's session ledger at its root (`HISTORY-*-Sessions.csv`), or None."""
+    try:
+        return next(iter(sorted(Path(root).glob("HISTORY-*-Sessions.csv"))), None)
+    except OSError:
+        return None
+
+
+LEDGER_NAME = re.compile(r"\w[\w.-]*")
+
+
+def ledger_name(name):
+    """The name a ledger file carries, or None when it cannot go into a file name."""
+    return name if isinstance(name, str) and LEDGER_NAME.fullmatch(name) else None
+
+
+LEDGER_FILES = (("HISTORY-{}-Sessions.csv", "HISTORY-*-Sessions.csv", None),
+                ("RULINGS-{}.csv", "RULINGS*.csv", "Ruling"), ("CLAIMS-{}.csv", "CLAIMS*.csv", "Claim"))
+
+
+def scaffold_ledgers(d, name):
+    """Create the three built-in ledgers at a store's root, header row only, and
+    register RULINGS and CLAIMS as sources so their rows rank beside the markdown.
+    The session ledger stays unregistered: its rows are chronology, never claims.
+    An existing file is never touched and a source is never listed twice, so a
+    second run changes nothing. Headers come from LEDGER_SCHEMAS, the one home of
+    the columns the write-time check enforces. Returns 0, or 1 on a bad name."""
+    if ledger_name(name) is None:
+        print(f"{name!r} cannot name a ledger: it goes into file names", file=sys.stderr)
+        return 1
+    m = manifest_file(d)
+    man = dict(_read_manifest(d))
+    # ⚠ `_read_manifest` reads an unparseable file as {}, and writing that back
+    # would erase every key the user had; refuse instead
+    if not man and m.is_file() and m.read_text(errors="ignore").strip():
+        print(f"{m} does not parse; fix it (`locket schema {d}`) before adding ledgers", file=sys.stderr)
+        return 1
+    sources = man.get("sources") or []
+    if not isinstance(sources, list):
+        print(f"{m}: `sources` must be a list; fix it before adding ledgers", file=sys.stderr)
+        return 1
+    sources = list(sources)
+
+    def where(e):                   # as `_own_csv_sources` reads an entry
+        p = Path(e["path"]).expanduser()
+        return (p if p.is_absolute() else d / p).resolve()
+    listed = {where(e) for e in sources if isinstance(e, dict) and isinstance(e.get("path"), str)}
+    added = []
+    for pattern, builtin, text in LEDGER_FILES:
+        # a ledger already here under any name is the store's; a second would split its rows
+        have = sorted(d.glob(builtin))
+        f = have[0] if have else d / pattern.format(name)
+        schema = ledger_schema_for(f)[0] or LEDGER_SCHEMAS[builtin]   # a store's `extends` wins
+        if f.exists():
+            print(f"ledger: {f.name} (kept)")
+        else:
+            f.write_text(",".join(map(str, schema["columns"])) + "\n")
+            print(f"ledger: {f.name} (written, header only)")
+        if text and f.resolve() not in listed:
+            sources.append({"path": f.name, "text": text, "label": "Area"})
+            added.append(f.name)
+    if added:
+        m.write_text(json.dumps({**man, "sources": sources}, indent=2) + "\n")
+        settings.cache_clear()
+        print(f"manifest: {', '.join(added)} registered as sources")
     return 0
 
 
@@ -2672,6 +2754,57 @@ def selftest():
         "a ledger named by the manifest is exempt in bashguard too"
     assert bash_write_decision("cat > facts.md", str(store))[1], \
         "a plain file in a manifest corpus blocks"
+    # --- init --ledgers: the built-in ledgers, header only, two registered as sources
+    import contextlib, io
+    man_before = (store / MANIFEST).read_text()
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert scaffold_ledgers(store, "Brain") == 0
+    for pattern, glob, _ in LEDGER_FILES:
+        f = store / pattern.format("Brain")
+        assert f.read_text() == ",".join(LEDGER_SCHEMAS[glob]["columns"]) + "\n", f.name
+        assert not check_ledger_text(ledger_schema_for(f)[0], f.read_text()), f"a fresh {f.name} fails its schema"
+    srcs = _read_manifest(store)["sources"]
+    assert sorted(e["path"] for e in srcs) == ["CLAIMS-Brain.csv", "RULINGS-Brain.csv"], srcs
+    assert _read_manifest(store)["excluded_dirs"] == ["old"], "the manifest's other keys are kept"
+    (store / "RULINGS-Brain.csv").write_text("Ruling,Category,Area,Date\nKeep it.,x,y,2026-09-29\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert scaffold_ledgers(store, "Brain") == 0
+    assert "Keep it." in (store / "RULINGS-Brain.csv").read_text(), "an existing ledger is never touched"
+    assert len(_read_manifest(store)["sources"]) == 2, "a source is never listed twice"
+    assert session_ledger(store).name == "HISTORY-Brain-Sessions.csv"
+    with contextlib.redirect_stderr(io.StringIO()):
+        assert scaffold_ledgers(store, "a/b") == 1 and scaffold_ledgers(store, "*") == 1
+    _m, _b = hook_decision("entry.md", {}, stack, "", lambda: {}, root=store)
+    assert _m and "a row in HISTORY-Brain-Sessions.csv" in _m and not _b, _m
+    _m, _ = hook_decision("entry.md", {}, stack, "", lambda: {}, root=d)
+    assert _m and "HISTORY-" not in _m, "no ledger, no pointer at one"
+    for pattern, _g, _ in LEDGER_FILES:
+        (store / pattern.format("Brain")).unlink()
+    # a ledger already present under another name is the store's own, registered not doubled
+    (store / "RULINGS-Old.csv").write_text("Ruling,Category,Area,Date\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert scaffold_ledgers(store, "Brain") == 0
+    assert not (store / "RULINGS-Brain.csv").exists(), "a second RULINGS ledger split the store's rows"
+    assert "RULINGS-Old.csv" in {e["path"] for e in _read_manifest(store)["sources"]}
+    for pattern, _g, _ in LEDGER_FILES:
+        for f in store.glob(_g):
+            f.unlink()
+    # a manifest it cannot parse, or `sources` that is not a list, is refused and never rewritten
+    for bad in ('{"name": "a", "excluded_dirs": ["old"], "sources": [', '{"sources": {"k": 1}}'):
+        (store / MANIFEST).write_text(bad); settings.cache_clear()
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            assert scaffold_ledgers(store, "Brain") == 1, bad
+        assert (store / MANIFEST).read_text() == bad, f"a bad manifest was rewritten: {bad}"
+        assert not list(store.glob("*.csv")), "no ledger is written beside a manifest it refused"
+    (store / MANIFEST).write_text(man_before)
+    settings.cache_clear()
+    spaced = d / "my notes"; spaced.mkdir(); (spaced / "a.md").write_text("A note.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert cmd_init(spaced, index=False, ledgers="") == 0, "a folder name with a space still takes ledgers"
+    assert (spaced / "HISTORY-my-notes-Sessions.csv").is_file()
+    with contextlib.redirect_stderr(io.StringIO()):
+        assert cmd_init(spaced, index=False, ledgers="a b") == 1, "an explicit bad name is refused"
+    forget(spaced)
     assert "old" in settings(store)["excluded_dirs"] and "backups" in settings(store)["excluded_dirs"], \
         "a backup directory is excluded whatever the manifest says"
     (store / ".hidden").mkdir(); (store / ".hidden" / "h.md").write_text("A hidden note.\n")
@@ -3439,7 +3572,7 @@ def holding_space_hit(added, prior):
 
 
 def hook_decision(name, tool_input, text, prior, docs, archived=None,
-                  autonomous=False, sets=None):
+                  autonomous=False, sets=None, root=None):
     """The write-time nudge as one function: `(message, blocking)`.
 
     `docs` and `archived` are CALLABLES, invoked only after the cheap gates,
@@ -3500,6 +3633,9 @@ def hook_decision(name, tool_input, text, prior, docs, archived=None,
                    f"is cut (prime-memory-discipline.md §1).")
     else:
         history = None
+    ledger = session_ledger(root) if history and root is not None else None
+    if ledger:
+        history += f" If the date records what a session did, it is a row in {ledger.name}."
     blocks = bool(stacked and autonomous)
     # Provenance before novelty: archived text is a move, not a fork. Subtraction
     # only removes, so a pure relocation exits here without the corpus being read.
@@ -3991,6 +4127,12 @@ MODES
             `memory`, so it takes `--name`. A standalone store's manifest is
             written with `name` (the folder's, or `--name LABEL`) and nothing
             else, so every other key keeps tracking the built-in default.
+            With `--ledgers[=NAME]`, also writes HISTORY-NAME-Sessions.csv,
+            RULINGS-NAME.csv and CLAIMS-NAME.csv at DIR (header row only,
+            NAME defaulting to the store's) and registers the last two as
+            sources: rows the write-time check refuses off-schema, and
+            rulings and claims ranked beside the markdown. Existing files
+            are kept.
   schema [DIR]  write the manifest's JSON Schema to ~/.locket/locket.schema.json
             (`init` does this too), so an editor mapped to that path hints every
             `locket.json` by filename; with DIR, check that directory's manifest
@@ -5149,7 +5291,7 @@ def hook_mode(payload):
             name, ti, text, prior, lambda: corpus(root),
             lambda: archived_claims(root),
             autonomous=os.environ.get("CLAUDE_AUTONOMOUS") == "1",
-            sets=settings(root))
+            sets=settings(root), root=root)
     except Exception:                   # a guardrail must never break a write: a
         return 0                        # dangling symlink in the corpus raised here
     if msg and blocking:
@@ -5238,6 +5380,10 @@ def main(argv):
 
     if mode == "init":                      # needs no corpus of its own: it makes one
         rest, flags = list(argv[2:]), {}
+        led = [a for a in rest if a == "--ledgers" or a.startswith("--ledgers=")]
+        for a in led:
+            rest.remove(a)
+        ledgers = led[-1].partition("=")[2] if led else None
         for f in ("--parent", "--name"):
             if f in rest:
                 i = rest.index(f)
@@ -5246,10 +5392,10 @@ def main(argv):
                     return 1
                 flags[f] = rest[i + 1]; del rest[i:i + 2]
         if len(rest) != 1:
-            print("init needs a directory:  locket init <dir> [--name <label>] [--parent <corpus>]",
-                  file=sys.stderr)
+            print("init needs a directory:  locket init <dir> [--name <label>] [--parent <corpus>] "
+                  "[--ledgers[=<Name>]]  (a ledger name takes `=`, never a space)", file=sys.stderr)
             return 1
-        return cmd_init(rest[0], parent=flags.get("--parent"), name=flags.get("--name"))
+        return cmd_init(rest[0], parent=flags.get("--parent"), name=flags.get("--name"), ledgers=ledgers)
     if mode == "migrate":                   # rename memfind.json -> locket.json, one store or all
         one = len(argv) > 2 and argv[2] != "all"
         targets = [resolve(argv[2])] if one else list(_raw_corpora().values())   # joined stores too

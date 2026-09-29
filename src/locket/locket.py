@@ -73,7 +73,8 @@ VERBS = [
      "locket usage                          the last 7 days\n"
      "locket usage month --by model         30 days, per model"),
     ("corpora", "", "every store on this machine", None),
-    ("init", "<dir> [--name <label>] [--parent <corpus>]", "make a folder of markdown a store", "locket init ~/notes"),
+    ("init", "<dir> [--name <label>] [--parent <corpus>] [--ledgers[=<Name>]]",
+     "make a folder of markdown a store; --ledgers adds the three CSVs", "locket init ~/notes --ledgers"),
     ("migrate", "[<dir>|all]", "rename an older memfind.json manifest to locket.json", "locket migrate all"),
     ("schema", "[<dir>]", "write the manifest schema, or check a manifest", "locket schema ~/notes"),
     ("forget", "<dir>", "drop a store's registry row", None),

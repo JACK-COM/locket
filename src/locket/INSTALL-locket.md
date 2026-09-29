@@ -116,16 +116,9 @@ This is the part the user cannot do for you.
 
 Hook messages cite `prime-memory-discipline.md` by section. That file holds the general rules these tools enforce where a deploy carries it; where it is absent, those references mean this section.
 
-**Two structured surfaces worth adding, if the user agrees.** Things the user has ruled and things you found the hard way pile up in prose. Keep each in a CSV beside the store, one sentence per row: `RULINGS.csv` (`Ruling,Category,Area,Date`) for decisions that must not be relitigated, and `CLAIMS.csv` (`Claim,Category,Area,Source,Date`) for facts a future session would otherwise rediscover. A fact every session needs belongs in markdown that loads; one needed only when its area comes up belongs in a CSV. A ruling closes an option a session would otherwise re-decide, a claim states what it would otherwise re-find, so only a claim carries a `Source`. A fact in both, or in a CSV and in prose, is a fork. Register them so `find` ranks their rows:
+**Three structured surfaces worth adding, if the user agrees.** Things the user has ruled, things you found the hard way and what each session did pile up in prose. `locket init <store> --ledgers` writes three CSVs at the store's root, header row only, and registers the first two so `find` ranks their rows: `RULINGS-<Name>.csv` for decisions that must not be relitigated, `CLAIMS-<Name>.csv` for facts a future session would otherwise rediscover, and `HISTORY-<Name>-Sessions.csv`, one row per session, where a date recording what a session did belongs instead of in a memory file. `<Name>` is the store's name unless `--ledgers=<Name>` says otherwise, and existing files are kept. A fact every session needs belongs in markdown that loads; one needed only when its area comes up belongs in a CSV. A ruling closes an option a session would otherwise re-decide, a claim states what it would otherwise re-find, so only a claim carries a `Source`. A fact in both, or in a CSV and in prose, is a fork. Every row is checked against its columns as it is written, and a row that breaks them is refused.
 
-```json
-{"sources": [
-  {"path": "/abs/path/RULINGS.csv", "text": "Ruling", "label": "Area"},
-  {"path": "/abs/path/CLAIMS.csv", "text": "Claim", "label": "Area"}
-]}
-```
-
-Point at rows by file and filter, never by copying them: *(`RULINGS.csv`, query `Area=guides`)*; `links` reports a pointer whose file, column or value matches nothing. When seeding the CSVs from prose, remove the prose copies in the same pass.
+Point at rows by file and filter, never by copying them: *(`RULINGS-Notes.csv`, query `Area=guides`)*; `links` reports a pointer whose file, column or value matches nothing. When seeding the CSVs from prose, remove the prose copies in the same pass.
 
 ## Step 7. Report
 
