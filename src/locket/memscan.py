@@ -333,6 +333,9 @@ def resolve(name):
     if p.is_dir():
         return top_of(p.resolve())
     hits = {k: v for k, v in all_corpora().items() if name.lower() in k.lower()}
+    exact = [v for k, v in hits.items() if k.lower() == name.lower()]
+    if len(exact) == 1:                  # `devdocs` beside `devdocs-persona` is not ambiguous
+        return exact[0]
     if len(hits) == 1:
         return next(iter(hits.values()))
     if not hits:
@@ -1098,11 +1101,30 @@ def index_hooks(root):
     return out
 
 
+def front_name(txt):
+    """The top-level `name:` in a file's frontmatter, or None. Read only inside the
+    opening block, so a `name:` line in the body never counts."""
+    if not txt.startswith("---\n"):
+        return None
+    end = txt.find("\n---", 3)
+    m = re.search(r"^name:[ \t]*['\"]?([^'\"\n]+?)['\"]?[ \t]*$", txt[4:end] if end != -1 else "", re.M)
+    return m.group(1) if m else None
+
+
 def dangling(root):
-    files = {p.stem.replace("-", "_") for p in md_files(root)}
+    """{target: [files]} for every wikilink resolving to no file. A target resolves
+    by file stem or by the frontmatter `name:`, which is Claude Code's auto-memory
+    convention (`[[verify-end-to-end]]` -> `feedback_verify_end_to_end.md`)."""
+    files = set()
+    texts = {p: p.read_text(errors="ignore") for p in md_files(root)}
+    for p, txt in texts.items():
+        files.add(p.stem.replace("-", "_"))
+        name = front_name(txt)
+        if name:
+            files.add(name.replace("-", "_"))
     out = defaultdict(list)
-    for p in md_files(root):
-        for t in LINK.findall(p.read_text(errors="ignore")):
+    for p, txt in texts.items():
+        for t in LINK.findall(txt):
             if t.replace("-", "_") not in files:
                 out[t].append(p.name)
     return out
@@ -2535,6 +2557,22 @@ def selftest():
         for sed in ("sed -Ei 's/a/b/' MEMORY.md", "sed --in-place 's/a/b/' MEMORY.md",
                     "sed -ibak 's/a/b/' MEMORY.md", "sed -in 's/a/b/p' MEMORY.md", "sed -i.bak 's/a/b/' MEMORY.md"):
             assert bw(sed)[1], f"an in-place sed must block: {sed}"
+        for inplace in ("perl -pi -e 's/a/b/' MEMORY.md", f"perl -pi -e 's/a/b/' {cmem}/x.md",
+                        "perl -i.bak -pe 's/a/b/' MEMORY.md", "perl -0pi -e 's/a/b/' MEMORY.md",
+                        "ruby -pi -e 'gsub(/a/, \"b\")' MEMORY.md", "gawk -i inplace '{print}' MEMORY.md",
+                        "gsed -i 's/a/b/' MEMORY.md"):
+            assert bw(inplace)[1], f"an in-place edit must block: {inplace}"
+        # a command outside the readers warns, so the next unlisted writer announces itself
+        for unlisted in ("sponge MEMORY.md", "python3 fix.py MEMORY.md",
+                         "find . -name x | xargs perl -pe 's/a/b/' MEMORY.md", "ex -sc 'wq' MEMORY.md"):
+            msg, blk = bw(unlisted)
+            assert msg and not blk and "read-only" in msg, f"an unlisted command stayed silent: {unlisted}"
+        for nested, word in (("timeout 5 python3 fix.py MEMORY.md", "python3"),
+                             ("diff <(python3 fix.py MEMORY.md) x", "python3"),
+                             ("find . -exec perl -pe 1 {} MEMORY.md \\;", "perl"),
+                             ("echo `python3 fix.py MEMORY.md`", "python3")):
+            msg, blk = bw(nested)
+            assert msg and not blk and f"`{word}`" in msg, f"a nested command was misread: {nested} -> {msg}"
         # a `cd` that is not a command moves nothing: each of these still writes into the cwd's corpus
         for loud in (
             'echo "cd /Users/x/elsewhere to look at notes" >> topic_note.md',
@@ -2581,6 +2619,15 @@ def selftest():
             "cat > CHECKPOINTS.md",                        # ledger, exempt by 2d
             "cat > SHORT_TERM.md",                         # holding space, exempt
             "cat > archive/ARCHIVE-old.md",                # archived, exempt
+            "git add MEMORY.md && git diff MEMORY.md",     # readers, and git is one
+            "wc -l MEMORY.md | sort -n",
+            "for f in *.md; do wc -l \"$f\"; done",      # a loop header and a glob
+            'hermes chat -q "tidy MEMORY.md please"',      # prose in a quoted argument
+            "grep x MEMORY.md # then perl over it",        # a comment
+            "perl -e 'print 1' > /Users/x/elsewhere/o.txt",
+            "diff <(sort MEMORY.md) <(sort topic_note.md)",      # readers inside substitutions
+            "curl -s https://example.com/README.md | head",   # a URL is not a path
+            "find . \\( -iname 'A*.md' -o -name 'NOTES.md' \\) -print",  # escaped parens group
         ):
             assert bw(quiet) == (None, False), f"decoy fired: {quiet}"
         assert bw("cat > MEMORY.md", auto=True) == (None, False), \
@@ -2806,6 +2853,14 @@ def selftest():
         (vault / MANIFEST).write_text(json.dumps({"name": "vault-of-one"})); settings.cache_clear()
         assert all_corpora().get("vault-of-one") == vault, "the manifest's name is the listing key"
         assert resolve("vault-of") == vault, "and a substring of it resolves"
+        (d / "vault-of-one-persona").mkdir()
+        (d / "vault-of-one-persona" / MANIFEST).write_text(json.dumps({"name": "vault-of-one-persona"}))
+        assert register(d / "vault-of-one-persona"); settings.cache_clear()
+        assert resolve("vault-of-one") == vault, "an exact name wins over a longer name containing it"
+        with contextlib.redirect_stderr(io.StringIO()):
+            assert resolve("vault-of") is None, "a substring of both is still ambiguous"
+        assert forget(d / "vault-of-one-persona")
+        shutil.rmtree(d / "vault-of-one-persona")
         (vault / MANIFEST).unlink(); settings.cache_clear()
         assert vault not in all_corpora().values() and registry_stale() == [vault], \
             "a registered path whose manifest is gone is reported, never enumerated"
@@ -2877,6 +2932,13 @@ def selftest():
             "the size-sweep exemption is a name-set like the others: read, unioned upward, never down"
         assert not dangling(par).get("topic_one") and dangling(par).get("topic_two"), \
             "a wikilink into the joined store resolves; a missing one still dangles"
+        (par / "feedback_named_one.md").write_text(
+            "---\nname: named-one\ndescription: x\n---\n\nA body line with name: not-this.\n"
+            "Links to [[named-one]] and [[not-this]].\n")
+        dl = dangling(par)
+        assert "named-one" not in dl and "not-this" in dl, \
+            "a link resolves by the frontmatter name, never by a `name:` in the body"
+        (par / "feedback_named_one.md").unlink()
         assert any("superseded" in " ".join(ts) for ts in archived_claims(par)), \
             "provenance is read from the joined store's archive too"
         assert any(s[4] == "ok" for s in csv_pointers(par)), csv_pointers(par)
@@ -3965,9 +4027,11 @@ HOOK MODES (PreToolUse entry points, JSON on stdin; not for manual use)
   bashguard   Bash. A heredoc or echo into a schema-governed ledger is read as
               rows and checked as `hook` checks them; a redirect whose rows it
               cannot read warns and names the sweep. Then the same corpora, written through a shell redirect, a
-              heredoc or sed -i, which `hook` never sees because it matches
-              TOOLS rather than paths. Blocks an unambiguous write, warns on a
-              scripted one, and is silent for ledgers, holding spaces,
+              heredoc or an in-place edit (sed, perl or ruby -i, gawk -i
+              inplace), which `hook` never sees because it matches TOOLS
+              rather than paths. Blocks an unambiguous write, warns on a
+              scripted one and on a memory file handed to any command not
+              known to be read-only, and is silent for ledgers, holding spaces,
               archive/, the scratchpad and autonomous runs. `MEMWRITE-OK:
               <reason>` in the command declares the exception and passes.
   grepassist  Grep|Bash. Runs memfind on a prose-shaped search pattern and
@@ -4417,13 +4481,34 @@ BASH_WRITE = (
     re.compile(r"\btee\b[^;&|]*?(?P<p>[^\s;&|]+\.md)"),
     # `-i` in a flag cluster of its own (`-i`, `-Ei`, `-i.bak`, `-ibak`, `--in-place`), never
     # the `-i` inside `make-it-yours.md`, which read a `sed -n` as a write to `t-yours.md`
-    re.compile(r"\bsed\b[^;&|]*?(?<!\S)-(?:[A-Za-z]*i|-in-place)[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|]+\.md)"),
+    re.compile(r"\bg?sed\b[^;&|]*?(?<!\S)-(?:[A-Za-z]*i|-in-place)[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|]+\.md)"),
+    # perl and ruby share sed's `-i` (`-pi`, `-i.bak`, `-0pi`); gawk spells it `-i inplace`
+    # a module or include flag (`-MList::Util`, `-Ilib`, `-rjson`) is never the in-place one
+    re.compile(r"\b(?:perl|ruby)\b[^;&|]*?(?<!\S)-(?![MmIr])[A-Za-z0-9]*i[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|]+\.md)"),
+    re.compile(r"\bg?awk\b[^;&|]*?(?<!\S)-i\s*inplace\b[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|]+\.md)"),
     re.compile(r"\b(?:cp|mv|rsync)\b[^;&|]+?\s(?P<p>[^\s;&|]+\.md)\s*(?:$|[;&|])"),
 )
 # Destination computed at run time, so it cannot be read off the command text.
 # Warn rather than block: a false block here costs more than a missed one.
 BASH_WRITE_OPAQUE = re.compile(
     r"write_text\(|open\([^)]*['\"][wa]['\"]|\.writelines\(|shutil\.(?:copy|move)")
+# Commands known to leave a file argument unwritten. ⚠ Accepted holes: `git
+# checkout|restore|mv|rm` and awk's `print > "x.md"` write, and are not read. A corpus path handed to any
+# other command warns. ⚠ BASH_WRITE alone is a closed list of writers, and
+# `perl -pi` passed it silently for a week of real edits; listing the readers
+# instead makes the next unlisted writer announce itself, at the cost of a
+# warning on an unlisted reader.
+BASH_READERS = frozenset((
+    "cat head tail less more bat glow nl grep egrep fgrep rg ag ack wc diff cmp comm "
+    "ls stat file find du tree test [ realpath readlink basename dirname md5 md5sum shasum "
+    "sha256sum sort uniq cut column fold jq yq strings xxd od hexdump echo printf open "
+    "git gh locket memscan memfind sed gsed awk gawk rm trash touch mkdir chmod "
+    # directional: BASH_WRITE reads which argument is the destination
+    "cp mv rsync tee").split())
+# Words that run the command after them; the word after is the one judged.
+_SHELL_PREFIXES = frozenset("sudo env command nohup time exec builtin nice xargs caffeinate "
+                            "timeout stdbuf ionice setsid "
+                            "do then else if while until ! {".split())
 
 
 def _expand_home(tok):
@@ -4524,8 +4609,63 @@ def _cd_targets(command, cwd, pos=None):
     return [here] if here else []
 
 
+def _unlisted_commands(command):
+    """[(command word, `.md` argument, offset)] for every simple command whose word
+    is not in BASH_READERS. Heredoc bodies are data and are skipped, and so are a
+    quoted string holding whitespace (prose, a program), a glob, a redirect target
+    (BASH_WRITE reads those), a comment, and a `for`/`case` header. A command the
+    tokenizer cannot split (an unbalanced quote) yields nothing: that line of shell
+    would not run either."""
+    text = _strip_heredocs(command).replace("\\\n", " ").replace("\n", " ; ")
+    text = text.replace("\\(", " ").replace("\\)", " ")    # `find … \( -o \)` groups, not subshells
+    text = text.replace("`", " ; ")                       # a backtick substitution is its own command
+    lex = shlex.shlex(text, posix=True, punctuation_chars=True)
+    lex.whitespace_split, lex.commenters = True, ""      # `a#b` is a word, `#` alone a comment
+    try:
+        toks = list(lex)
+    except ValueError:
+        return []
+    out, word, skip, cursor, redirect = [], None, False, 0, False
+    for t in toks:
+        # `<(` and `$(` arrive fused: a process or command substitution opens a new command
+        if t and (set(t) <= set("();|&") or "(" in t or ")" in t):
+            word, skip, redirect = None, False, False
+            continue
+        if t in ("-exec", "-execdir", "-ok", "-okdir"):    # find runs the command after it
+            word = None
+            continue
+        if skip:
+            continue
+        if t.startswith("#"):
+            skip = True                                  # to the end of the line
+            continue
+        if set(t) <= set("<>&0123456789") and ("<" in t or ">" in t):
+            redirect = True
+            continue
+        if redirect:
+            redirect = False
+            continue
+        if word is None:
+            if (t in _SHELL_PREFIXES or "=" in t.split("/")[0] or t.startswith("-")
+                    or re.fullmatch(r"\d+[smhd]?", t)):         # `timeout 5`, `nice -n 5`
+                continue
+            if t in ("for", "case", "select", "in", "function"):
+                skip = True
+                continue
+            word = os.path.basename(t)
+            continue
+        if (word in BASH_READERS or not t.endswith(".md") or any(c in t for c in "*?[ \t")
+                or "://" in t):
+            continue
+        at = command.find(os.path.basename(t), cursor)
+        cursor = at if at >= 0 else cursor
+        out.append((word, t, cursor))
+    return out
+
+
 def bash_write_targets(command, cwd):
-    """(blocking, opaque) corpus files a Bash command appears to write.
+    """(blocking, opaque, unlisted) corpus files a Bash command appears to write;
+    `unlisted` pairs each with the command word outside BASH_READERS that takes it.
 
     Resolves a bare `MEMORY.md` against the payload cwd, or the last `cd` before it
     in the command, because that is the shape a heredoc rewrite actually takes.
@@ -4564,7 +4704,12 @@ def bash_write_targets(command, cwd):
             hit = resolve(m.group(), m.start())
             if hit and hit[0] not in blocking and hit[0] not in opaque:
                 opaque.append(hit[0])
-    return blocking, opaque
+    unlisted = []
+    for word, tok, pos in _unlisted_commands(command):
+        hit = resolve(tok, pos)
+        if hit and hit[0] not in blocking and hit[0] not in opaque:
+            unlisted.append((word, hit[0]))
+    return blocking, opaque, unlisted
 
 
 def bash_write_decision(command, cwd, autonomous=False):
@@ -4578,13 +4723,14 @@ def bash_write_decision(command, cwd, autonomous=False):
         return None, False
     if any(mark in command for mark in SCRATCH_MARKERS):
         return None, False
-    blocking, opaque = bash_write_targets(command, cwd)
+    blocking, opaque, unlisted = bash_write_targets(command, cwd)
 
     def live(q):                             # exempt by ITS corpus's names, not ours
         sets = settings(corpus_for(q))
         return q.name not in sets["append_surfaces"] and "archive" not in q.parts
     blocking = [q for q in blocking if live(q)]
     opaque = [q for q in opaque if live(q)]
+    unlisted = [(w, q) for w, q in unlisted if live(q)]
     if blocking:
         names = ", ".join(sorted({q.name for q in blocking}))
         return (f"This writes to a memory corpus through Bash ({names}), where the write-time "
@@ -4604,6 +4750,13 @@ def bash_write_decision(command, cwd, autonomous=False):
                 f"2e checks will not fire and nothing will report that they did not. Run "
                 f"`memfind` on what you are about to assert, or route the edit through "
                 f"Write/Edit."), False
+    if unlisted:
+        what = ", ".join(sorted({f"`{w}` on {q.name}" for w, q in unlisted}))
+        return (f"This hands a memory file to a command Locket does not know to be read-only "
+                f"({what}). If it writes the file, the write-time gate never sees it, because "
+                f"that gate matches Write and Edit. Route the edit through Write/Edit, or put "
+                f"`{MEMWRITE_ESCAPE} <reason>` in the command if Bash is genuinely right; a "
+                f"read-only command can be ignored."), False
     return None, False
 
 

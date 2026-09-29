@@ -557,6 +557,15 @@ def cmd_uninstall(argv):
     return 0
 
 
+def _system_line():
+    """The OS and interpreter, which Step 7 of the install doc reports: the tools are
+    tested on macOS and untested on Linux and Windows."""
+    import platform
+    mac = platform.mac_ver()[0]
+    osname = f"macOS {mac}" if mac else f"{platform.system()} {platform.release()}"
+    return f"{osname}, Python {platform.python_version()} ({sys.executable})"
+
+
 def cmd_status():
     link = BIN / "locket"
     t = _link_target(link)
@@ -566,7 +575,9 @@ def cmd_status():
         print(f"command: {link} -> {t}" if t else f"command: {link} not installed (`locket install`)")
     print(f"scripts: {HERE}")
     print(f"on PATH: {'yes' if str(BIN) in os.environ.get('PATH', '').split(os.pathsep) else 'no'}")
-    print(f"registry: {memscan.REGISTRY} ({len(memscan.registry())} registered)")
+    print(f"system: {_system_line()}")
+    print(f"registry: {memscan.REGISTRY} ({len(memscan.registry())} added with `locket init`; "
+          f"host memory folders are found without it)")
     print(_embedder_line())
     n = len(memscan.all_corpora())
     print(f"corpora: {n}  (`locket corpora` lists them)")
