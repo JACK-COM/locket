@@ -664,6 +664,50 @@ def _registered_hooks(settings):
     return out
 
 
+def _dead_hooks(config):
+    """[(event, command, why)] for every Locket entry in a Claude Code settings.json or a
+    Codex hooks.json that cannot run. Each command's program must exist, and each is run on a
+    payload that matches nothing, which must exit 0 or 2 without a traceback. `usage hook`
+    is checked for its program only, because running it would write the ledger. ⚠ Checking only the verbs
+    `install` registers let a dead SessionEnd entry report ok (Tercius letter 2026-09-23)."""
+    import subprocess, tempfile
+    try:
+        events = json.loads(config.read_text()).get("hooks") or {}
+    except (OSError, ValueError, AttributeError):
+        return []
+    out = []
+    for event, entries in (events.items() if isinstance(events, dict) else []):
+        for e in entries if isinstance(entries, list) else []:
+            for h in (e.get("hooks") or []) if isinstance(e, dict) else []:
+                cmd = str(h.get("command", "")) if isinstance(h, dict) else ""
+                if not _is_locket_hook(cmd):
+                    continue
+                try:
+                    words = shlex.split(cmd)
+                except ValueError:
+                    out.append((event, cmd, "the command does not parse")); continue
+                script = _script_in(cmd)
+                exe = next((w for w in words if not re.fullmatch(r"\w+=.*", w)), "")   # past `VAR=1`
+                found = (script.is_file() if script else
+                         Path(os.path.expanduser(exe)).is_file() if "/" in exe else shutil.which(exe))
+                if not found:
+                    out.append((event, cmd, f"{script or exe} does not exist")); continue
+                if _is_locket_hook(cmd, CLAUDE_USAGE[1]):   # `usage hook` writes the ledger
+                    continue
+                with tempfile.TemporaryDirectory() as d:
+                    payload = json.dumps({"hook_event_name": event, "cwd": d, "prompt": "",
+                                          "tool_name": "Read", "tool_input": {"file_path": f"{d}/x.txt"}})
+                    try:
+                        r = subprocess.run(cmd, shell=True, input=payload, capture_output=True,
+                                           text=True, timeout=30, cwd=d)
+                    except subprocess.TimeoutExpired:
+                        out.append((event, cmd, "timed out after 30s")); continue
+                if r.returncode not in (0, 2) or "Traceback" in r.stderr:
+                    last = (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1]
+                    out.append((event, cmd, last[:120]))
+    return out
+
+
 def _script_in(cmd):
     """The first path in a hook command that names a .py file, or None."""
     for tok in cmd.split():
@@ -870,6 +914,17 @@ def cmd_doctor():
                     ("stayed silent on a known fork" if probe is False else f"failed: {probe}"),
                     f"run it by hand: {hooks['hook']}")
 
+    for label, cfg in (("claude", settings), ("codex", codex_cfg)):
+        if cfg.is_file():
+            dead = _dead_hooks(cfg)
+            if dead:
+                ev, cmd, why = dead[0]
+                more = f" (and {len(dead) - 1} more)" if len(dead) > 1 else ""
+                row("fail", f"{label} entries", f"{ev}: `{cmd}` cannot run: {why}{more}",
+                    f"remove the dead entries from {cfg}, then locket install --{'hooks' if label == 'claude' else 'codex'}")
+            else:
+                row("ok", f"{label} entries", "every Locket entry, under every event, runs")
+
     import trigger
     rows_path = trigger.rows_file(memscan.CLAUDE)
     if rows_path.is_file():
@@ -1033,6 +1088,19 @@ def main(argv):
         if not rc:                          # doctor's probe: fires on a live hook, silent on a dead one
             live = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'memscan.py'))} hook"
             assert _probe_hook(live) is True, "doctor's probe does not fire through this memscan.py"
+            import tempfile
+            with tempfile.TemporaryDirectory() as t:
+                cfg = Path(t) / "settings.json"
+                py = shlex.quote(sys.executable)
+                cfg.write_text(json.dumps({"hooks": {
+                    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command",
+                        "command": f"{py} {shlex.quote(str(HERE / 'locket.py'))} bashguard"}]}],
+                    "SessionEnd": [{"hooks": [{"type": "command", "command": "/nonexistent/bin/locket usage hook"}]}],
+                    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{py} /nonexistent/memscan.py trigger"}]}],
+                }}))
+                dead = {ev for ev, _c, _w in _dead_hooks(cfg)}
+                assert dead == {"SessionEnd", "UserPromptSubmit"}, \
+                    f"doctor misread which entries are dead: {_dead_hooks(cfg)}"
             assert _probe_hook("true") is False, "doctor's probe reads a silent command as firing"
             assert _probe_hook(live, codex=True) is True, \
                 "doctor's Codex probe does not fire through a patch into this memscan.py"

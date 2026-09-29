@@ -1780,11 +1780,16 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None):
 
 
 def session_ledger(root):
-    """The store's session ledger at its root (`HISTORY-*-Sessions.csv`), or None."""
-    try:
-        return next(iter(sorted(Path(root).glob("HISTORY-*-Sessions.csv"))), None)
-    except OSError:
-        return None
+    """The store's session ledger (`HISTORY-*-Sessions.csv`) at its root or the root of a
+    store joined to it, or None. The top store's own ledger wins."""
+    for r in roots_of(top_of(Path(root))):
+        try:
+            hit = next(iter(sorted(Path(r).glob("HISTORY-*-Sessions.csv"))), None)
+        except OSError:
+            continue
+        if hit is not None:
+            return hit
+    return None
 
 
 LEDGER_NAME = re.compile(r"\w[\w.-]*")
@@ -2673,6 +2678,21 @@ def selftest():
                          "find . -name x | xargs perl -pe 's/a/b/' MEMORY.md", "ex -sc 'wq' MEMORY.md"):
             msg, blk = bw(unlisted)
             assert msg and not blk and "read-only" in msg, f"an unlisted command stayed silent: {unlisted}"
+        for semi in ("sed -i '' 's/a/b/; s/c/d/' MEMORY.md", "perl -pi -e 's/a/b/; s/c/d/' MEMORY.md",
+                     "gawk -i inplace '{a=1; print}' MEMORY.md"):
+            assert bw(semi)[1], f"a `;` in the program hid an in-place edit: {semi}"
+        assert bw("gawk --include inplace 1 MEMORY.md")[1], "awk's spaced --include inplace"
+        for glued in ("perl -ne'print' MEMORY.md", "perl -e'print 1' MEMORY.md", "perl -CSDio -e 1 MEMORY.md"):
+            assert not bw(glued)[1], f"an `i` inside a glued argument read as in-place: {glued}"
+        msg, _ = bw("python3 x.py > /Users/x/elsewhere/log.txt MEMORY.md")
+        assert msg and "`python3`" in msg, f"a redirect target was read as the command: {msg}"
+        for gitw in ("git checkout -- MEMORY.md", "git restore MEMORY.md", "git rm MEMORY.md",
+                     "git -C /Users/x rm MEMORY.md", "git --git-dir=.git rm MEMORY.md",
+                     "git clean -f MEMORY.md"):
+            msg, blk = bw(gitw)
+            assert msg and not blk and "`git " in msg, f"a writing git subcommand stayed silent: {gitw}"
+        msg, blk = bw("""awk '{print > "MEMORY.md"}' /Users/x/elsewhere/in.txt""")
+        assert msg and blk, "awk writing from its program text (the redirect scan reads it) passed"
         for nested, word in (("timeout 5 python3 fix.py MEMORY.md", "python3"),
                              ("diff <(python3 fix.py MEMORY.md) x", "python3"),
                              ("find . -exec perl -pe 1 {} MEMORY.md \\;", "perl"),
@@ -2726,10 +2746,16 @@ def selftest():
             "cat > SHORT_TERM.md",                         # holding space, exempt
             "cat > archive/ARCHIVE-old.md",                # archived, exempt
             "git add MEMORY.md && git diff MEMORY.md",     # readers, and git is one
+            "git log -p MEMORY.md && git show HEAD:MEMORY.md",
+            "sed -n 's/a/b/; p' MEMORY.md",                # no in-place flag
+            "awk '{print}' MEMORY.md > /Users/x/elsewhere/o.txt",
             "wc -l MEMORY.md | sort -n",
             "for f in *.md; do wc -l \"$f\"; done",      # a loop header and a glob
             'hermes chat -q "tidy MEMORY.md please"',      # prose in a quoted argument
             "grep x MEMORY.md # then perl over it",        # a comment
+            'grep -nE "scripts/(a|b)\\.py" MEMORY.md topic_note.md',   # parens inside a quoted pattern
+            "sed -fimport.sed MEMORY.md",                                # an `i` inside a glued file name
+            "grep x > /Users/x/elsewhere/res.txt MEMORY.md",           # a redirect is not the command
             "perl -e 'print 1' > /Users/x/elsewhere/o.txt",
             "diff <(sort MEMORY.md) <(sort topic_note.md)",      # readers inside substitutions
             "curl -s https://example.com/README.md | head",   # a URL is not a path
@@ -3118,6 +3144,10 @@ def selftest():
             "the size-sweep exemption is a name-set like the others: read, unioned upward, never down"
         assert not dangling(par).get("topic_one") and dangling(par).get("topic_two"), \
             "a wikilink into the joined store resolves; a missing one still dangles"
+        (kid / "HISTORY-Kid-Sessions.csv").write_text("date,title,summary,area,repo,commit_hash,issue,pr\n")
+        assert session_ledger(par) == kid / "HISTORY-Kid-Sessions.csv" == session_ledger(kid), \
+            "a joined store's session ledger is the store's, found from either folder"
+        (kid / "HISTORY-Kid-Sessions.csv").unlink()
         (par / "feedback_named_one.md").write_text(
             "---\nname: named-one\ndescription: x\n---\n\nA body line with name: not-this.\n"
             "Links to [[named-one]] and [[not-this]].\n")
@@ -4676,10 +4706,10 @@ BASH_WRITE = (
     re.compile(r"\btee\b[^;&|]*?(?P<p>[^\s;&|]+\.md)"),
     # `-i` in a flag cluster of its own (`-i`, `-Ei`, `-i.bak`, `-ibak`, `--in-place`), never
     # the `-i` inside `make-it-yours.md`, which read a `sed -n` as a write to `t-yours.md`
-    re.compile(r"\bg?sed\b[^;&|]*?(?<!\S)-(?:[A-Za-z]*i|-in-place)[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|]+\.md)"),
+    re.compile(r"\bg?sed\b[^;&|]*?(?<!\S)-(?:[nEsuzr]*i|-in-place)[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|]+\.md)"),
     # perl and ruby share sed's `-i` (`-pi`, `-i.bak`, `-0pi`); gawk spells it `-i inplace`
-    # a module or include flag (`-MList::Util`, `-Ilib`, `-rjson`) is never the in-place one
-    re.compile(r"\b(?:perl|ruby)\b[^;&|]*?(?<!\S)-(?![MmIr])[A-Za-z0-9]*i[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|]+\.md)"),
+    # only argument-free flags before the `i`, as in _INPLACE: `-MList::Util` and `-CSDio` are not it
+    re.compile(r"\b(?:perl|ruby)\b[^;&|]*?(?<!\S)-[0-9lnpaWwsSTtUuXc]*i[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|]+\.md)"),
     re.compile(r"\bg?awk\b[^;&|]*?(?<!\S)-i\s*inplace\b[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|]+\.md)"),
     re.compile(r"\b(?:cp|mv|rsync)\b[^;&|]+?\s(?P<p>[^\s;&|]+\.md)\s*(?:$|[;&|])"),
 )
@@ -4687,8 +4717,8 @@ BASH_WRITE = (
 # Warn rather than block: a false block here costs more than a missed one.
 BASH_WRITE_OPAQUE = re.compile(
     r"write_text\(|open\([^)]*['\"][wa]['\"]|\.writelines\(|shutil\.(?:copy|move)")
-# Commands known to leave a file argument unwritten. ⚠ Accepted holes: `git
-# checkout|restore|mv|rm` and awk's `print > "x.md"` write, and are not read. A corpus path handed to any
+# Commands known to leave a file argument unwritten, unless an in-place flag
+# (_INPLACE) or a writing git subcommand (_GIT_WRITES) says otherwise. A corpus path handed to any
 # other command warns. ⚠ BASH_WRITE alone is a closed list of writers, and
 # `perl -pi` passed it silently for a week of real edits; listing the readers
 # instead makes the next unlisted writer announce itself, at the cost of a
@@ -4804,9 +4834,23 @@ def _cd_targets(command, cwd, pos=None):
     return [here] if here else []
 
 
+# An in-place flag read off the tokens, so a `;` inside the program text (`sed -i
+# 's/a/b/; s/c/d/'`, which stops BASH_WRITE's clause scan) cannot hide it.
+# Only flags that take no argument may precede the `i`: `-fimport.sed` and `-ne'print'`
+# glue an argument on, and the `i` inside it is not the flag.
+_INPLACE = {"sed": r"-[nEsuzr]*i.*|--in-place.*", "gsed": r"-[nEsuzr]*i.*|--in-place.*",
+            "perl": r"-[0-9lnpaWwsSTtUuXc]*i.*", "ruby": r"-[0-9lnpaWwsSTtUuXc]*i.*"}
+# git subcommands that write the paths they are handed; the rest of git reads
+_GIT_WRITES = frozenset("checkout restore mv rm reset stash apply am merge rebase cherry-pick "
+                        "revert pull switch clean checkout-index read-tree sparse-checkout "
+                        "submodule worktree bisect".split())
+_GIT_VALUED = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace"))   # take the next word
+
+
 def _unlisted_commands(command):
-    """[(command word, `.md` argument, offset)] for every simple command whose word
-    is not in BASH_READERS. Heredoc bodies are data and are skipped, and so are a
+    """[(command word, `.md` argument, offset, in_place)] for every simple command whose
+    word is not in BASH_READERS, or that runs with an in-place flag, or is a git
+    subcommand that writes. `in_place` marks a write decidable from the tokens. Heredoc bodies are data and are skipped, and so are a
     quoted string holding whitespace (prose, a program), a glob, a redirect target
     (BASH_WRITE reads those), a comment, and a `for`/`case` header. A command the
     tokenizer cannot split (an unbalanced quote) yields nothing: that line of shell
@@ -4820,14 +4864,16 @@ def _unlisted_commands(command):
         toks = list(lex)
     except ValueError:
         return []
-    out, word, skip, cursor, redirect = [], None, False, 0, False
+    out, word, skip, cursor, redirect, inplace, prev = [], None, False, 0, False, False, ""
     for t in toks:
         # `<(` and `$(` arrive fused: a process or command substitution opens a new command
-        if t and (set(t) <= set("();|&") or "(" in t or ")" in t):
-            word, skip, redirect = None, False, False
+        # only a token of shell punctuation: a quoted pattern like "(a|b)" is an argument
+        # a bare `<`/`>` is a redirect, below; `<(` and `>(` arrive fused and open a command
+        if t and set(t) <= set("();|&<>$") and ("<" not in t and ">" not in t or "(" in t or ")" in t):
+            word, skip, redirect, inplace = None, False, False, False
             continue
         if t in ("-exec", "-execdir", "-ok", "-okdir"):    # find runs the command after it
-            word = None
+            word, inplace = None, False
             continue
         if skip:
             continue
@@ -4847,14 +4893,24 @@ def _unlisted_commands(command):
             if t in ("for", "case", "select", "in", "function"):
                 skip = True
                 continue
-            word = os.path.basename(t)
+            word, prev = os.path.basename(t), ""
             continue
-        if (word in BASH_READERS or not t.endswith(".md") or any(c in t for c in "*?[ \t")
-                or "://" in t):
+        if word in _INPLACE and re.fullmatch(_INPLACE[word], t):
+            inplace = True
+        elif word in ("awk", "gawk") and (t in ("-iinplace", "--include=inplace")
+                                          or (prev in ("-i", "--include") and t == "inplace")):
+            inplace = True
+        elif word == "git" and not t.startswith("-") and prev not in _GIT_VALUED:
+            word = f"git {t}"                            # judged by its subcommand
+        prev = t
+        if not t.endswith(".md") or any(c in t for c in "*?[ \t") or "://" in t:
+            continue
+        reader = word in BASH_READERS or (word.startswith("git ") and word[4:] not in _GIT_WRITES)
+        if reader and not inplace:
             continue
         at = command.find(os.path.basename(t), cursor)
         cursor = at if at >= 0 else cursor
-        out.append((word, t, cursor))
+        out.append((word, t, cursor, inplace))
     return out
 
 
@@ -4900,9 +4956,13 @@ def bash_write_targets(command, cwd):
             if hit and hit[0] not in blocking and hit[0] not in opaque:
                 opaque.append(hit[0])
     unlisted = []
-    for word, tok, pos in _unlisted_commands(command):
+    for word, tok, pos, inplace in _unlisted_commands(command):
         hit = resolve(tok, pos)
-        if hit and hit[0] not in blocking and hit[0] not in opaque:
+        if not hit or hit[0] in blocking:
+            continue
+        if inplace and hit[1]:                  # a literal path, edited in place: decidable
+            blocking.append(hit[0])
+        elif hit[0] not in opaque:
             unlisted.append((word, hit[0]))
     return blocking, opaque, unlisted
 
