@@ -131,10 +131,12 @@ VERBS = [
     ("mcp", "", "serve the checks over MCP on stdio, for a host without hooks", None),
     ("selftest", "", "both scripts' internal checks", None),
     ("version", "", "print the version (also --version, -V, -v)", None),
-    ("help", "find | scan | trigger | usage | install",
-     "the full help of either script, how trigger rows or usage work, or the agent's install steps",
+    ("help", "find | scan | manifest | trigger | usage | install",
+     "the full help of either script, the manifest keys alone, how trigger rows or usage work, "
+     "or the agent's install steps",
      "locket help find                      how to read a ranking\n"
      "locket help scan                      every check, every manifest key, the ledger schemas\n"
+     "locket help manifest                  the manifest keys alone, grouped by the question each answers\n"
      "locket help install                   the install steps written for an agent"),
 ]
 VERB_NAMES = frozenset(v[0] for v in VERBS)
@@ -155,7 +157,8 @@ The corpus argument takes a shorthand (council, hermes, codex) or registered nam
 substring, a literal path, or `all`; omitted, it is the store the current
 directory sits in. `--index`, `--siblings`, `--embedder` and `--selftest` are
 accepted as verbs too. `locket help scan` explains what a store is and how a
-manifest shapes it; `locket help find` explains how to read a ranking.
+manifest shapes it, `locket help manifest` prints the manifest keys alone, and
+`locket help find` explains how to read a ranking.
 Needs nothing but Python 3 for the checks; `find` needs an embedder (ollama with
 nomic-embed-text, or fastembed in the venv the Panoply pieces share) and says so when none answers.
 """
@@ -1058,6 +1061,8 @@ def main(argv):
             return _memfind().main(["memfind.py", "--help"])
         if which in ("scan", "memscan"):
             return memscan.main(["memscan.py", "--help"])
+        if which == "manifest":
+            print(memscan.manifest_help(), end=""); return 0
         if which == "trigger":
             import trigger
             _parser()[1].choices["trigger"].print_help()
@@ -1137,6 +1142,11 @@ def main(argv):
                     code = main(["locket", *form])
                 assert code == 0 and out.getvalue().startswith(f"usage: locket {form[1] if form[0] == 'help' else form[0]}"), \
                     f"`locket {' '.join(form)}` did not print that command's help"
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = main(["locket", "help", "manifest"])
+            assert code == 0 and out.getvalue().startswith("MANIFEST\n") and "\nMODES" not in out.getvalue() \
+                and "belongs_to" in out.getvalue(), "`locket help manifest` is not the MANIFEST section alone"
             import tempfile
             here = os.getcwd()
             with tempfile.TemporaryDirectory() as t:

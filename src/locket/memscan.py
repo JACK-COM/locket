@@ -487,35 +487,41 @@ MANIFEST_SCHEMA = {
         "$schema": {"type": "string", "description": "Editor hint only; ignored by the tool."},
         "_comment": {"type": "string", "description": "Free text for the human reader; ignored by the tool."},
         "name": {"type": "string",
-                 "description": "What `corpora` and a store argument call this store. Default: the "
+                 "description": "What do `corpora` and a store argument call this store? Default: the "
                                 "directory's basename. Host stores and project memories ignore it."},
         "members": {**_STR_LIST,
-                    "description": "Top-level directory names that ARE corpus; the rest of the root is "
+                    "description": "Which top-level directories are corpus? The rest of the root is "
                                    "host state. Root-level markdown is always in. Replaces the default."},
         "excluded_dirs": {**_STR_LIST,
-                          "description": "Directory names, at any depth, that are not corpus. Replaces the "
+                          "description": "Which directories, at any depth, are not corpus? Replaces the "
                                          "default (archive, in-flight, harness-logs, discovery-research)."},
         "excluded_files": {**_STR_LIST,
-                           "description": "Corpus-relative paths or globs of files that are not corpus, "
-                                          "skipped by every mode, the index and the write-time gate."},
+                           "description": "Which single files are not corpus? Corpus-relative paths or "
+                                          "globs, invisible to every mode, the index and the write-time "
+                                          "gate. For a file that holds no claims, such as a draft or a template."},
         "index_files": {**_STR_LIST,
-                        "description": "File names whose lines POINT at other files, so a line restating "
-                                       "its target is not a fork. Replaces the default."},
+                        "description": "Which files POINT at other files? A line restating its target "
+                                       "is not a fork. Surface role, by basename; replaces the default."},
         "ledger_surfaces": {**_STR_LIST,
-                            "description": "File names that accumulate entries by design and are never "
-                                           "checked. Replaces the default."},
+                            "description": "Which markdown files grow by appending entries? Never scored "
+                                           "for forks. Not `ledgers`, which checks CSV row shape. Surface "
+                                           "role, by basename; replaces the default."},
         "holding_spaces": {**_STR_LIST,
-                           "description": "File names scored only against themselves. Replaces the default."},
+                           "description": "Which files stage entries on their way to a durable home? "
+                                          "Scored only against themselves, yet fully corpus, unlike an "
+                                          "excluded file. Surface role, by basename; replaces the default."},
         "whole_read_exempt": {**_STR_LIST,
-                              "description": "File names the size sweep skips: a mixed surface never read "
-                                             "whole by its own contract, or a file a project instrument "
-                                             "already caps. Default: none."},
+                              "description": "Which files may outgrow a whole read? The size sweep skips "
+                                             "them and nothing else does: a mixed surface never read whole "
+                                             "by its own contract, or a file a project instrument already "
+                                             "caps. Default: none."},
         "code_roots": {**_STR_LIST,
-                       "description": "Directories `cites` resolves path:line citations against, "
+                       "description": "Where do `cites` path:line citations resolve? Directories, "
                                       "absolute or relative to the store."},
         "sources": {
             "type": "array",
-            "description": "Reference CSVs whose rows are claims in this corpus.",
+            "description": "Which CSVs hold claims? Their rows are scored for forks like "
+                           "any sentence in the corpus.",
             "items": {"type": "object", "additionalProperties": False,
                       "required": ["path", "text"],
                       "properties": {
@@ -524,7 +530,8 @@ MANIFEST_SCHEMA = {
                           "label": {"type": "string", "description": "Column that names a row in output (an Area)."}}}},
         "ledgers": {
             "type": "array",
-            "description": "Schemas for CSV ledgers in this store; a row outside one is refused at write time.",
+            "description": "What shape must a CSV ledger's rows take? A row outside its "
+                           "schema is refused at write time; forks are `sources`' business.",
             "items": {"type": "object", "additionalProperties": False,
                       "required": ["path"],
                       "properties": {
@@ -540,10 +547,10 @@ MANIFEST_SCHEMA = {
                           "pattern": {"type": "object", "additionalProperties": {"type": "string"},
                                       "description": "{column: regex the whole value must match}."}}}},
         "triggers": {"type": "string",
-                     "description": "The rows file `locket trigger` reads for this store, store-relative or "
-                                    "absolute. Default: triggers.json at the store root."},
+                     "description": "Which rows file does `locket trigger` read for this store? Store-relative "
+                                    "or absolute. Default: triggers.json at the store root."},
         "belongs_to": {"type": "string",
-                       "description": "Name of another corpus this directory JOINS, as `corpora` lists it; "
+                       "description": "Which corpus does this directory JOIN? Its name as `corpora` lists it; "
                                       "written by `init <dir> --parent <name>`."},
     },
 }
@@ -4078,61 +4085,87 @@ MANIFEST
   is still read; `migrate` renames it); `schema` writes its JSON
   Schema for an editor and checks a manifest against it. Every key is optional and
   a missing key takes the default shown; a broken file degrades to all the
-  defaults rather than taking a hook down. This is the whole list.
+  defaults rather than taking a hook down. `$schema` and `_comment` are ignored.
+  This is the whole list, grouped by the question each key answers.
 
-  name             string. What `corpora` and a store argument call this
-                   store. Default: the directory's basename. Host stores and
-                   project memories are named by the host and ignore it.
-  members          list of top-level directory names that ARE corpus, the
-                   rest of the root being host state; markdown at the root is
-                   always in. Default: every directory, except on a host's
-                   core directory, where it is the host's member list above.
-                   REPLACES that list, so a Hermes that authors its own skills
-                   writes ["memories", "skills"].
-  excluded_dirs    list of directory names, at any depth, that are not corpus.
-                   REPLACES the default: archive, in-flight, harness-logs,
-                   discovery-research. Whatever the list says, .memfind,
-                   backups, backup and every dot-directory stay excluded.
-  excluded_files   list of corpus-relative paths or glob patterns naming files
-                   that are not corpus, each tried against the relative path
-                   and the basename: "notes/draft.md", "*.csv", "scratch-*".
-                   Skipped by every mode, the index and the write-time gate.
-                   Also removes a registered CSV it matches. Default: none.
-  index_files      list of file names whose lines POINT at other files, so a
-                   line restating its target is not a fork. Default:
+  IS THIS FILE CORPUS AT ALL?
+  An excluded file does not exist for the tool: nothing indexes, pairs or
+  guards it. To keep a file in the corpus but change how it is scored, give it
+  a surface role in the next group instead.
+
+  members          Which top-level directories are corpus? A list of names;
+                   the rest of the root is host state, and markdown at the
+                   root is always in. Default: every directory, except on a
+                   host's core directory, where it is the host's member list
+                   above. REPLACES that list, so a Hermes that authors its own
+                   skills writes ["memories", "skills"].
+  excluded_dirs    Which directories, at any depth, are not corpus? A list of
+                   names. REPLACES the default: archive, in-flight,
+                   harness-logs, discovery-research. Whatever the list says,
+                   .memfind, backups, backup and every dot-directory stay
+                   excluded.
+  excluded_files   Which single files are not corpus? A list of
+                   corpus-relative paths or glob patterns, each tried against
+                   the relative path and the basename: "notes/draft.md",
+                   "*.csv", "scratch-*". Skipped by every mode, the index and
+                   the write-time gate. Also removes a registered CSV it
+                   matches. Use it for a file that holds no claims, such as a
+                   draft or a template whose instances copy its shape.
+                   Default: none.
+
+  HOW IS THIS FILE SCORED FOR FORKS?
+  Each list names files by basename and gives them a surface role. A corpus
+  file in none of them is DURABLE: every claim in it is scored against every
+  other file in the store. Each list REPLACES its default.
+
+  index_files      Which files POINT at other files? A line restating its
+                   target is the index doing its job, not a fork. Default:
                    MEMORY.md, ARCHIVE.md, CURATION-INDEX.md,
                    CURATION-SOURCES-INDEX.md, FRONTEND-INDEX.md,
-                   PLATFORM-INDEX.md. Replaces the default.
-  ledger_surfaces  list of file names that accumulate entries by design and
-                   are never checked (chronology is the value). Default:
-                   HARNESS.md, CHECKPOINTS.md, EXPLORATIONS.md. Replaces.
-  holding_spaces   list of file names scored only against THEMSELVES: a
-                   restated entry fires, a fact held elsewhere does not.
+                   PLATFORM-INDEX.md.
+  ledger_surfaces  Which markdown files grow by appending entries? They are
+                   never scored, because chronology is their value and an
+                   append is the discipline, not a breach. Not the same as
+                   `ledgers` below, which checks the row shape of a CSV.
+                   Default: HARNESS.md, CHECKPOINTS.md, EXPLORATIONS.md.
+  holding_spaces   Which files stage entries on their way to a durable home?
+                   Scored only against THEMSELVES: a restated entry fires, a
+                   fact already held elsewhere does not, since an entry is
+                   meant to resemble what it may become. Unlike an excluded
+                   file it is fully corpus: indexed, searchable, and read by
+                   `graduated` for entries whose lesson has landed elsewhere.
                    Default: SHORT_TERM.md, OPEN_QUESTIONS.md,
-                   MEMORY-proposed.md, PROMOTIONS.md. Replaces.
+                   MEMORY-proposed.md, PROMOTIONS.md.
+
+  MAY THIS FILE OUTGROW A WHOLE READ?
   whole_read_exempt
-                   list of file names the SessionStart size sweep skips: a
-                   mixed surface its own load contract says is never read
-                   whole, or a file a project instrument already caps. It
-                   exempts nothing else; every other mode still reads the
-                   file. Default: none.
-  code_roots       list of directories `cites` resolves path:line citations
-                   against, outright. Default: the project's own working
-                   directory (for a project memory) plus ~/.claude and
-                   ~/.hermes where they exist.
-  sources          list of {"path", "text", "label"}: a reference CSV whose
-                   rows are claims in this corpus. `path` is the file, absolute
-                   or relative to the store, `text` the column holding the
-                   sentence, `label` the column that names a row in output (an
-                   Area). Default: the older standalone reference-sources.json
-                   if present, else none.
-  ledgers          list of {"path", "extends", "columns", "required", "caps",
-                   "enum", "pattern"}: a schema for a CSV ledger in this store. `path`
-                   is a basename glob or a store-relative path; `columns` the
-                   exact header; `required` the columns that may not be empty;
-                   `caps` {column: max characters}; `enum` {column: [values]},
-                   "" among them where empty is allowed; `pattern` {column:
-                   regex the whole value must match}. Every key but `path` is
+                   Which files does the SessionStart size sweep skip? A list
+                   of names: a mixed surface its own load contract says is
+                   never read whole, or a file a project instrument already
+                   caps. It exempts nothing else; every other mode still reads
+                   the file, and a file may carry this and a surface role at
+                   once. Default: none.
+
+  WHICH CSV ROWS COUNT, AND IN WHAT SHAPE?
+  A CSV is scored for forks only when `sources` lists it, and its rows are
+  checked for shape only when a `ledgers` schema governs it; a rulings file
+  usually takes both.
+
+  sources          Which CSVs hold claims? A list of {"path", "text",
+                   "label"}: `path` is the file, absolute or relative to the
+                   store, `text` the column holding the sentence, `label` the
+                   column that names a row in output (an Area). Default: the
+                   older standalone reference-sources.json if present, else
+                   none.
+  ledgers          What shape must a CSV ledger's rows take? A list of
+                   {"path", "extends", "columns", "required", "caps", "enum",
+                   "pattern"}; a row outside its schema is refused at write
+                   time. It says nothing about forks. `path` is a basename
+                   glob or a store-relative path; `columns` the exact header;
+                   `required` the columns that may not be empty; `caps`
+                   {column: max characters}; `enum` {column: [values]}, ""
+                   among them where empty is allowed; `pattern` {column: regex
+                   the whole value must match}. Every key but `path` is
                    optional. A built-in schema governs its glob wherever the
                    file sits, corpus or not, and is the authority on it. An
                    entry naming that glob, or a path under it, merges onto it
@@ -4142,19 +4175,31 @@ MANIFEST
                    whose name falls outside it.
                    Default: the built-ins alone, which are:
 @@BUILTIN_LEDGERS@@
-  belongs_to       string, the name of another corpus as `corpora` lists it.
-                   This directory then JOINS that corpus: every mode, the index
-                   and the write-time gate resolve a file here to the parent,
-                   the listing shows the parent alone, and its files appear as
+
+  HOW DOES THIS STORE CONNECT TO THE REST?
+  name             What do `corpora` and a store argument call this store? A
+                   string. Default: the directory's basename. Host stores and
+                   project memories are named by the host and ignore it.
+  belongs_to       Which corpus does this directory JOIN? The name of another
+                   corpus as `corpora` lists it. Every mode, the index and the
+                   write-time gate then resolve a file here to the parent, the
+                   listing shows the parent alone, and its files appear as
                    `<name>/<path>` (this store's `name`, else its basename).
                    The store keeps its own `members`, `excluded_*` and
                    `code_roots` for its own walk; the file-name lists union
                    upward. Written by `init <dir> --parent <corpus>`. A name
-                   that resolves to nothing, to itself, to a store under it
-                   on disk or whose own walk reaches it, or into a cycle is ignored and the store
-                   stands alone. Default: none.
+                   that resolves to nothing, to itself, to a store under it on
+                   disk or whose own walk reaches it, or into a cycle is
+                   ignored and the store stands alone. Default: none.
+  code_roots       Where do `cites` path:line citations resolve? A list of
+                   directories, taken outright. Default: the project's own
+                   working directory (for a project memory) plus ~/.claude and
+                   ~/.hermes where they exist.
+  triggers         Which rows file does `locket trigger` read for this store?
+                   A path, store-relative or absolute. Default: triggers.json
+                   at the store root.
 
-  On Hermes's ~/.hermes the three file-name lists default to empty
+  On Hermes's ~/.hermes the three surface-role lists default to empty
   instead, because its MEMORY.md is the whole memory rather than an index; a
   manifest there still wins. Store the file under version control: it is
   authored configuration, where .memfind/ is derived and rebuilt.
@@ -4341,6 +4386,14 @@ LEDGER_SCHEMAS = {
     },
 }
 _SCHEMA_KEYS = ("columns", "required", "caps", "enum", "pattern")
+
+
+def manifest_help():
+    """The MANIFEST section of `usage()` alone, for `locket help manifest`: a
+    slice of the one text, never a second copy of it."""
+    text = usage()
+    start = text.index("\nMANIFEST\n") + 1
+    return text[start:text.index("\nMODES\n", start)].rstrip() + "\n"
 
 
 def usage():
