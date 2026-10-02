@@ -453,6 +453,34 @@ def corpus_here(cwd):
     return _root_of(cwd) or corpus_for_cwd(cwd)
 
 
+def search_root(words, cwd=None):
+    """The corpus the first of a search's path arguments belongs to, or None.
+
+    Each word is read as the shell would expand it (`~`, `$HOME`, a path relative
+    to the session's cwd) before it is placed, so no path shape is privileged; a
+    regex for paths opening on `/` read `~/.claude/memory` as `/.claude/memory`.
+    Only a word naming something that exists counts, cut at its first glob
+    character, or its directory where that cut leaves a partial name, so a search
+    pattern resolved against the cwd never shadows the path argument after it."""
+    for w in words:
+        w = re.split(r"[*?\[]", str(w), maxsplit=1)[0]
+        if not w or w.startswith("-"):
+            continue
+        p = Path(os.path.expanduser(os.path.expandvars(w)))
+        if not p.is_absolute():
+            p = Path(cwd or os.getcwd()) / p
+        p = os.path.normpath(p)             # `..` collapsed, or an excluded dir it passes through still counts
+        if not os.path.exists(p):           # os.path swallows every OSError, a name too long included
+            p = os.path.dirname(p)          # `~/brain/fact*.md` cut to `~/brain/fact`
+            if not os.path.exists(p):
+                continue
+        p = Path(p)
+        root = corpus_for((p if p.is_dir() else p.parent) / "_probe.md")
+        if root is not None:
+            return root
+    return None
+
+
 def _read_manifest(root):
     """The manifest as a dict, or {} where it is absent or unreadable. A broken
     manifest must degrade to the defaults rather than take a hook down with it."""
@@ -2811,6 +2839,19 @@ def selftest():
         "a ledger named by the manifest is exempt in bashguard too"
     assert bash_write_decision("cat > facts.md", str(store))[1], \
         "a plain file in a manifest corpus blocks"
+    # grepassist places a search by its path words as the shell expands them, from a cwd in no store
+    outside, real_home = Path(tempfile.mkdtemp()), os.environ["HOME"]
+    assert corpus_here(outside) is None, "the cwd fallback has nothing here, so the path must place it"
+    os.environ["HOME"] = str(d)
+    try:
+        for cmd in ("grep -rn 'a fact here' ~/brain", "rg 'a fact here' $HOME/brain/*.md",
+                    "grep 'a fact here' ~/brain/facts.md", "grep 'a fact here' ~/brain/fact*.md"):
+            assert search_root(shlex.split(cmd), outside) == store, cmd
+        assert search_root(["grep", "-rn", "../facts.md"], store / "old") == store, \
+            "a relative path resolves against the session's cwd"
+        assert search_root(["grep", "~/nowhere"], outside) is None, "a path that does not exist places nothing"
+    finally:
+        os.environ["HOME"] = real_home
     # --- a project store answers to its manifest's name, and to its slug still
     import contextlib, io
     real_claude, fake = CLAUDE, Path(tempfile.mkdtemp())
@@ -5520,9 +5561,9 @@ def main(argv):
                 return 0
             ti = payload["tool_input"]
             tool = payload["tool_name"]
-            where = None
+            cwd = payload.get("cwd") or os.getcwd()
             if tool == "Grep":
-                pattern, where = str(ti.get("pattern", "")), ti.get("path")
+                pattern, words = str(ti.get("pattern", "")), [ti["path"]] if ti.get("path") else []
             elif tool == "Bash":
                 cmd = str(ti.get("command", ""))
                 m = re.search(r"(?<![\w-])(?:grep|egrep|rg|ugrep)(?![\w-])"
@@ -5530,13 +5571,14 @@ def main(argv):
                 if not m:
                     return 0
                 pattern = m.group(1)
-                where = next((x for x in re.findall(r"(/[\w./~-]+)", cmd)
-                              if corpus_for(x + "/_probe.md")), None)
+                try:
+                    words = shlex.split(cmd)
+                except ValueError:          # unbalanced quotes: words are still words
+                    words = cmd.split()
+                words = [w for w in words if w != pattern]  # a one-word pattern may exist under the cwd
             else:
                 return 0
-            root = corpus_for(str(Path(where) / "_probe.md")) if where else None
-            if root is None:
-                root = corpus_here(payload.get("cwd") or os.getcwd())
+            root = search_root(words, cwd) or corpus_here(cwd)
             if root is None or not prose_like(pattern):
                 return 0
             out = grep_assist(pattern, root)

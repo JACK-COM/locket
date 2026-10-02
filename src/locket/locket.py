@@ -354,6 +354,11 @@ def cmd_install(argv=()):
         rc |= _merge_json(memscan.CODEX / "hooks.json", _add_codex_hooks)
         print("Codex runs a hook only once it is trusted: start `codex`, run /hooks, and trust "
               "each Locket entry. A later change to an entry asks again; an upgrade does not")
+        profiles = sorted(f.name for f in memscan.CODEX.glob("*.config.toml"))
+        if profiles:
+            print(f"Codex profile config found ({', '.join(profiles)}): trust given in /hooks under --profile "
+                  "(as `ollama launch codex` runs it) is written there and lapses on restart; copy its "
+                  "[hooks.state] tables into config.toml, which `locket doctor` checks")
     if "--desktop" in argv and DESKTOP_CONFIG is None:
         print("--desktop: no known Claude Desktop config path on this platform; add the "
               "mcpServers entry by hand (`locket help install`, Step 4)", file=sys.stderr)
@@ -752,6 +757,90 @@ def _probe_hook(cmd, codex=False):
         shutil.rmtree(store, ignore_errors=True)
 
 
+def _codex_trust_from(reply):
+    """{key: trustStatus} for the Locket entries in a `hooks/list` reply, or None when it is not one."""
+    try:
+        return {h["key"]: h["trustStatus"] for e in reply["result"]["data"] for h in e["hooks"]
+                if _is_locket_hook(str(h.get("command", "")))}
+    except (KeyError, TypeError, AttributeError):
+        return None
+
+
+def _codex_trust(timeout=20):
+    """Codex's own reading of Locket hook trust, from `codex app-server`'s `hooks/list`, or None
+    when Codex is absent or the call fails (the protocol is marked experimental). Codex computes
+    the hash; Locket never does (RULINGS.csv on Area=substrate). The app-server takes no
+    --profile, so this is config.toml's view, which is the one Codex honours. ⚠ The server exits
+    on EOF before answering, so the requests go in one at a time and stdin stays open."""
+    import subprocess, threading
+    exe = shutil.which("codex")
+    if not exe:
+        return None
+    try:
+        p = subprocess.Popen([exe, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
+                             env={**os.environ, "CODEX_HOME": str(memscan.CODEX)},
+                             start_new_session=True)    # an npm launcher's native child dies with it
+    except OSError:
+        return None
+
+    def kill():
+        try:
+            os.killpg(p.pid, 9) if hasattr(os, "killpg") else p.kill()
+        except OSError:
+            pass
+    timer = threading.Timer(timeout, kill)
+    timer.start()
+
+    def reply_to(i):
+        for line in p.stdout:
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(m, dict) and m.get("id") == i and ("result" in m or "error" in m):
+                return m
+        return None
+    try:
+        for m in ({"id": 1, "method": "initialize", "params": {"clientInfo": {
+                       "name": "locket-doctor", "title": None, "version": __version__}, "capabilities": None}},
+                  {"method": "initialized"},
+                  {"id": 2, "method": "hooks/list", "params": {"cwds": [str(memscan.CODEX)]}}):
+            p.stdin.write(json.dumps(m) + "\n"); p.stdin.flush()
+            if m.get("id") == 1 and reply_to(1) is None:
+                return None
+        reply = reply_to(2)
+        return _codex_trust_from(reply) if reply else None
+    except (OSError, ValueError):
+        return None
+    finally:
+        timer.cancel()
+        kill()
+        for f in (p.stdin, p.stdout):
+            try:
+                f.close()
+            except OSError:
+                pass
+        p.wait()
+
+
+def _profile_trust_gap(codex_home, lapsed):
+    """{profile config: [keys]} for the entries Codex reported untrusted (`lapsed`, its own keys)
+    that a profile config (`<name>.config.toml` beside config.toml) holds trust for. codex-cli
+    0.160.0 writes trust given under `--profile` into the profile's file and honours it only from
+    config.toml, so this is trust that lapses on restart. Keys are matched, never hashes."""
+    head = re.compile(r'^\s*\[hooks\.state\."([^"]+)"\]', re.M)
+    gap = {}
+    for f in sorted(codex_home.glob("*.config.toml")):
+        try:
+            held = sorted(set(head.findall(f.read_text())) & set(lapsed))
+        except (OSError, ValueError):
+            continue
+        if held:
+            gap[f] = held
+    return gap
+
+
 def _selftest_uninstall():
     """`uninstall --yes` in throwaway homes, in a child process because Locket's paths are
     fixed from HOME at import: the shared venv goes only with the last piece on PATH, at
@@ -908,10 +997,27 @@ def cmd_doctor():
         else:
             probe = _probe_hook(hooks["hook"], codex=True)
             if probe is True:
-                # where Codex records hook trust is not documented, so the trust step is named, never
-                # checked; the probe runs the command directly, so it proves the hook, not Codex's dispatch
-                row("warn", "codex hooks", "registered, and the write hook fires on a known fork in a patch; "
-                    "Codex skips them until trusted", "in codex, run /hooks and trust each Locket entry")
+                # the probe runs the command directly, so it proves the hook, not Codex's dispatch;
+                # whether Codex will dispatch it is trust, which only Codex's own hooks/list may say
+                trust = _codex_trust()
+                lapsed = [k for k, s in (trust or {}).items() if s != "trusted"]
+                gap = _profile_trust_gap(memscan.CODEX, lapsed) if lapsed else {}
+                if not trust:               # {} too: a reply naming no Locket entry proves nothing
+                    row("warn", "codex hooks", "registered, and the write hook fires on a known fork in a patch; "
+                        "Codex could not report trust, and skips a hook until it is trusted",
+                        "in codex, run /hooks and trust each Locket entry")
+                elif not lapsed:
+                    row("ok", "codex hooks", f"registered, firing on a known fork in a patch, and trusted ({len(trust)} entries)")
+                elif gap:
+                    prof = ", ".join(f.name for f in gap)
+                    row("warn", "codex hooks", f"{len(lapsed)} entries untrusted in config.toml, but trusted in {prof}, "
+                        "which Codex writes under --profile and never reads back",
+                        f"copy the [hooks.state.\"{codex_cfg}:…\"] tables from {prof} into config.toml; "
+                        "recopy after any change to hooks.json")
+                else:
+                    row("warn", "codex hooks", "registered and firing, but Codex reports " +
+                        ", ".join(f"{k.split(':', 1)[1]} {trust[k]}" for k in lapsed),
+                        "in codex, run /hooks and trust each Locket entry")
             else:
                 row("fail", "codex hooks", "registered, but the write hook " +
                     ("stayed silent on a known fork" if probe is False else f"failed: {probe}"),
@@ -1115,6 +1221,39 @@ def main(argv):
             _add_codex_hooks(data)
             assert _add_codex_hooks(data) == [], "a second --codex added its hooks again"
             assert "SessionEnd" not in data["hooks"], "Codex got the usage recorder, which cannot read its sessions"
+            hk = lambda key, cmd, st: {"key": key, "command": cmd, "trustStatus": st}
+            reply = {"id": 2, "result": {"data": [{"cwd": "/x", "warnings": [], "errors": [], "hooks": [
+                hk("/c/hooks.json:pre_tool_use:0:0", "/opt/homebrew/bin/locket hook", "trusted"),
+                hk("/c/hooks.json:pre_tool_use:1:0", "/opt/homebrew/bin/locket bashguard", "modified"),
+                hk("/c/hooks.json:pre_tool_use:2:0", "/usr/bin/other-tool", "untrusted")]}]}}
+            assert _codex_trust_from(reply) == {"/c/hooks.json:pre_tool_use:0:0": "trusted",
+                                                "/c/hooks.json:pre_tool_use:1:0": "modified"}, \
+                "doctor misread hooks/list, or counted a hook that is not Locket's"
+            assert _codex_trust_from({"id": 2, "error": {"code": -32601}}) is None, "an error reply reads as trust"
+            with tempfile.TemporaryDirectory() as t:
+                home = Path(t); k0, k1 = (f"{home}/hooks.json:pre_tool_use:{i}:0" for i in (0, 1))
+                tbl = lambda k: f'[hooks.state."{k}"]\ntrusted_hash = "sha256:00"\n\n'
+                (home / "config.toml").write_text('model = "x"\n\n[hooks.state]\n\n' + tbl(k0))
+                (home / "ollama-launch.config.toml").write_text(tbl(k0) + tbl(k1) + tbl("/elsewhere/hooks.json:x:0:0"))
+                assert _profile_trust_gap(home, [k1]) == {home / "ollama-launch.config.toml": [k1]}, \
+                    "the profile trap's gap is misread: only the keys Codex reported lapsed count"
+                assert _profile_trust_gap(home, [k0 + "9"]) == {}, "a lapsed key no profile holds reads as a gap"
+                # _codex_trust against stub servers: one that answers, one that quits on EOF, one that hangs
+                real_path, stub = os.environ["PATH"], home / "codex"
+                os.environ["PATH"] = f"{home}{os.pathsep}{real_path}"
+                answer = {"result": {"data": [{"hooks": [{"key": k0, "command": "locket hook", "trustStatus": "trusted"}]}]}}
+                try:
+                    for body, want in (
+                        ("import json,sys\nfor l in sys.stdin:\n m=json.loads(l)\n if m.get('id')==1: print(json.dumps({'id':1,'result':{}}),flush=True)\n"
+                         f" if m.get('id')==2: print(json.dumps({{'id':2,'method':'x'}}),flush=True); print(json.dumps(dict(id=2,**{answer!r})),flush=True)\n",
+                         {k0: "trusted"}),
+                        ("import sys\nsys.stdin.readline()\n", None),
+                        ("import time\ntime.sleep(30)\n", None)):
+                        stub.write_text(f"#!{sys.executable}\n{body}"); stub.chmod(0o755)
+                        got = _codex_trust(timeout=2)
+                        assert got == want, f"_codex_trust read {got!r} from a stub that should give {want!r}"
+                finally:
+                    os.environ["PATH"] = real_path
             live_trigger = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'locket.py'))} trigger"
             assert _probe_trigger(live_trigger) is True, "doctor's trigger probe does not fire through this locket.py"
             assert _probe_trigger("true") is False, "doctor's trigger probe reads a silent command as firing"
