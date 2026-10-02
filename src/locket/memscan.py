@@ -2855,6 +2855,24 @@ def selftest():
         here = d / "cwd-store"; here.mkdir(); (here / MANIFEST).write_text("{}"); settings.cache_clear()
         assert search_root(["grep", "-rn", "~/brain"], here) == store, \
             "a missing word (the verb) resolved against a cwd in another store must not place the search there"
+        q = "a fact here"
+        for cmd in (f"rg --glob '*.md' '{q}' ~/brain", f"cd /tmp && grep -rn '{q}' ~/brain 2>/dev/null | head",
+                    f"grep -rne '{q}' ~/brain", f"grep --regexp='{q}' ~/brain", f"grep -e'{q}' ~/brain",
+                    f"grep -rn '{q}' ~/brain 2>&1 | head", f"grep -rn -- '{q}' ~/brain",
+                    f"ls | xargs grep -l '{q}' ~/brain", f"git grep '{q}' -- ~/brain",
+                    f"which grep; grep '{q}' ~/brain", f"bash -c \"grep -rn '{q}' ~/brain\""):
+            assert grep_words(cmd, outside) == (q, ["~/brain"]), (cmd, grep_words(cmd, outside))
+        assert grep_words(f"echo '{q}' | wc -l", outside) is None, "no grep verb, no search"
+        assert grep_words(f"grep -rn foo {store}", outside) == ("", []), \
+            "an existing path is never the pattern, however prose-like its words"
+        assert grep_words("grep -rn foo ~/not-there/memory-store", outside) == ("", []), \
+            "a path-shaped word is never the pattern, existing or not"
+        assert grep_words(f"rg -e '{q}' -e 'other words here' ~/brain", outside) == (q, ["~/brain"]), \
+            "a second -e value leaked into the path words"
+        assert grep_words(f"grep '{q} ~/brain", outside) is not None, "unbalanced quotes must still parse"
+        pat, words = grep_words(f"grep '{q}' --exclude-dir cwd-store ~/brain", d)
+        assert pat == q and search_root(words, d) == store, \
+            "a flag value naming a store under the cwd shadowed the path after it"
     finally:
         os.environ["HOME"] = real_home
     # --- a project store answers to its manifest's name, and to its slug still
@@ -5125,6 +5143,72 @@ def prose_like(pattern):
     return len([w for w in re.split(r"[^A-Za-z0-9_]+", pattern) if len(w) > 3]) >= 2
 
 
+GREP_VERBS = {"grep", "egrep", "rg", "ugrep"}
+
+
+def grep_words(cmd, cwd=None, _nested=False):
+    """(pattern, path words) for the grep in a shell command, or None when it runs none.
+
+    Only a grep's own words count: the command is split at `;`, `&&`, `|` and redirects
+    first, and every word naming a grep verb is tried until one yields a pattern, so `which
+    grep; grep ...` still finds the second. A command with no verb is searched once inside
+    any quoted word holding one (`bash -c '...'`). The pattern is the `-e`/`--regexp` value
+    where one is given, otherwise the first word after the verb that is shaped like a
+    question (`prose_like`) and is not shaped like a path; a flag's value is almost never
+    either, so no per-tool list of value-taking flags is needed. The path words are every
+    other word after an `-e` pattern, else the words after the pattern, last first, so a
+    value-taking flag between pattern and path cannot shadow the path."""
+    lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        toks = list(lex)
+    except ValueError:                      # unbalanced quotes: words are still words
+        toks = cmd.split()
+    verbs = [k for k, t in enumerate(toks) if os.path.basename(t) in GREP_VERBS]
+    if not verbs:
+        if not _nested:
+            for t in toks:
+                if " " in t:
+                    got = grep_words(t, cwd, True)
+                    if got:
+                        return got
+        return None
+
+    def pathlike(w):
+        if "/" in w or w.startswith(("~", "$", ".")):
+            return True
+        return os.path.exists(os.path.join(cwd or os.getcwd(), w))
+
+    for i in verbs:
+        seg = []
+        for t in toks[i + 1:]:
+            if t and not t.strip("();<>|&"):   # an operator ends the grep's words
+                if t[0] in "<>" and seg and seg[-1].isdigit():
+                    seg.pop()               # the `2` of `2>/dev/null` is a descriptor, not a word
+                break
+            seg.append(t)
+        flagged, positional, opts, it = None, [], True, iter(seg)
+        for w in it:
+            attached = re.fullmatch(r"-[A-Za-z]*e(.+)", w, re.S) if opts else None
+            if opts and w == "--":
+                opts = False
+            elif opts and w.startswith("--regexp="):
+                flagged = flagged or w.partition("=")[2]
+            elif opts and (w == "--regexp" or re.fullmatch(r"-[A-Za-z]*e", w)):
+                value = next(it, None)      # consumed even when an earlier -e won
+                flagged = flagged or value
+            elif attached and not w.startswith("--"):
+                flagged = flagged or attached.group(1)
+            elif not (opts and w.startswith("-") and w != "-"):
+                positional.append(w)
+        if flagged:
+            return flagged, positional[::-1]
+        at = next((j for j, w in enumerate(positional) if prose_like(w) and not pathlike(w)), None)
+        if at is not None:
+            return positional[at], positional[at + 1:][::-1]
+    return "", []
+
+
 def grep_assist(pattern, root, top=4):
     """Ranked semantic neighbours for a grep about to run over a memory corpus.
 
@@ -5570,17 +5654,10 @@ def main(argv):
             if tool == "Grep":
                 pattern, words = str(ti.get("pattern", "")), [ti["path"]] if ti.get("path") else []
             elif tool == "Bash":
-                cmd = str(ti.get("command", ""))
-                m = re.search(r"(?<![\w-])(?:grep|egrep|rg|ugrep)(?![\w-])"
-                              r"[^;&|]*?['\"]([^'\"]+)['\"]", cmd)
-                if not m:
+                got = grep_words(str(ti.get("command", "")), cwd)
+                if got is None:
                     return 0
-                pattern = m.group(1)
-                try:
-                    words = shlex.split(cmd)
-                except ValueError:          # unbalanced quotes: words are still words
-                    words = cmd.split()
-                words = [w for w in words if w != pattern]  # a one-word pattern may exist under the cwd
+                pattern, words = got
             else:
                 return 0
             root = search_root(words, cwd) or corpus_here(cwd)
