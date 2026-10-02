@@ -463,7 +463,7 @@ def search_root(words, cwd=None):
     character, or its directory where that cut leaves a partial name, so a search
     pattern resolved against the cwd never shadows the path argument after it."""
     for w in words:
-        w = re.split(r"[*?\[]", str(w), maxsplit=1)[0]
+        w, cut = re.split(r"[*?\[]", str(w), maxsplit=1)[0], bool(re.search(r"[*?\[]", str(w)))
         if not w or w.startswith("-"):
             continue
         p = Path(os.path.expanduser(os.path.expandvars(w)))
@@ -471,8 +471,10 @@ def search_root(words, cwd=None):
             p = Path(cwd or os.getcwd()) / p
         p = os.path.normpath(p)             # `..` collapsed, or an excluded dir it passes through still counts
         if not os.path.exists(p):           # os.path swallows every OSError, a name too long included
-            p = os.path.dirname(p)          # `~/brain/fact*.md` cut to `~/brain/fact`
-            if not os.path.exists(p):
+            # only a glob cut may fall back to its directory (`~/brain/fact*.md` cut to `~/brain/fact`);
+            # any other missing word, the verb `grep` first, would fall back to the cwd's own store
+            p = os.path.dirname(p) if cut else ""
+            if not p or not os.path.exists(p):
                 continue
         p = Path(p)
         root = corpus_for((p if p.is_dir() else p.parent) / "_probe.md")
@@ -2850,6 +2852,9 @@ def selftest():
         assert search_root(["grep", "-rn", "../facts.md"], store / "old") == store, \
             "a relative path resolves against the session's cwd"
         assert search_root(["grep", "~/nowhere"], outside) is None, "a path that does not exist places nothing"
+        here = d / "cwd-store"; here.mkdir(); (here / MANIFEST).write_text("{}"); settings.cache_clear()
+        assert search_root(["grep", "-rn", "~/brain"], here) == store, \
+            "a missing word (the verb) resolved against a cwd in another store must not place the search there"
     finally:
         os.environ["HOME"] = real_home
     # --- a project store answers to its manifest's name, and to its slug still
