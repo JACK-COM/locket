@@ -2870,6 +2870,8 @@ def selftest():
         assert grep_words(f"rg -e '{q}' -e 'other words here' ~/brain", outside) == (q, ["~/brain"]), \
             "a second -e value leaked into the path words"
         assert grep_words(f"grep '{q} ~/brain", outside) is not None, "unbalanced quotes must still parse"
+        assert grep_words(f"git commit -m \"which grep; grep '{q}' ~/brain\"", outside) is None, \
+            "a quoted word that only mentions grep is not a command"
         pat, words = grep_words(f"grep '{q}' --exclude-dir cwd-store ~/brain", d)
         assert pat == q and search_root(words, d) == store, \
             "a flag value naming a store under the cwd shadowed the path after it"
@@ -5152,10 +5154,12 @@ def grep_words(cmd, cwd=None, _nested=False):
     Only a grep's own words count: the command is split at `;`, `&&`, `|` and redirects
     first, and every word naming a grep verb is tried until one yields a pattern, so `which
     grep; grep ...` still finds the second. A command with no verb is searched once inside
-    any quoted word holding one (`bash -c '...'`). The pattern is the `-e`/`--regexp` value
-    where one is given, otherwise the first word after the verb that is shaped like a
-    question (`prose_like`) and is not shaped like a path; a flag's value is almost never
-    either, so no per-tool list of value-taking flags is needed. The path words are every
+    the command string a shell takes after `-c` (`bash -c '...'`), never in any other
+    quoted word, where a commit message or a heredoc that mentions grep would fire it.
+    The pattern is the `-e`/`--regexp` value where one is given, otherwise the first word
+    after the verb that is shaped like a question (`prose_like`) and is not shaped like a
+    path; a flag's value is almost never either, so no per-tool list of value-taking flags
+    is needed. The path words are every
     other word after an `-e` pattern, else the words after the pattern, last first, so a
     value-taking flag between pattern and path cannot shadow the path."""
     lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
@@ -5167,8 +5171,8 @@ def grep_words(cmd, cwd=None, _nested=False):
     verbs = [k for k, t in enumerate(toks) if os.path.basename(t) in GREP_VERBS]
     if not verbs:
         if not _nested:
-            for t in toks:
-                if " " in t:
+            for flag, t in zip(toks, toks[1:]):
+                if re.fullmatch(r"-[A-Za-z]*c", flag):
                     got = grep_words(t, cwd, True)
                     if got:
                         return got
