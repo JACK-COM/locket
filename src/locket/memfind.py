@@ -48,6 +48,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import memscan
 
 import _embed  # noqa: E402  (panoply-lib's embedder ladder, a generated copy beside this file)
+import configure  # noqa: E402
+
+configure.apply()   # ~/.locket/config.json's embed section, under the environment
 
 CACHE_SUBDIR = ".memfind"   # inside the corpus it indexes; with the manifest, the only thing owned there
 LAST_RANK_MODE = "semantic"

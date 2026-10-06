@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/embed.py (1a43041) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/embed.py (05eaa0f) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """embed: the embedder ladder the Panoply's pieces share.
 
 Ranks text by meaning on whatever this machine can serve, in order: ollama as it
@@ -30,20 +30,24 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-OLLAMA = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
-MODEL = os.environ.get("MEMFIND_MODEL", "embeddinggemma-2:270m")   # needs ollama 0.36+
+# The shipped values; apply_config falls back to these, so they live in one place.
+SHIPPED = {"model": "embeddinggemma-2:270m", "ollama_host": "http://127.0.0.1:11434", "autostart": True}
+OLLAMA = os.environ.get("OLLAMA_HOST", SHIPPED["ollama_host"])
+MODEL = os.environ.get("MEMFIND_MODEL", SHIPPED["model"])   # needs ollama 0.36+
 # The same model in-process: its ONNX export run by onnxruntime, no server. It matches
 # ollama's bf16 tag at cosine 0.9999 and the default 4-bit tag at about 0.99, which
 # ranks the same; the cache tags differ, so an index built on one rung is rebuilt by
 # the other. Pinned to a revision, because a re-export moves
 # every vector. fastembed cannot run it: the graph also requires image, video and audio
 # feature inputs, which its text pipeline never supplies.
-ONNX_MODEL = os.environ.get("MEMFIND_ONNX_MODEL", "onnx-community/embeddinggemma-2-ONNX")
-ONNX_REVISION = os.environ.get("MEMFIND_ONNX_REVISION", "daa72c51243991dfcaf9f9137d2c573d8f7790c0")
+ONNX_PIN = ("onnx-community/embeddinggemma-2-ONNX", "daa72c51243991dfcaf9f9137d2c573d8f7790c0")
+ONNX_MODEL = os.environ.get("MEMFIND_ONNX_MODEL", ONNX_PIN[0])
+ONNX_REVISION = os.environ.get("MEMFIND_ONNX_REVISION", ONNX_PIN[1])
 ONNX_FILE = "onnx/model_quantized.onnx"   # 314MB with its _data; fp16 is 542MB for the same ranking
-# sha256 of each file at ONNX_REVISION. A file is kept only when it matches, so a
-# download cut short is fetched again rather than read as weights. A new revision
-# needs new digests: the repo's API lists them (`?blobs=true`, `lfs.sha256`).
+# sha256 of each file at ONNX_PIN, checked only while ONNX_MODEL and ONNX_REVISION are the
+# pin: a file is kept only when it matches, so a download cut short is fetched again rather
+# than read as weights. Another export or revision has other digests and goes unchecked; its
+# repo's API lists them (`?blobs=true`, `lfs.sha256`) for whoever moves the pin.
 ONNX_SHA256 = {
     "tokenizer.json": "4d777ef5bdc1aa36227abdfb77c3e49e7b9c892d16e1b6bda41c393504828be4",
     "onnx/model_quantized.onnx": "d06edd601f851c633a2519304cbeb8dc6170d7ceb61b436625c17fb9b6e74953",
@@ -81,6 +85,59 @@ def _find_venv():
 
 
 VENV = _find_venv()
+
+
+# A piece's own settings file may carry an `embed` section with these keys. Each maps to the
+# module setting it sets and the environment variables that override it, since a variable set
+# for one shell or one test must still win over a file every process reads.
+CONFIG_KEYS = {
+    "model": ("MODEL", ("MEMFIND_MODEL",)),
+    "ollama_host": ("OLLAMA", ("OLLAMA_HOST",)),
+    "autostart": ("AUTOSTART", ("MEMFIND_NO_AUTOSTART",)),
+    "venv": ("VENV", ("PANOPLY_VENV", "LOCKET_VENV")),
+}
+
+
+def _file_venv(raw):
+    """A venv path from a file, or None: it must expand and be absolute, because a hook
+    resolves a relative path against whatever directory it runs in. `~nouser/x` raises
+    RuntimeError on expansion, and a bad file must never stop a hook."""
+    try:
+        p = Path(raw).expanduser()
+    except (RuntimeError, OSError, ValueError):
+        return None
+    return p if p.is_absolute() else None
+
+
+def apply_config(section=None):
+    """Set MODEL, OLLAMA, AUTOSTART and VENV from a piece's `embed` section, under the
+    environment: a variable wins, then the section, then the shipped value (VENV's shipped
+    value is whichever default venv exists). Returns {key: (value, source)}, the source
+    being "default", "file" or "env NAME", which is what `configure` shows. A key absent
+    from the section, or present with the wrong type, falls to the next source: a bad file
+    must never stop a hook, and the piece's own check reports it. Clears the resolved
+    backend, since a new model or host is a new space."""
+    global _ACTIVE
+    section = section if isinstance(section, dict) else {}
+    g, out = globals(), {}
+    for key, (name, env) in CONFIG_KEYS.items():
+        # MEMFIND_NO_AUTOSTART counts only as "1", the one value it has ever meant
+        set_by = next((v for v in env if (os.environ.get(v) == "1" if key == "autostart" else os.environ.get(v))), None)
+        if set_by:
+            raw = os.environ[set_by]
+            value = (raw != "1") if key == "autostart" else Path(raw).expanduser() if key == "venv" else raw
+            src = f"env {set_by}"
+        elif (key in section and isinstance(section[key], bool if key == "autostart" else str) and section[key] != ""
+              and (key != "venv" or _file_venv(section[key]))):
+            value = _file_venv(section[key]) if key == "venv" else section[key]
+            src = "file"
+        else:
+            value = _find_venv() if key == "venv" else SHIPPED[key]
+            src = "default"
+        g[name] = value
+        out[key] = (value, src)
+    _ACTIVE = None
+    return out
 
 # Every piece that ranks through the venv, by its command. A new piece that does adds
 # its name here, or another piece's uninstall will take the venv from under it.
@@ -247,7 +304,7 @@ def _fetch_model(quiet):
                 for block in iter(lambda: r.read(1 << 20), b""):
                     h.update(block)
                     f.write(block)
-            want = ONNX_SHA256.get(rel)
+            want = ONNX_SHA256.get(rel) if (ONNX_MODEL, ONNX_REVISION) == ONNX_PIN else None
             if want and h.hexdigest() != want:
                 raise RuntimeError(f"{rel} arrived incomplete or altered (sha256 {h.hexdigest()[:12]}, "
                                    f"expected {want[:12]}); the next use fetches it again")
@@ -411,6 +468,38 @@ def _selftest_fetch():
         ONNX_SHA256.update(saved)
 
 
+def _selftest_config():
+    """Offline: the environment beats the file, the file beats the shipped value, and a
+    wrong-typed key falls through rather than taking effect."""
+    names = [v for _, env in CONFIG_KEYS.values() for v in env]
+    saved = {v: os.environ.pop(v, None) for v in names}
+    try:
+        with settings():
+            got = apply_config({"model": "m-file", "ollama_host": "http://h:1", "autostart": False, "venv": "~/v"})
+            assert got["model"] == ("m-file", "file") and MODEL == "m-file", got
+            assert got["autostart"] == (False, "file") and AUTOSTART is False, got
+            assert VENV == Path("~/v").expanduser(), VENV
+            os.environ["MEMFIND_MODEL"] = "m-env"
+            os.environ["MEMFIND_NO_AUTOSTART"] = "1"
+            got = apply_config({"model": "m-file", "autostart": True})
+            assert got["model"] == ("m-env", "env MEMFIND_MODEL"), got
+            assert got["autostart"] == (False, "env MEMFIND_NO_AUTOSTART"), got
+            for v in names:
+                os.environ.pop(v, None)
+            os.environ["MEMFIND_NO_AUTOSTART"] = "0"
+            assert apply_config({"autostart": False})["autostart"] == (False, "file"), "=0 must not count as set"
+            del os.environ["MEMFIND_NO_AUTOSTART"]
+            got = apply_config({"model": 7, "autostart": "yes", "ollama_host": "", "venv": "rel/v"})
+            assert apply_config({"venv": "~no-such-user-x/v"})["venv"][1] == "default", "an unexpandable venv took effect"
+            assert all(src == "default" for _, src in got.values()), f"a bad key took effect: {got}"
+            assert got["model"][0] == SHIPPED["model"] and apply_config(None)["model"][1] == "default"
+    finally:
+        for v, val in saved.items():
+            if val is not None:
+                os.environ[v] = val
+    apply_config()                          # back to this process's environment
+
+
 def _selftest():
     """Offline: the ladder with no server, the settings block, the refusal message."""
     with settings(_ACTIVE=None, AUTOSTART=False, OLLAMA="http://127.0.0.1:1", VENV=Path("/nonexistent")):
@@ -444,6 +533,7 @@ def _selftest():
     with settings(VENV=Path("/v")):
         assert model_dir().parent == Path("/v/models"), "the model must live inside the venv"
     _selftest_fetch()
+    _selftest_config()
     import tempfile
     saved = {k: os.environ.pop(k, None) for k in ("PANOPLY_VENV", "LOCKET_VENV", "HOME")}
     try:

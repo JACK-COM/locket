@@ -31,7 +31,7 @@ BIN = Path(os.environ.get("LOCKET_BIN", str(Path.home() / ".local" / "bin")))
 # path survives an upgrade, and leaves the link in BIN to the package manager.
 PACKAGED = os.environ.get("LOCKET_PACKAGED") == "1"
 LINKS = ("locket", "memscan", "memfind")      # the last two are older spellings this replaces
-SCRIPTS = ("memscan.py", "memfind.py", "locket.py", "locket_mcp.py", "trigger.py", "usage.py")
+SCRIPTS = ("memscan.py", "memfind.py", "locket.py", "locket_mcp.py", "trigger.py", "usage.py", "configure.py")
 
 # memfind verbs, in memfind's own spelling; `find` is the bare statement form.
 FIND = {"find": None, "siblings": "--siblings", "index": "--index", "embedder": "--embedder"}
@@ -92,6 +92,13 @@ VERBS = [
      "locket usage --json                   the same summary as JSON\n"
      "locket usage record                   copy new sessions into the ledger now (the\n"
      "                                      SessionEnd hook does this on its own)"),
+    ("configure", "[embedder [--model NAME] [--ollama-host URL] [--[no-]autostart] [--venv PATH] [--reset] [--index] [--no-check] [--dry-run] | schema]",
+     "show or change the machine settings every Locket process reads (~/.locket/config.json): the embedder model, ollama host, autostart and venv",
+     "locket configure                      each setting, where its value comes from, stores behind\n"
+     "locket configure embedder --model nomic-embed-text --index\n"
+     "                                      switch model and rebuild every index now\n"
+     "locket configure embedder -h          every option, explained\n"
+     "locket help configure                 the file, precedence, and what a model change costs"),
     ("corpora", "", "every store on this machine", None),
     ("init", "<dir> [--name <label>] [--parent <corpus>] [--ledgers[=<Name>]]",
      "make a folder of markdown a store; running it again changes nothing",
@@ -524,6 +531,8 @@ def cmd_uninstall(argv):
     # an older install made it inside ~/.locket, the rest in ~/.panoply
     import contextlib
     import _embed
+    import configure
+    configure.apply()                       # a configured venv is the one in use
     shared, others = _embed.shared_venv("locket")
     venv = locket_dir / "venv"
     # an older install's venv stays only while it is the one in use; beside ~/.panoply/venv
@@ -538,7 +547,7 @@ def cmd_uninstall(argv):
         print(f"  link      {l}")
     if locket_dir.is_dir():
         stays = " and ".join(n for n, p in (("its venv", keep), ("the usage ledger", ledger)) if p)
-        print(f"  directory {locket_dir}  (registry, schema{f'; {stays} stays' if stays else ''})")
+        print(f"  directory {locket_dir}  (registry, schema, settings{f'; {stays} stays' if stays else ''})")
     if shared:
         print(f"  directory {shared}  (the embedder venv and its model; no other Panoply piece is on PATH)")
     for c in caches:
@@ -943,9 +952,22 @@ def cmd_doctor():
     row("ok", "stores", f"{len(stores)} ({', '.join(sorted(stores)[:6])}{', ...' if len(stores) > 6 else ''})") \
         if stores else row("fail", "stores", "none found", "locket init <folder of markdown>")
 
+    import configure
+    cfg_data, cfg_problems = configure.load()
+    if cfg_problems:
+        row("fail", "config", "; ".join(cfg_problems)[:160], "locket configure embedder --reset  (or fix the file)")
+    else:
+        resolved = configure.apply()
+        overridden = [f"{k} by {src[4:]}" for k, (_, src) in resolved.items()
+                      if src.startswith("env") and k in (cfg_data.get("embed") or {})]
+        detail = f"{configure.CONFIG}" if configure.CONFIG.exists() else "no file; every setting is its default"
+        row("warn", "config", f"{detail}; the environment overrides {', '.join(overridden)}",
+            "unset the variable, or set the value with `locket configure embedder`") if overridden \
+            else row("ok", "config", detail)
     try:
         name, model = _memfind().resolve_backend()
-        row("ok", "embedder", f"{name} ({model})")
+        src = configure.apply()["model"][1] if name == "ollama" else "fixed in-process model"
+        row("ok", "embedder", f"{name} ({model}; {src})")
     except RuntimeError as e:
         # a venv that exists but cannot serve (onnxruntime too old) names its own fix
         fix = str(e).split("Fix: ", 1)[1] if "Fix: " in str(e) else \
@@ -1163,7 +1185,7 @@ def main(argv):
         print(f"locket {__version__}"); return 0
     if verb == "help":
         which = rest[0] if rest else ""
-        if which in _parser()[1].choices and which not in ("find", "install", "trigger", "usage"):
+        if which in _parser()[1].choices and which not in ("find", "install", "trigger", "usage", "configure"):
             _parser()[1].choices[which].print_help(); return 0
         if which in ("find", "memfind"):
             return _memfind().main(["memfind.py", "--help"])
@@ -1175,6 +1197,10 @@ def main(argv):
             import trigger
             _parser()[1].choices["trigger"].print_help()
             print("\n" + trigger.__doc__.split("\n\n", 1)[1].rstrip()); return 0
+        if which == "configure":
+            import configure
+            configure._parser().print_help()
+            print("\n" + configure.__doc__.split("\n\n", 1)[1].rstrip()); return 0
         if which == "usage":
             import usage
             _parser()[1].choices["usage"].print_help()
@@ -1187,6 +1213,9 @@ def main(argv):
         _parser()[0].print_help(); return 0
     if verb.startswith("-"):
         verb = verb.lstrip("-")               # memfind's own spelling: --index, --siblings, --selftest
+    if verb == "configure":                 # its own parser: every option carries its own -h text
+        import configure
+        return configure.main(rest)
     if _wants_help(verb, rest):
         _parser()[1].choices[verb].print_help(); return 0
     if verb == "find":
@@ -1303,7 +1332,8 @@ def main(argv):
             _selftest_uninstall()
             import trigger
             import usage
-            rc = trigger.selftest() or usage.selftest()
+            import configure
+            rc = trigger.selftest() or usage.selftest() or configure.selftest()
         return rc or _memfind().main(["memfind.py", "--selftest"])
     if verb == "install":
         return cmd_install(rest)
