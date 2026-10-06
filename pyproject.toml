@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 dependencies = []
 
 [project.optional-dependencies]
-fastembed = ["fastembed"]
+onnx = ["onnxruntime", "tokenizers", "numpy"]
 
 [project.scripts]
 locket = "locket.locket:cli"

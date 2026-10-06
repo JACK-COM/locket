@@ -15,15 +15,15 @@ same register" overlap on this corpus, so any automatic verdict is wrong often
 enough to be worse than no verdict; ranking survives that overlap, gating does
 not.
 
-Embeddings come from `nomic-embed-text` served by local ollama: weights on disk,
-inference on this machine, nothing leaves it. `/api/ps` listing the model is the
-positive check, because ollama's cloud-backed models never appear there.
+Embeddings come from EmbeddingGemma 2 (`embeddinggemma-2:270m`) served by local
+ollama, or its ONNX export in-process: weights on disk, inference on this machine,
+nothing leaves it. `/api/ps` listing the model is the positive check, because
+ollama's cloud-backed models never appear there.
 
-The model was chosen by benchmark and the free on-device candidate lost: Apple's
-`NLEmbedding` separated held-out paraphrases from register-matched negatives at
-75% against `nomic-embed-text`'s 90%. Register-matched negatives are what make
-the benchmark mean anything; easy negatives measure topic detection and would
-pass a tool useless here. Do not rebuild the comparison without them.
+The model was chosen by benchmark, and `_embed`'s docstring carries the figures.
+Register-matched negatives are what make the benchmark mean anything; easy
+negatives measure topic detection and would pass a tool useless here. Do not
+rebuild the comparison without them.
 
 A corpus may also keep durable facts in a queryable CSV outside the memory
 directory. Where the corpus manifest (`locket.json`, key `sources`; the older
@@ -54,7 +54,7 @@ LAST_RANK_MODE = "semantic"
 
 # ---------------------------------------------------------------- embedding
 
-# The ladder (ollama as it stands, ollama started by us, fastembed in-process) and its
+# The ladder (ollama as it stands, ollama started by us, onnxruntime in-process) and its
 # settings live in _embed, shared with every Panoply piece. Its functions are re-exported;
 # its settings are read through this module but never set here, because an assignment on
 # memfind would rebind memfind's name and leave _embed's untouched. `settings(...)` sets
@@ -322,7 +322,7 @@ def load_cached(root):
         m = json.loads(meta.read_text())
         # Whichever backend built it: the query is embedded in that same space
         # (`rank` pins the backend from the tag), so no embedder is probed here.
-        if m.get("model") not in (tag("ollama"), tag("fastembed")):
+        if m.get("model") not in (tag("ollama"), tag("onnx")):
             return None
         flat = _read_vectors(vec, len(m["items"]), m["dim"])
         stale = m.get("fingerprint") != corpus_fingerprint(root)
@@ -401,7 +401,7 @@ def rank(statement, root, top=5, per_file=True, quiet=False, idx=None, lexical=T
             which = resolve_backend()[0]
         else:
             m = json.loads(cache_paths(root)[0].read_text())
-            which = "fastembed" if str(m.get("model", "")).startswith("fastembed:") else "ollama"
+            which = "onnx" if str(m.get("model", "")).startswith("onnx:") else "ollama"
         qv = embed([statement], quiet=True, backend=which)[0]
     except RuntimeError:
         if not lexical:
@@ -450,9 +450,9 @@ def siblings(root, top=30, quiet=False, idx=None):
     standing.
 
     Mean-centring is what makes the centroid readable, not an optimisation:
-    nomic's space is anisotropic, so raw centroid cosine puts every pair between
-    0.97 and 0.99, and subtracting the corpus mean centroid recovers a 0.68-0.84
-    spread over the same 345 files. It is recorded as having FAILED against a
+    the embedding space is anisotropic, so raw centroid cosine put every pair
+    between 0.97 and 0.99 under nomic-embed-text, and subtracting the corpus mean
+    centroid recovered a 0.68-0.84 spread over the same 345 files. It is recorded as having FAILED against a
     novel-versus-paraphrase threshold, which is a different problem: ordering two
     CLASSES, where here the shared corpus direction is common-mode noise between
     two vectors compared only with each other.
@@ -579,7 +579,7 @@ def selftest():
     lx = lexical_rank(items[0][1], root, top=1, items=items)
     assert lx and lx[0][1] == items[0][0] and lx[0][0] > 0.99, lx
     with settings(_ACTIVE=None, AUTOSTART=False, OLLAMA="http://127.0.0.1:1"):
-        if not _embed.have_fastembed():
+        if not _embed.have_onnx():
             r = rank(items[0][1], root, top=1, quiet=True, idx=(items, flat, dim))
             assert LAST_RANK_MODE == "lexical" and r[0][1] == items[0][0], r
             try:
@@ -766,7 +766,8 @@ NO VERDICT, BY DESIGN
   and a genuinely novel fact overlap far too much for a threshold to beat no
   threshold. Read the neighbour list; do not read the number.
 
-Needs ollama serving `nomic-embed-text`. The module docstring carries the design
+Needs ollama 0.36+ serving `embeddinggemma-2:270m`, or onnxruntime and tokenizers in
+the venv the Panoply pieces share. The module docstring carries the design
 rationale."""
 
 
@@ -845,7 +846,7 @@ def main(argv):
               + "\n".join("  " + l for l in
                           f"ollama: install it, then  ollama pull {_embed.MODEL}\n"
                           f"in-process, no server:  {sys.executable} -m venv {_embed.VENV} && "
-                          f"{_embed.VENV}/bin/python -m pip install fastembed".splitlines()))
+                          f"{_embed.VENV}/bin/python -m pip install onnxruntime tokenizers".splitlines()))
     print("\nRanked candidates, not a verdict. Read the top file before writing; "
           "this tool cannot tell you a fact is new.")
     return 0

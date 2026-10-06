@@ -160,7 +160,7 @@ accepted as verbs too. `locket help scan` explains what a store is and how a
 manifest shapes it, `locket help manifest` prints the manifest keys alone, and
 `locket help find` explains how to read a ranking.
 Needs nothing but Python 3 for the checks; `find` needs an embedder (ollama with
-nomic-embed-text, or fastembed in the venv the Panoply pieces share) and says so when none answers.
+embeddinggemma-2:270m, or onnxruntime in the venv the Panoply pieces share) and says so when none answers.
 """
 
 
@@ -520,7 +520,7 @@ def cmd_uninstall(argv):
         except (OSError, json.JSONDecodeError, ValueError):
             mcp = False
 
-    # the fastembed venv every Panoply piece shares goes only with the last piece on PATH;
+    # the embedder venv every Panoply piece shares goes only with the last piece on PATH;
     # an older install made it inside ~/.locket, the rest in ~/.panoply
     import contextlib
     import _embed
@@ -540,7 +540,7 @@ def cmd_uninstall(argv):
         stays = " and ".join(n for n, p in (("its venv", keep), ("the usage ledger", ledger)) if p)
         print(f"  directory {locket_dir}  (registry, schema{f'; {stays} stays' if stays else ''})")
     if shared:
-        print(f"  directory {shared}  (the fastembed venv; no other Panoply piece is on PATH)")
+        print(f"  directory {shared}  (the embedder venv and its model; no other Panoply piece is on PATH)")
     for c in caches:
         print(f"  cache     {c}")
     if purge:
@@ -610,9 +610,9 @@ def cmd_uninstall(argv):
           f"{HERE / 'INSTALL-locket.md' if (HERE / 'INSTALL-locket.md').exists() else ''}".rstrip())
     print("  an editor `json.schemas` entry pointing at ~/.locket/locket.schema.json, if you added one")
     if others:
-        print(f"  the fastembed venv {_embed.VENV}, which {' and '.join(others)} still use{'s' if len(others) == 1 else ''}")
+        print(f"  the embedder venv {_embed.VENV}, which {' and '.join(others)} still use{'s' if len(others) == 1 else ''}")
     elif _embed.VENV.is_dir() and not shared:
-        print(f"  the fastembed venv you named: {_embed.VENV}")
+        print(f"  the embedder venv you named: {_embed.VENV}")
     return 0
 
 
@@ -948,7 +948,7 @@ def cmd_doctor():
         row("ok", "embedder", f"{name} ({model})")
     except RuntimeError:
         row("warn", "embedder", "none; `find` falls back to word overlap and misses paraphrases",
-            "ollama pull nomic-embed-text  (or fastembed: `locket help install`)")
+            f"ollama pull {_memfind().MODEL}  (ollama 0.36+; or in-process: `locket help install`)")
 
     # an empty store (an auto-memory folder no session has written to) has nothing to
     # index and `index all` skips it, so it never counts against this check
