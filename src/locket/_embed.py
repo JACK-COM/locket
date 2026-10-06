@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/embed.py (205ab20) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/embed.py (1a43041) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """embed: the embedder ladder the Panoply's pieces share.
 
 Ranks text by meaning on whatever this machine can serve, in order: ollama as it
@@ -314,12 +314,27 @@ def _embed_onnx(texts, quiet):
     return out
 
 
-def have_onnx():
+# The oldest onnxruntime that loads the graph: 1.18 to 1.22 refuse it as INVALID_GRAPH
+# (opset 21, com.microsoft GatherBlockQuantized). A venv made for an older fastembed
+# can hold one, and it must read as no rung rather than a rung that fails at load.
+ORT_MIN = (1, 23)
+
+
+def onnx_status():
+    """(usable, why): whether the in-process rung can run here, and if not, the fix."""
     try:
-        _import_onnx()
-        return True
+        ort = _import_onnx()[0]
     except ImportError:
-        return False
+        return False, f"{VENV}/bin/python -m pip install onnxruntime tokenizers"
+    have = tuple(int(p) for p in ort.__version__.split(".")[:2] if p.isdigit())
+    if have < ORT_MIN:
+        return False, (f"onnxruntime {ort.__version__} is too old for the model; "
+                       f"{VENV}/bin/python -m pip install -U 'onnxruntime>={ORT_MIN[0]}.{ORT_MIN[1]}'")
+    return True, ""
+
+
+def have_onnx():
+    return onnx_status()[0]
 
 
 def resolve_backend(want=None):
@@ -333,15 +348,19 @@ def resolve_backend(want=None):
         if _ollama_up() or (AUTOSTART and _ollama_autostart()):
             _ACTIVE = ("ollama", MODEL)
             return _ACTIVE
-    if want in (None, "onnx") and have_onnx():
+    usable, why = onnx_status() if want in (None, "onnx") else (False, "")
+    if usable:
         _ACTIVE = ("onnx", ONNX_MODEL)
         return _ACTIVE
+    if why and VENV.is_dir():               # a venv exists but cannot serve: say exactly why
+        raise RuntimeError(f"no embedder available: the in-process rung cannot run. Fix: {why}")
     raise RuntimeError(
         "no embedder available. Three ways to get one:\n"
         f"  1. ollama 0.36 or later:   install it, then  ollama pull {MODEL}   (the server is started automatically)\n"
         f"  2. in-process, no server, in its own venv (PEP 668 refuses a system pip install):\n"
         f"       {sys.executable} -m venv {VENV} && {VENV}/bin/python -m pip install onnxruntime tokenizers\n"
-        f"     (model {ONNX_MODEL}, 314MB, downloads on first use; the venv is found automatically)\n"
+        f"     (onnxruntime {ORT_MIN[0]}.{ORT_MIN[1]} or later; model {ONNX_MODEL}, 314MB, downloads on first use;\n"
+        "      the venv is found automatically)\n"
         "  3. nothing: ranking falls back to word overlap, which cannot see a paraphrase")
 
 

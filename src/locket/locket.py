@@ -946,9 +946,11 @@ def cmd_doctor():
     try:
         name, model = _memfind().resolve_backend()
         row("ok", "embedder", f"{name} ({model})")
-    except RuntimeError:
-        row("warn", "embedder", "none; `find` falls back to word overlap and misses paraphrases",
-            f"ollama pull {_memfind().MODEL}  (ollama 0.36+; or in-process: `locket help install`)")
+    except RuntimeError as e:
+        # a venv that exists but cannot serve (onnxruntime too old) names its own fix
+        fix = str(e).split("Fix: ", 1)[1] if "Fix: " in str(e) else \
+            f"ollama pull {_memfind().MODEL}  (ollama 0.36+; or in-process: `locket help install`)"
+        row("warn", "embedder", "none; `find` falls back to word overlap and misses paraphrases", fix)
 
     # an empty store (an auto-memory folder no session has written to) has nothing to
     # index and `index all` skips it, so it never counts against this check
