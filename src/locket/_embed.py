@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/embed.py (05eaa0f) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/embed.py (83d7ba3) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """embed: the embedder ladder the Panoply's pieces share.
 
 Ranks text by meaning on whatever this machine can serve, in order: ollama as it
@@ -53,11 +53,6 @@ ONNX_SHA256 = {
     "onnx/model_quantized.onnx": "d06edd601f851c633a2519304cbeb8dc6170d7ceb61b436625c17fb9b6e74953",
     "onnx/model_quantized.onnx_data": "278a7ff1248c3618e4bd11a607fc54f7bdc7778854230f3956d3f86bd9db4f3b",
 }
-# The model's own prompts for a question searched against passages, which is Grille's
-# task. Locket compares a claim with claims and sends text bare, which scored higher there;
-# whether the prompts beat bare text on Grille's task has not been measured.
-QUERY_PROMPT = "task: search result | query: "
-DOC_PROMPT = "title: none | text: "
 EMBED_CHARS = 2000      # a text is cut here before embedding, on either backend
 ONNX_BATCH = 32         # a batch pads to its longest member
 # Start `ollama serve` ourselves when the binary is present and the port is closed:
