@@ -896,6 +896,8 @@ def _selftest_uninstall():
             (Path(t) / ".claude").mkdir()
             (Path(t) / ".locket").mkdir()
             (Path(t) / ".locket/usage.csv").write_text("date\n")
+            (Path(t) / ".panoply").mkdir()
+            (Path(t) / ".panoply/config.json").write_text('{"locket": {"embed": {"model": "m"}}}')
             r = run(t, "install", "--hooks")
             hooks = json.loads((Path(t) / ".claude/settings.json").read_text())["hooks"]
             assert _event_command(hooks.get("SessionEnd"), "usage hook"), f"install registered no usage hook:\n{r.stdout}"
@@ -904,6 +906,8 @@ def _selftest_uninstall():
             assert not _event_command(hooks.get("SessionEnd"), "usage hook"), "uninstall left the usage hook"
             assert (Path(t) / ".locket/usage.csv").is_file() != purge, \
                 f"uninstall {'kept' if purge else 'removed'} the usage ledger with purge={purge}\n{r.stdout}{r.stderr}"
+            assert 'the "locket" section of' in r.stdout and (Path(t) / ".panoply/config.json").is_file(), \
+                f"uninstall did not name, or removed, Locket's settings section\n{r.stdout}"
 
 
 def _probe_trigger(cmd, hermes=False):
