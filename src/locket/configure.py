@@ -29,8 +29,8 @@ the hooks stay silent for that store until it is rebuilt, because a hook never r
 when convenient. `locket configure` lists which stores are behind.
 
 Locket 0.10 kept these settings in ~/.locket/config.json. While that file remains, Locket
-reads it below the top level; the next `locket configure` moves its settings into the
-top level and renames it config.json.migrated.
+reads it below the top level; `locket migrate`, or the next `locket configure`, moves its
+settings into the top level and renames it config.json.migrated.
 
 Write the file with `configure`, never by hand while another configure runs: it holds a
 lock, writes atomically and checks the result against the schema (`locket configure

@@ -5702,7 +5702,7 @@ def main(argv):
             if what != "none" or one:       # a store with no manifest at all is not news
                 print(f"{r}: {what}"); n += 1
         if not n:
-            print("migrate: nothing to rename")
+            print("migrate: no store manifest to rename")
         return 0
     if mode == "forget":
         if len(argv) < 3:

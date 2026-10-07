@@ -110,9 +110,10 @@ VERBS = [
      "                                      row per session), header only; rows off their columns\n"
      "                                      are refused as they are written\n"
      "locket init ~/notes --ledgers=Work    the same files, named RULINGS-Work.csv and so on"),
-    ("migrate", "[<dir>|all]", "rename an older memfind.json manifest to locket.json",
-     "locket migrate ~/notes                one store\n"
-     "locket migrate all                    every store on this machine"),
+    ("migrate", "[<dir>|all]", "finish an upgrade: move older settings files into their current home and rename "
+     "each store's older memfind.json manifest to locket.json; safe to run any time",
+     "locket migrate                        everything this machine needs after an upgrade\n"
+     "locket migrate ~/notes                one store's manifest only"),
     ("schema", "[<dir>]", "write the manifest schema, or check a manifest",
      "locket schema                         write ~/.locket/locket.schema.json for editor hints\n"
      "locket schema ~/notes                 check that store's locket.json against it"),
@@ -963,7 +964,7 @@ def cmd_doctor():
         row("warn", "config", "; ".join(cfg_problems)[:160], f"fix {cfg_path}; each bad key falls to its default")
     elif legacy.exists():
         row("warn", "config", f"{legacy} is " + ("still read" if configure._legacy() is not None else
-            "unreadable, left in place") + f"; settings now live in {cfg_path}", "locket configure  (moves it)")
+            "unreadable, left in place") + f"; settings now live in {cfg_path}", "locket migrate  (moves it)")
     else:
         resolved = configure.apply()
         in_file = {k for _, layer in configure._layers(cfg_data) for k in layer}
@@ -1357,6 +1358,16 @@ def main(argv):
         sys.argv = [str(HERE / "locket_mcp.py"), *rest]
         runpy.run_path(str(HERE / "locket_mcp.py"), run_name="__main__")
         return 0
+    if verb == "migrate" and (not rest or rest[0] == "all"):
+        # every pending upgrade step, each one a no-op once done: the machine's settings first,
+        # then each store's manifest. A release that needs a new step adds it here.
+        import configure
+        try:
+            moved = configure.migrate()
+        except (OSError, TimeoutError) as e:
+            moved = f"warning: {configure._legacy_path()} not moved ({e}); Locket still reads it"
+        if moved:
+            print(moved)
     if verb in SCAN:
         return memscan.main(["memscan.py", verb, *rest])
     if verb in HOOK_VERBS:
