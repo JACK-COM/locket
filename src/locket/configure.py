@@ -232,7 +232,7 @@ def _set_embed(args):
         keys = set(changes) | clearing | (set(_embed.CONFIG_KEYS) if args.reset else set())
         data = _settings.load()[0]
         for k in sorted(keys):
-            for p in _settings.overriding(data, "embed", k):
+            for p in _settings.overriding(data, "embed", k, usable=_embed._usable):
                 print(f"note: {p} sets its own {k}, so this change does not reach {p}; "
                       f"`{p} configure embedder --{k.replace('_', '-')} default` makes it follow the global one")
     show()

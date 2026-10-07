@@ -619,6 +619,9 @@ def cmd_uninstall(argv):
     print(f"  the scripts:  rm {' '.join(str(HERE / s) for s in SCRIPTS if (HERE / s).exists())} "
           f"{HERE / 'INSTALL-locket.md' if (HERE / 'INSTALL-locket.md').exists() else ''}".rstrip())
     print("  an editor `json.schemas` entry pointing at ~/.locket/locket.schema.json, if you added one")
+    import _settings
+    if isinstance(_settings.load(check=False)[0].get("locket"), dict):
+        print(f"  Locket's embedder overrides: the \"locket\" section of {_settings.path()}")
     if others:
         print(f"  the embedder venv {_embed.VENV}, which {' and '.join(others)} still use{'s' if len(others) == 1 else ''}")
     elif _embed.VENV.is_dir() and not shared:

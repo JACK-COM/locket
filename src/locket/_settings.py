@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/settings.py (87d38f1) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/settings.py (1ad881a) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """settings: the Panoply's one settings file, ~/.panoply/config.json.
 
 Holds the settings two or more pieces share at the top level, and each piece's overrides
@@ -116,10 +116,13 @@ def layers(piece, section, data=None):
     return [(label, s) for label, s in out if isinstance(s, dict)]
 
 
-def overriding(data, section, key):
-    """The pieces whose own section sets `key`, so a global change does not reach them."""
+def overriding(data, section, key, usable=None):
+    """The pieces whose own section sets `key`, so a global change does not reach them.
+    `usable(key, section)` says whether a value takes effect; one that does not falls
+    through to the global value, so it overrides nothing."""
     return [p for p, s in data.items() if p in PIECES and isinstance(s, dict)
-            and isinstance(s.get(section), dict) and key in s[section]]
+            and isinstance(s.get(section), dict) and key in s[section]
+            and (usable is None or usable(key, s[section]))]
 
 
 def edit(data, section, changes=None, clear=(), reset=False, piece=None):
@@ -228,6 +231,8 @@ def _selftest():
             assert layers("grille", "embed", d) == [("grille", {"model": "m-own"}), ("global", d["embed"])]
             assert layers("locket", "embed", d) == [("global", d["embed"])]
             assert overriding(d, "embed", "model") == ["grille"] and overriding(d, "embed", "venv") == []
+            assert overriding(d, "embed", "model", usable=lambda k, sec: sec[k] != "m-own") == [], \
+                "a value that does not take effect counted as an override"
             assert edit(d, "embed", clear=["model"], piece="grille") == {"embed": d["embed"]}, "an empty piece section stayed"
             assert edit(d, "embed", reset=True) == {"grille": d["grille"]}, "a reset reached a piece's section"
             assert update(lambda data, f: d) and load() == (d, []), load()
