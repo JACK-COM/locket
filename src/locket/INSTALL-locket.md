@@ -48,7 +48,7 @@ Two folders that are one memory, such as a project's documents beside its code a
 
 Then `locket index all`.
 
-To use a different ollama model, or ollama on another machine, use `locket configure embedder` (`-h` explains each option), never environment variables: the setting lands in `~/.locket/config.json`, which the hooks read too.
+To use a different ollama model, or ollama on another machine, use `locket configure embedder` (`-h` explains each option), never environment variables: the setting lands in Locket's own section of `~/.panoply/config.json`, which the hooks read too. Add `--global` to set it for every Panoply piece that does not set its own.
 
 ## Step 4. Register the hooks
 

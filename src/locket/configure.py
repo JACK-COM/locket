@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
-"""configure: Locket's machine settings, one file every Locket process reads.
+"""configure: Locket's embedder settings, held in the Panoply's one settings file.
 
-The file is ~/.locket/config.json (LOCKET_CONFIG names another). Every way Locket runs,
-the command line, the Claude Code, Codex and Hermes hooks, the MCP server, reads it, so
-one change reaches all of them. It holds one section today, `embed`, the embedder:
+The file is ~/.panoply/config.json (PANOPLY_CONFIG names another), shared by every
+Panoply piece. Its top-level `embed` section is the embedder every piece uses, and a
+section named for a piece holds that piece's own overrides:
 
-    {"embed": {"model": "embeddinggemma-2:270m", "ollama_host": "http://127.0.0.1:11434",
-               "autostart": true, "venv": "~/.panoply/venv"}}
+    {"embed":  {"model": "embeddinggemma-2:270m", "venv": "~/.panoply/venv"},
+     "locket": {"embed": {"model": "nomic-embed-text"}}}
+
+`locket configure embedder` writes Locket's own section; `--global` writes the top level,
+which reaches every piece that does not override that key. Every way Locket runs, the
+command line, the Claude Code, Codex and Hermes hooks, the MCP server, reads the file, so
+one change reaches all of them.
 
 Each setting resolves in this order, first found wins:
   1. an environment variable (MEMFIND_MODEL, OLLAMA_HOST, MEMFIND_NO_AUTOSTART=1,
      PANOPLY_VENV or LOCKET_VENV), for one shell or one test;
-  2. this file;
-  3. the shipped default.
+  2. Locket's own section;
+  3. the top level;
+  4. the shipped default.
 A variable set in one place and not another is how two processes come to disagree, so
 `locket configure` and `locket doctor` name every variable that is overriding the file.
 
@@ -22,9 +28,13 @@ the hooks stay silent for that store until it is rebuilt, because a hook never r
 `--index` rebuilds every store as part of the change; without it, run `locket index all`
 when convenient. `locket configure` lists which stores are behind.
 
-Write the file with `locket configure embedder`, never by hand while another configure
-runs: the command holds a lock, writes atomically and checks the result against the
-schema (`locket configure schema` prints it).
+Locket 0.10 kept these settings in ~/.locket/config.json. While that file remains, Locket
+reads it below the top level; the next `locket configure` moves its settings into the
+top level and renames it config.json.migrated.
+
+Write the file with `configure`, never by hand while another configure runs: it holds a
+lock, writes atomically and checks the result against the schema (`locket configure
+schema` prints it).
 """
 import argparse
 import contextlib
@@ -33,110 +43,59 @@ import os
 import sys
 import tempfile
 import textwrap
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _embed  # noqa: E402
-import _manifest_schema  # noqa: E402
+import _settings  # noqa: E402
 
-CONFIG = Path(os.environ.get("LOCKET_CONFIG") or Path.home() / ".locket" / "config.json").expanduser()
-
-SCHEMA = {
-    "$schema": "http://json-schema.org/draft-07/schema#",
-    "$id": "locket.config.schema.json",
-    "title": "Locket machine settings (~/.locket/config.json)",
-    "type": "object", "additionalProperties": False,
-    "properties": {
-        "$schema": {"type": "string", "description": "Editor hint only; ignored by Locket."},
-        "embed": {
-            "type": "object", "additionalProperties": False,
-            "description": "The embedder `find`, `siblings`, `index` and the hooks rank with.",
-            "properties": {
-                "model": {"type": "string", "description": "The ollama embedding model. Default: "
-                          + _embed.SHIPPED["model"] + ". Overridden by MEMFIND_MODEL."},
-                "ollama_host": {"type": "string", "description": "Where ollama answers. Default: "
-                                + _embed.SHIPPED["ollama_host"] + ". Overridden by OLLAMA_HOST."},
-                "autostart": {"type": "boolean", "description": "Start `ollama serve` when the port is "
-                              "closed. Default: true. MEMFIND_NO_AUTOSTART=1 turns it off."},
-                "venv": {"type": "string", "description": "The virtualenv holding onnxruntime and tokenizers "
-                         "for the in-process rung, shared by the Panoply pieces. Default: ~/.panoply/venv, or "
-                         "an older ~/.locket/venv. Overridden by PANOPLY_VENV, then LOCKET_VENV."},
-            },
-        },
-    },
-}
+PIECE = "locket"
+LEGACY = Path.home() / ".locket" / "config.json"
 
 
-def load(path=None):
-    """(settings, findings). A missing file is empty settings and no finding; unreadable
-    JSON is empty settings and one finding, so a broken file never stops a hook."""
-    p = Path(path) if path else CONFIG
+def _legacy():
+    """The embed section of Locket 0.10's file while it remains, else None."""
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}, []
-    except (OSError, ValueError) as e:
-        return {}, [f"{p}: unreadable ({e})"]
-    return (data if isinstance(data, dict) else {}), _manifest_schema.check_value(data, SCHEMA, str(p))
+        data = json.loads(LEGACY.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    e = data.get("embed") if isinstance(data, dict) else None
+    return {k: v for k, v in e.items() if k in _embed.CONFIG_KEYS} if isinstance(e, dict) else None
 
 
-def apply(path=None):
-    """Put the file's embed section into the embedder, under the environment. Every module
+def _layers(data):
+    """Locket's view of the embed settings in `data`, highest first: its own section, the
+    top level, then an unmigrated ~/.locket/config.json."""
+    out = _settings.layers(PIECE, "embed", data)
+    legacy = _legacy()
+    return out + [("~/.locket/config.json", legacy)] if legacy else out
+
+
+def apply():
+    """Put Locket's embed settings into the embedder, under the environment. Every module
     that ranks calls this once at import; it is cheap and changes nothing without a file."""
     try:
-        return _embed.apply_config(load(path)[0].get("embed"))
+        return _embed.apply_config(_layers(_settings.load()[0]))
     except Exception:                       # nothing in a settings file may stop a hook
         return _embed.apply_config(None)
 
 
-def _write_json(path, obj):
-    """Whole or not at all: a temporary file beside the target, synced, renamed over it.
-    A symlinked config keeps its link (the file it points at is replaced) and its mode."""
-    target = Path(os.path.realpath(path))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        mode = target.stat().st_mode & 0o777
-    except FileNotFoundError:
-        mask = os.umask(0)
-        os.umask(mask)
-        mode = 0o666 & ~mask
-    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(obj, indent=2, ensure_ascii=False) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, target)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+def migrate():
+    """Move ~/.locket/config.json's settings into the shared file's top level, where a key
+    already set keeps its value, and rename the old file. Returns a line to report, or None."""
+    if not LEGACY.exists():
+        return None
+    legacy = _legacy()
+    if legacy is None:
+        return f"note: {LEGACY} has no readable embed section; left in place"
 
-
-LOCK_WAIT = 10
-
-
-@contextlib.contextmanager
-def _lock():
-    """Held across read-modify-write, so two configure runs at once cannot each read the old
-    file and the second drop the first's change. A holder past LOCK_WAIT is stuck."""
-    import fcntl
-    lock = CONFIG.with_name(CONFIG.name + ".lock")
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock, "w") as f:
-        deadline = time.monotonic() + LOCK_WAIT
-        while True:
-            try:
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() > deadline:
-                    raise SystemExit(f"{lock} is held by another `locket configure` for over {LOCK_WAIT}s; "
-                                     "if none is running, remove it")
-                time.sleep(0.05)
-        yield
+    def change(data, findings):
+        top = data.get("embed") if isinstance(data.get("embed"), dict) else {}
+        add = {k: v for k, v in legacy.items() if k not in top}
+        return _settings.edit(data, "embed", add) if add else None
+    _settings.update(change)
+    LEGACY.rename(LEGACY.with_name("config.json.migrated"))
+    return f"moved {LEGACY} into {_settings.path()}; the old file is now config.json.migrated"
 
 
 def _ollama_check(model):
@@ -184,18 +143,24 @@ def _index_state():
 
 
 def show():
-    data, findings = load()
-    print(f"config file: {CONFIG}" + ("" if CONFIG.exists() else "  (absent: every setting is its default)"))
+    data, findings = _settings.load()
+    path = _settings.path()
+    print(f"settings file: {path}" + ("" if path.exists() else "  (absent: every setting is its default)"))
     for f in findings:
         print(f"  problem: {f}")
-    print("\nembedder")
+    print("\nembedder, as Locket uses it   (source: env, locket's own section, global, or default)")
     resolved = apply()
+    in_file = {k for _, layer in _layers(data) for k in layer}
     for key, (value, src) in resolved.items():
         shown = ("on" if value else "off") if key == "autostart" else value
-        note = "  <- overrides the file" if src.startswith("env") and key in (data.get("embed") or {}) else ""
+        note = "  <- overrides the file" if src.startswith("env") and key in in_file else ""
         print(f"  {key:12s} {str(shown):40s} {src}{note}")
     print(f"  {'in-process':12s} {_embed.ONNX_MODEL}@{_embed.ONNX_REVISION[:12]}  (fixed; answers when ollama "
           f"does not{', a different model from the one above' if resolved['model'][0] != _embed.SHIPPED['model'] else ''})")
+    others = {p: sorted(data[p]["embed"]) for p in _settings.PIECES if p != PIECE and isinstance(data.get(p), dict)
+              and isinstance(data[p].get("embed"), dict) and data[p]["embed"]}
+    for p, keys in others.items():
+        print(f"  {p} overrides for itself: {', '.join(keys)}")
     state = _index_state()
     behind = [s for s in state if s[2] != "current"]
     print(f"\nindexes: {len(state)} store(s), {len(state) - len(behind)} current")
@@ -220,14 +185,27 @@ def _set_embed(args):
     if "ollama_host" in changes and not changes["ollama_host"].startswith(("http://", "https://")):
         print(f"--ollama-host needs a scheme, e.g. http://{changes['ollama_host']}", file=sys.stderr)
         return 2
+    outcome = {}
+    change = lambda data, findings: _change(args, changes, clearing, data, findings, outcome)
     try:
-        with (contextlib.nullcontext() if args.dry_run else _lock()):
-            rc = _write_embed(args, changes, clearing)
+        if args.dry_run:
+            change(*_settings.load())
+        else:
+            written = _settings.update(change)
+            if "rc" not in outcome:
+                print(f"wrote {_settings.path()}" if written else "no change to write")
     except OSError as e:
-        print(f"cannot write {CONFIG}: {e}", file=sys.stderr)
+        print(f"cannot write {_settings.path()}: {e}", file=sys.stderr)
         return 1
-    if rc is not None:
-        return rc
+    if "rc" in outcome:
+        return outcome["rc"]
+    if args.shared:
+        keys = set(changes) | clearing | (set(_embed.CONFIG_KEYS) if args.reset else set())
+        data = _settings.load()[0]
+        for k in sorted(keys):
+            for p in _settings.overriding(data, "embed", k):
+                print(f"note: {p} sets its own {k}, so this change does not reach {p}; "
+                      f"`{p} configure embedder --{k.replace('_', '-')} default` makes it follow the global one")
     show()
     if args.index:
         import memfind
@@ -242,40 +220,33 @@ def _set_embed(args):
     return 0
 
 
-def _write_embed(args, changes, clearing):
-    """The read-modify-write, under the lock unless a dry run. None means written; a
-    number is the exit code to stop with."""
-    data, findings = load()
-    if findings and CONFIG.exists() and not args.reset:
-        print("the config file has problems; fix them or start over with --reset:", file=sys.stderr)
+def _change(args, changes, clearing, data, findings, outcome):
+    """The new settings for `_settings.update`, or None to write nothing, with the exit
+    code to stop with left in `outcome["rc"]`. Runs under the lock unless a dry run."""
+    if findings and not args.reset:
+        print("the settings file has problems; fix them, or pass --reset to rewrite this section anyway:",
+              file=sys.stderr)
         for f in findings:
             print(f"  {f}", file=sys.stderr)
-        return 1
-    if args.reset:                      # start over: only an editor's $schema hint survives
-        data = {k: v for k, v in data.items() if k == "$schema"}
-    embed = {} if args.reset else dict(data.get("embed") or {})
-    for k in clearing:
-        embed.pop(k, None)
-    embed.update(changes)
-    new = {**data, "embed": embed} if embed else {k: v for k, v in data.items() if k != "embed"}
+        outcome["rc"] = 1
+        return None
+    new = _settings.edit(data, "embed", changes, clearing, args.reset, None if args.shared else PIECE)
     if "model" in changes and not args.no_check:
-        # check against the host this change would use, then restore this process's settings
+        # check against the host the new settings would use, then restore this process's settings
+        view = [("global", new.get("embed"))] if args.shared else _layers(new)
         with _embed.settings(**{n: getattr(_embed, n) for n in ("MODEL", "OLLAMA", "AUTOSTART", "VENV")}):
-            _embed.apply_config(embed)
+            _embed.apply_config(view)
             ok, msg = _ollama_check(changes["model"])
         if msg:
             print(msg, file=sys.stderr)
         if not ok:
-            return 1
+            outcome["rc"] = 1
+            return None
     if args.dry_run:
         print(json.dumps(new, indent=2))
-        return 0
-    if new != load()[0] or not CONFIG.exists():
-        _write_json(CONFIG, new)
-        print(f"wrote {CONFIG}")
-    else:
-        print("no change to write")
-    return None
+        outcome["rc"] = 0
+        return None
+    return new
 
 
 def _wrap(text):
@@ -286,26 +257,31 @@ def _parser():
     fmt = dict(formatter_class=argparse.RawDescriptionHelpFormatter)
     p = argparse.ArgumentParser(
         prog="locket configure", **fmt,
-        description=_wrap("Show or change Locket's machine settings, held in one file every Locket process "
-                    "reads (the command line, every hook, the MCP server). Run with no arguments to see "
-                    "each setting, where its value comes from, and which stores' indexes are behind."),
+        description=_wrap("Show or change Locket's embedder settings, held in ~/.panoply/config.json, the "
+                    "settings file every Panoply piece and every Locket process reads (the command line, "
+                    "every hook, the MCP server). Run with no arguments to see each setting, where its "
+                    "value comes from, and which stores' indexes are behind."),
         epilog="examples:\n"
                "  locket configure                                   show settings, their sources and index state\n"
-               "  locket configure embedder --model nomic-embed-text switch model; indexes rebuild later\n"
+               "  locket configure embedder --model nomic-embed-text switch Locket's model; indexes rebuild later\n"
+               "  locket configure embedder --model nomic-embed-text --global\n"
+               "                                                     switch every piece that does not set its own\n"
                "  locket configure embedder --model nomic-embed-text --index\n"
                "                                                     switch model and rebuild every index now\n"
                "  locket configure embedder --model default          back to the shipped model\n"
                "  locket configure embedder --reset --index          every embedder setting back to its default\n"
                "  locket configure schema                            the file's JSON Schema, for an editor\n\n"
-               "Precedence, first found wins: environment variable, then the file, then the shipped\n"
-               "default. `locket help configure` explains the file and what a model change does to\n"
-               "each store's index.")
+               "Precedence, first found wins: environment variable, then Locket's own section, then\n"
+               "the file's top level (--global), then the shipped default. `locket help configure`\n"
+               "explains the file and what a model change does to each store's index.")
     sub = p.add_subparsers(dest="section", metavar="<section>")
     e = sub.add_parser(
         "embedder", **fmt, help="the model and server Locket ranks by meaning with",
-        description=_wrap("Change the embedder every Locket process uses. Each option writes one key of the "
-                    "file's `embed` section; options left out keep their current value. Pass `default` "
-                    "as a value to remove that key, so the shipped default applies again."),
+        description=_wrap("Change the embedder every Locket process uses. Each option writes one key of "
+                    "Locket's own `embed` section, or of the top-level one every piece shares with --global; "
+                    "options left out keep their current value. Pass `default` as a value to remove that "
+                    "key, so the next source applies again: the global value for Locket's own section, the "
+                    "shipped default for the global one."),
         epilog="what a model change costs:\n"
                "  Each store's index is built in one model's space. After a change, `find` and\n"
                "  `index` rebuild a store when they next run it, which takes minutes on a large\n"
@@ -344,9 +320,13 @@ def _parser():
                         "in-process rung; the model downloads into it on first use, about 314 MB. "
                         "Default ~/.panoply/venv, shared by every Panoply piece. `default` removes the "
                         "setting. PANOPLY_VENV, then LOCKET_VENV, override it.")
+    e.add_argument("--global", dest="shared", action="store_true",
+                   help="write the top-level settings every Panoply piece shares, instead of Locket's "
+                        "own; a piece that sets the same key itself keeps its own value, and the "
+                        "command names it")
     e.add_argument("--reset", action="store_true",
-                   help="remove every embedder setting before applying any others given, returning "
-                        "the section to the shipped defaults")
+                   help="remove every embedder setting from the section being written (Locket's own, "
+                        "or the global one with --global) before applying any others given")
     e.add_argument("--index", action="store_true",
                    help="after writing, rebuild every store's index with the new settings (minutes "
                         "per large store). Without it the change is instant and stores rebuild when "
@@ -356,63 +336,81 @@ def _parser():
                         "server that is down now or a model you will pull later")
     e.add_argument("--dry-run", action="store_true",
                    help="print the file that would be written and change nothing; --index is skipped")
-    sub.add_parser("schema", help="print the config file's JSON Schema, for an editor's hints",
-                   description="Print the JSON Schema the config file follows. Save it beside the file "
-                               "and name it in the file's `$schema` key for editor completion.")
+    sub.add_parser("schema", help="print the settings file's JSON Schema, for an editor's hints",
+                   description="Print the JSON Schema ~/.panoply/config.json follows. Save it beside the "
+                               "file and name it in the file's `$schema` key for editor completion.")
     return p
 
 
 def main(argv):
     args = _parser().parse_args(argv)
     if args.section == "schema":
-        print(json.dumps(SCHEMA, indent=2))
+        print(json.dumps(_settings.schema(), indent=2))
         return 0
+    if not getattr(args, "dry_run", False):
+        try:
+            moved = migrate()
+        except OSError as e:
+            moved = f"warning: could not move {LEGACY} into {_settings.path()} ({e}); Locket still reads it"
+        if moved:
+            print(moved, file=sys.stderr)
     if args.section == "embedder":
         return _set_embed(args)
     return show()
 
 
 def selftest():
-    """Offline, against a throwaway config file: write, read back, precedence, clearing,
-    a refused bad file, and the lock released."""
-    global CONFIG
-    saved_cfg, saved_env = CONFIG, {v: os.environ.pop(v, None) for _, env in _embed.CONFIG_KEYS.values() for v in env}
+    """Offline, against a throwaway settings file: write, read back, precedence across the
+    piece, global and legacy layers, clearing, a refused bad file, and the migration."""
+    global LEGACY
+    names = [v for _, env in _embed.CONFIG_KEYS.values() for v in env] + ["PANOPLY_CONFIG"]
+    saved_legacy, saved_env = LEGACY, {v: os.environ.pop(v, None) for v in names}
     try:
         with tempfile.TemporaryDirectory() as t, _embed.settings():
-            CONFIG = Path(t) / "config.json"
+            os.environ["PANOPLY_CONFIG"] = str(Path(t) / "panoply" / "config.json")
+            LEGACY = Path(t) / "locket" / "config.json"
+            cfg, load = _settings.path(), lambda: _settings.load()
             assert load() == ({}, []) and apply()["model"] == (_embed.SHIPPED["model"], "default")
             run = lambda *a: _set_embed(_parser().parse_args(["embedder", *a]))
             quiet = open(os.devnull, "w")
             with contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
                 assert run("--model", "m1", "--no-check", "--no-autostart") == 0
-                assert load()[0] == {"embed": {"model": "m1", "autostart": False}}, load()
-                assert apply()["model"] == ("m1", "file") and _embed.MODEL == "m1"
+                assert load()[0] == {"locket": {"embed": {"model": "m1", "autostart": False}}}, load()
+                assert apply()["model"] == ("m1", "locket") and _embed.MODEL == "m1"
+                assert run("--model", "m-all", "--ollama-host", "http://g:1", "--no-check", "--global") == 0
+                got = apply()
+                assert got["model"] == ("m1", "locket") and got["ollama_host"] == ("http://g:1", "global"), got
                 os.environ["MEMFIND_MODEL"] = "m-env"
                 assert apply()["model"] == ("m-env", "env MEMFIND_MODEL"), "the environment must beat the file"
                 del os.environ["MEMFIND_MODEL"]
-                assert run("--model", "default") == 0 and load()[0] == {"embed": {"autostart": False}}, load()
-                assert run("--reset") == 0 and load()[0] == {}, load()
+                assert run("--model", "default") == 0 and apply()["model"] == ("m-all", "global"), load()
+                assert run("--reset") == 0 and load()[0] == {"embed": {"model": "m-all", "ollama_host": "http://g:1"}}
+                assert run("--reset", "--global") == 0 and load()[0] == {}, load()
                 assert run("--ollama-host", "studio:11434") == 2, "a host with no scheme was written"
                 assert run() == 2, "a run naming nothing to change wrote"
-                before = CONFIG.read_text()
-                assert run("--model", "m2", "--no-check", "--dry-run") == 0 and CONFIG.read_text() == before
-                CONFIG.write_text('{"embed": {"model": 3, "colour": "red"}}')
-                found = load()[1]
-                assert len(found) == 2 and apply()["model"][1] == "default", f"a bad file took effect: {found}"
+                before = cfg.read_text()
+                assert run("--model", "m2", "--no-check", "--dry-run") == 0 and cfg.read_text() == before
+                cfg.write_text('{"embed": {"model": 3, "colour": "red"}, "grille": {"embed": {"model": "g"}}}')
+                assert len(load()[1]) == 2 and apply()["model"][1] == "default", f"a bad file took effect: {load()}"
                 assert run("--model", "m3", "--no-check") == 1, "a write over a broken file went ahead"
-                assert run("--reset", "--model", "m3", "--no-check") == 0 and load() == ({"embed": {"model": "m3"}}, [])
-                CONFIG.write_text('{"colour": 1, "$schema": "s.json"}')
-                assert run("--reset") == 0 and load() == ({"$schema": "s.json"}, []), "--reset kept a bad key"
+                assert run("--reset", "--model", "m3", "--no-check") == 0
+                assert load()[0]["locket"] == {"embed": {"model": "m3"}} and load()[0]["grille"] == {"embed": {"model": "g"}}
+                cfg.write_text('{"locket": {"embed": {"model": "m4"}}}')
                 assert run("--venv", "rel/v") == 0
-                assert load()[0]["embed"]["venv"] == os.path.abspath("rel/v"), "a relative --venv was stored as given"
-                CONFIG.write_text("{not json")
+                assert load()[0]["locket"]["embed"]["venv"] == os.path.abspath("rel/v"), "a relative --venv was stored as given"
+                cfg.write_text("{not json")
                 assert load()[0] == {} and "unreadable" in load()[1][0]
-            with _lock():
-                pass
-            with _lock():                   # released, so a second hold does not wait
-                pass
+                # Locket 0.10's file: read below the top level, then moved into it
+                cfg.write_text('{"embed": {"model": "m-top"}}')
+                LEGACY.parent.mkdir()
+                LEGACY.write_text('{"embed": {"model": "m-old", "ollama_host": "http://old:1", "colour": "x"}}')
+                got = apply()
+                assert got["model"] == ("m-top", "global") and got["ollama_host"][1] == "~/.locket/config.json", got
+                assert migrate() and not LEGACY.exists() and LEGACY.with_name("config.json.migrated").exists()
+                assert load() == ({"embed": {"model": "m-top", "ollama_host": "http://old:1"}}, []), load()
+                assert migrate() is None, "a second migration ran"
     finally:
-        CONFIG = saved_cfg
+        LEGACY = saved_legacy
         for v, val in saved_env.items():
             if val is not None:
                 os.environ[v] = val

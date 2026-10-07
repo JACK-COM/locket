@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/embed.py (83d7ba3) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/embed.py (28b8143) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """embed: the embedder ladder the Panoply's pieces share.
 
 Ranks text by meaning on whatever this machine can serve, in order: ollama as it
@@ -82,9 +82,10 @@ def _find_venv():
 VENV = _find_venv()
 
 
-# A piece's own settings file may carry an `embed` section with these keys. Each maps to the
-# module setting it sets and the environment variables that override it, since a variable set
-# for one shell or one test must still win over a file every process reads.
+# The keys of an `embed` section in ~/.panoply/config.json, at the top level or in a piece's
+# own section (settings.py). Each maps to the module setting it sets and the environment
+# variables that override it, since a variable set for one shell or one test must still win
+# over a file every process reads.
 CONFIG_KEYS = {
     "model": ("MODEL", ("MEMFIND_MODEL",)),
     "ollama_host": ("OLLAMA", ("OLLAMA_HOST",)),
@@ -104,28 +105,37 @@ def _file_venv(raw):
     return p if p.is_absolute() else None
 
 
+def _usable(key, section):
+    """Whether `section` holds a value for `key` that may take effect."""
+    v = section.get(key)
+    return (isinstance(v, bool if key == "autostart" else str) and v != ""
+            and (key != "venv" or _file_venv(v) is not None))
+
+
 def apply_config(section=None):
-    """Set MODEL, OLLAMA, AUTOSTART and VENV from a piece's `embed` section, under the
-    environment: a variable wins, then the section, then the shipped value (VENV's shipped
-    value is whichever default venv exists). Returns {key: (value, source)}, the source
-    being "default", "file" or "env NAME", which is what `configure` shows. A key absent
-    from the section, or present with the wrong type, falls to the next source: a bad file
-    must never stop a hook, and the piece's own check reports it. Clears the resolved
-    backend, since a new model or host is a new space."""
+    """Set MODEL, OLLAMA, AUTOSTART and VENV from `embed` settings, under the environment:
+    a variable wins, then the settings, then the shipped value (VENV's shipped value is
+    whichever default venv exists). `section` is one dict, labelled "file", or a list of
+    (label, dict) layers, highest first, as settings.layers returns them. Returns
+    {key: (value, source)}, the source being "default", a layer's label or "env NAME",
+    which is what `configure` shows. A key absent from a layer, or present with the wrong
+    type, falls to the next layer: a bad file must never stop a hook, and the piece's own
+    check reports it. Clears the resolved backend, since a new model or host is a new space."""
     global _ACTIVE
-    section = section if isinstance(section, dict) else {}
+    layers = section if isinstance(section, list) else [("file", section)]
+    layers = [(label, s) for label, s in layers if isinstance(s, dict)]
     g, out = globals(), {}
     for key, (name, env) in CONFIG_KEYS.items():
         # MEMFIND_NO_AUTOSTART counts only as "1", the one value it has ever meant
         set_by = next((v for v in env if (os.environ.get(v) == "1" if key == "autostart" else os.environ.get(v))), None)
+        hit = next(((label, s[key]) for label, s in layers if _usable(key, s)), None)
         if set_by:
             raw = os.environ[set_by]
             value = (raw != "1") if key == "autostart" else Path(raw).expanduser() if key == "venv" else raw
             src = f"env {set_by}"
-        elif (key in section and isinstance(section[key], bool if key == "autostart" else str) and section[key] != ""
-              and (key != "venv" or _file_venv(section[key]))):
-            value = _file_venv(section[key]) if key == "venv" else section[key]
-            src = "file"
+        elif hit:
+            value = _file_venv(hit[1]) if key == "venv" else hit[1]
+            src = hit[0]
         else:
             value = _find_venv() if key == "venv" else SHIPPED[key]
             src = "default"
@@ -488,6 +498,12 @@ def _selftest_config():
             assert apply_config({"venv": "~no-such-user-x/v"})["venv"][1] == "default", "an unexpandable venv took effect"
             assert all(src == "default" for _, src in got.values()), f"a bad key took effect: {got}"
             assert got["model"][0] == SHIPPED["model"] and apply_config(None)["model"][1] == "default"
+            # layers: the first usable value wins, and a bad one falls through to the next layer
+            got = apply_config([("grille", {"model": "m-own", "autostart": "no"}),
+                                ("global", {"model": "m-all", "autostart": False, "ollama_host": "http://g:1"}),
+                                ("broken", None)])
+            assert got["model"] == ("m-own", "grille") and got["ollama_host"] == ("http://g:1", "global"), got
+            assert got["autostart"] == (False, "global"), "a wrong-typed piece value hid the global one"
     finally:
         for v, val in saved.items():
             if val is not None:

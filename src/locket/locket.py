@@ -92,8 +92,8 @@ VERBS = [
      "locket usage --json                   the same summary as JSON\n"
      "locket usage record                   copy new sessions into the ledger now (the\n"
      "                                      SessionEnd hook does this on its own)"),
-    ("configure", "[embedder [--model NAME] [--ollama-host URL] [--[no-]autostart] [--venv PATH] [--reset] [--index] [--no-check] [--dry-run] | schema]",
-     "show or change the machine settings every Locket process reads (~/.locket/config.json): the embedder model, ollama host, autostart and venv",
+    ("configure", "[embedder [--model NAME] [--ollama-host URL] [--[no-]autostart] [--venv PATH] [--global] [--reset] [--index] [--no-check] [--dry-run] | schema]",
+     "show or change the embedder settings every Locket process reads, Locket's own or (--global) every Panoply piece's, in ~/.panoply/config.json: the model, ollama host, autostart and venv",
      "locket configure                      each setting, where its value comes from, stores behind\n"
      "locket configure embedder --model nomic-embed-text --index\n"
      "                                      switch model and rebuild every index now\n"
@@ -953,14 +953,20 @@ def cmd_doctor():
         if stores else row("fail", "stores", "none found", "locket init <folder of markdown>")
 
     import configure
-    cfg_data, cfg_problems = configure.load()
+    import _settings
+    cfg_data, cfg_problems = _settings.load()
+    cfg_path = _settings.path()
     if cfg_problems:
-        row("fail", "config", "; ".join(cfg_problems)[:160], "locket configure embedder --reset  (or fix the file)")
+        row("fail", "config", "; ".join(cfg_problems)[:160], f"fix {cfg_path}, or `locket configure embedder --reset`")
+    elif configure.LEGACY.exists():
+        row("warn", "config", f"{configure.LEGACY} is still read; settings now live in {cfg_path}",
+            "locket configure  (moves it)")
     else:
         resolved = configure.apply()
+        in_file = {k for _, layer in configure._layers(cfg_data) for k in layer}
         overridden = [f"{k} by {src[4:]}" for k, (_, src) in resolved.items()
-                      if src.startswith("env") and k in (cfg_data.get("embed") or {})]
-        detail = f"{configure.CONFIG}" if configure.CONFIG.exists() else "no file; every setting is its default"
+                      if src.startswith("env") and k in in_file]
+        detail = f"{cfg_path}" if cfg_path.exists() else "no file; every setting is its default"
         row("warn", "config", f"{detail}; the environment overrides {', '.join(overridden)}",
             "unset the variable, or set the value with `locket configure embedder`") if overridden \
             else row("ok", "config", detail)
