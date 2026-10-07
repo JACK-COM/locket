@@ -956,11 +956,14 @@ def cmd_doctor():
     import _settings
     cfg_data, cfg_problems = _settings.load()
     cfg_path = _settings.path()
-    if cfg_problems:
-        row("fail", "config", "; ".join(cfg_problems)[:160], f"fix {cfg_path}, or `locket configure embedder --reset`")
-    elif configure.LEGACY.exists():
-        row("warn", "config", f"{configure.LEGACY} is still read; settings now live in {cfg_path}",
-            "locket configure  (moves it)")
+    legacy = configure._legacy_path()
+    if _settings.unreadable(cfg_problems):
+        row("fail", "config", cfg_problems[0][:160], f"fix {cfg_path}, or `locket configure embedder --reset`")
+    elif cfg_problems:
+        row("warn", "config", "; ".join(cfg_problems)[:160], f"fix {cfg_path}; each bad key falls to its default")
+    elif legacy.exists():
+        row("warn", "config", f"{legacy} is " + ("still read" if configure._legacy() is not None else
+            "unreadable, left in place") + f"; settings now live in {cfg_path}", "locket configure  (moves it)")
     else:
         resolved = configure.apply()
         in_file = {k for _, layer in configure._layers(cfg_data) for k in layer}

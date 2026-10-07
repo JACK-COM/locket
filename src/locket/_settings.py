@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/settings.py (28b8143) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/settings.py (87d38f1) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """settings: the Panoply's one settings file, ~/.panoply/config.json.
 
 Holds the settings two or more pieces share at the top level, and each piece's overrides
@@ -13,8 +13,11 @@ takes `layers(...)` as it stands). Settings only one piece uses stay in that pie
 file. PANOPLY_CONFIG names another file, for a test or a second setup.
 
 Reads never fail: a missing file is no settings, an unreadable one is no settings and a
-finding, because a hook must not stop over a settings file. Writes go through `update`,
-which holds a lock across the read-modify-write and replaces the file whole.
+finding, because a hook must not stop over a settings file. A structural finding (a wrong
+type, a key this version does not know, which a newer piece may have written) informs and
+never blocks a write; only an unreadable file does, since writing over it would lose every
+other piece's settings. Writes go through `update`, which holds a lock across the
+read-modify-write and replaces the file whole. POSIX only: the lock is fcntl's.
 """
 import contextlib
 import json
@@ -81,10 +84,11 @@ def schema():
     }
 
 
-def load(p=None):
+def load(p=None, check=True):
     """(settings, findings). A missing file is empty settings and no finding; an unreadable
-    one is empty settings and one finding. A file with structural problems still returns its
-    settings, since a reader takes each key on its own merits."""
+    one is empty settings and one finding that `unreadable` recognises. A file with
+    structural problems still returns its settings, since a reader takes each key on its
+    own merits. `check=False` skips the schema, for a hook that discards the findings."""
     p = Path(p) if p else path()
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
@@ -93,15 +97,20 @@ def load(p=None):
     except (OSError, ValueError) as e:
         return {}, [f"{p}: unreadable ({e})"]
     if not isinstance(data, dict):
-        return {}, [f"{p}: expected an object, got {type(data).__name__}"]
-    return data, _schema.check_value(data, schema(), str(p))
+        return {}, [f"{p}: unreadable (expected an object, got {type(data).__name__})"]
+    return data, (_schema.check_value(data, schema(), str(p)) if check else [])
+
+
+def unreadable(findings):
+    """Whether `load` found the file unreadable, which is the one finding that blocks a write."""
+    return any(": unreadable (" in f for f in findings)
 
 
 def layers(piece, section, data=None):
     """[(label, dict)] for one shared section as `piece` reads it, highest first: its own
     overrides, labelled with its name, then the top level, labelled "global". A layer
     that is not an object is left out."""
-    data = load()[0] if data is None else data
+    data = load(check=False)[0] if data is None else data
     own = data.get(piece)
     out = [(piece, own.get(section) if isinstance(own, dict) else None), ("global", data.get(section))]
     return [(label, s) for label, s in out if isinstance(s, dict)]
@@ -165,9 +174,12 @@ def write_json(p, obj):
 @contextlib.contextmanager
 def lock(p=None):
     """Held across a read-modify-write, so two pieces configuring at once cannot each read
-    the old file and the second drop the first's change. A holder past LOCK_WAIT is stuck."""
+    the old file and the second drop the first's change. Keyed on the file's real path, so
+    two links to one file share it. Raises TimeoutError past LOCK_WAIT. The lock file is
+    never removed: flock releases with its holder, and deleting a held lock file would let
+    a second process lock a fresh one."""
     import fcntl
-    p = Path(p) if p else path()
+    p = Path(os.path.realpath(Path(p) if p else path()))
     held = p.with_name(p.name + ".lock")
     held.parent.mkdir(parents=True, exist_ok=True)
     with open(held, "w") as f:
@@ -178,22 +190,27 @@ def lock(p=None):
                 break
             except BlockingIOError:
                 if time.monotonic() > deadline:
-                    raise SystemExit(f"{held} is held by another configure for over {LOCK_WAIT}s; "
-                                     "if none is running, remove it")
+                    raise TimeoutError(f"another process has held {held} for over {LOCK_WAIT}s; "
+                                       "try again when it finishes")
                 time.sleep(0.05)
         yield
 
 
 def update(change, p=None):
     """Read, change and write under the lock. `change(data, findings)` returns the new
-    settings, or None to write nothing; a non-None return equal to the file is not
-    rewritten. Returns whether the file was written."""
+    settings, or None to write nothing; a return equal to what was read is not written,
+    so a no-op never creates the file. Before replacing an unreadable file, which only a
+    change that chose to may do, it is copied to config.json.bak. Returns whether the file
+    was written."""
     p = Path(p) if p else path()
     with lock(p):
         data, findings = load(p)
         new = change(data, findings)
-        if new is None or (new == data and p.exists()):
+        if new is None or (new == data and (p.exists() or not new)):
             return False
+        if unreadable(findings) and p.exists():
+            bak = p.with_name(p.name + ".bak")
+            bak.write_bytes(p.read_bytes())
         write_json(p, new)
         return True
 
@@ -216,14 +233,18 @@ def _selftest():
             assert update(lambda data, f: d) and load() == (d, []), load()
             assert not update(lambda data, f: dict(data)), "an unchanged file was rewritten"
             assert not update(lambda data, f: None)
+            other = Path(t) / "other.json"
+            assert not update(lambda data, f: {}, other) and not other.exists(), "a no-op created the file"
             path().write_text(json.dumps({"embed": {"model": 3}, "grille": {"embd": {}}, "augur": {"embed": {}},
                                           "colour": "red"}))
             found = load()[1]
             assert len(found) == 3 and not any("augur" in f for f in found), found   # an unknown piece is no problem
+            assert not unreadable(found), "a structural finding read as unreadable"
             path().write_text("{not json")
-            assert load()[0] == {} and "unreadable" in load()[1][0]
+            assert load()[0] == {} and unreadable(load()[1])
+            assert update(lambda data, f: {"embed": {}}) and path().with_name("config.json.bak").read_text() == "{not json"
             path().write_text("[]")
-            assert load()[0] == {} and "expected an object" in load()[1][0]
+            assert load()[0] == {} and unreadable(load()[1]) and "expected an object" in load()[1][0]
             with lock():
                 pass
             with lock():                    # released, so a second hold does not wait

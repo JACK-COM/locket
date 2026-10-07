@@ -43,6 +43,7 @@ import os
 import sys
 import tempfile
 import textwrap
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -50,17 +51,22 @@ import _embed  # noqa: E402
 import _settings  # noqa: E402
 
 PIECE = "locket"
-LEGACY = Path.home() / ".locket" / "config.json"
+LEGACY = None           # Locket 0.10's file; resolved on use, so an unset HOME cannot break an import
+
+
+def _legacy_path():
+    return LEGACY or Path.home() / ".locket" / "config.json"
 
 
 def _legacy():
-    """The embed section of Locket 0.10's file while it remains, else None."""
+    """The usable embed settings of Locket 0.10's file while it remains, else None."""
     try:
-        data = json.loads(LEGACY.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = json.loads(_legacy_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, RuntimeError):
         return None
     e = data.get("embed") if isinstance(data, dict) else None
-    return {k: v for k, v in e.items() if k in _embed.CONFIG_KEYS} if isinstance(e, dict) else None
+    return {k: v for k, v in e.items() if k in _embed.CONFIG_KEYS and _embed._usable(k, e)} \
+        if isinstance(e, dict) else None
 
 
 def _layers(data):
@@ -75,27 +81,37 @@ def apply():
     """Put Locket's embed settings into the embedder, under the environment. Every module
     that ranks calls this once at import; it is cheap and changes nothing without a file."""
     try:
-        return _embed.apply_config(_layers(_settings.load()[0]))
+        return _embed.apply_config(_layers(_settings.load(check=False)[0]))
     except Exception:                       # nothing in a settings file may stop a hook
         return _embed.apply_config(None)
 
 
 def migrate():
     """Move ~/.locket/config.json's settings into the shared file's top level, where a key
-    already set keeps its value, and rename the old file. Returns a line to report, or None."""
-    if not LEGACY.exists():
+    already set keeps its value, and rename the old file, both under the shared file's lock.
+    Leaves everything in place when either file cannot be read. Returns a line, or None."""
+    old = _legacy_path()
+    if not old.exists():
         return None
     legacy = _legacy()
     if legacy is None:
-        return f"note: {LEGACY} has no readable embed section; left in place"
-
-    def change(data, findings):
-        top = data.get("embed") if isinstance(data.get("embed"), dict) else {}
+        return f"note: {old} has no readable embed section; left in place"
+    with _settings.lock():
+        data, findings = _settings.load()
+        if _settings.unreadable(findings) or not isinstance(data.get("embed", {}), dict):
+            return f"note: {_settings.path()} cannot be read, so {old} was left in place; fix it and rerun"
+        top = data.get("embed", {})
         add = {k: v for k, v in legacy.items() if k not in top}
-        return _settings.edit(data, "embed", add) if add else None
-    _settings.update(change)
-    LEGACY.rename(LEGACY.with_name("config.json.migrated"))
-    return f"moved {LEGACY} into {_settings.path()}; the old file is now config.json.migrated"
+        if add:
+            _settings.write_json(_settings.path(), _settings.edit(data, "embed", add))
+        done = old.with_name("config.json.migrated")
+        if done.exists():               # an earlier migration's copy is kept, never overwritten
+            done = old.with_name(f"config.json.migrated-{int(time.time())}")
+        try:
+            old.rename(done)
+        except FileNotFoundError:       # another process moved it first
+            return None
+    return f"moved {old} into {_settings.path()}; the old file is now {done.name}"
 
 
 def _ollama_check(model):
@@ -172,11 +188,9 @@ def show():
 
 
 def _set_embed(args):
-    clearing = {k for k in ("model", "ollama_host", "venv") if getattr(args, k) == "default"}
-    changes = {k: getattr(args, k) for k in ("model", "ollama_host", "venv")
-               if getattr(args, k) not in (None, "default")}
-    if args.autostart is not None:
-        changes["autostart"] = args.autostart
+    keys = ("model", "ollama_host", "venv", "autostart")
+    clearing = {k for k in keys if getattr(args, k) == "default"}
+    changes = {k: getattr(args, k) for k in keys if getattr(args, k) not in (None, "default")}
     if not (changes or clearing or args.reset or args.index):
         print("nothing to change: name a setting (see `locket configure embedder -h`)", file=sys.stderr)
         return 2
@@ -185,6 +199,18 @@ def _set_embed(args):
     if "ollama_host" in changes and not changes["ollama_host"].startswith(("http://", "https://")):
         print(f"--ollama-host needs a scheme, e.g. http://{changes['ollama_host']}", file=sys.stderr)
         return 2
+    if "model" in changes and not args.no_check:
+        # ask ollama before taking the lock, against the host the new settings would use
+        new = _settings.edit(_settings.load(check=False)[0], "embed", changes, clearing, args.reset,
+                             None if args.shared else PIECE)
+        view = [("global", new.get("embed"))] if args.shared else _layers(new)
+        with _embed.settings(**{n: getattr(_embed, n) for n in ("MODEL", "OLLAMA", "AUTOSTART", "VENV")}):
+            _embed.apply_config(view)
+            ok, msg = _ollama_check(changes["model"])
+        if msg:
+            print(msg, file=sys.stderr)
+        if not ok:
+            return 1
     outcome = {}
     change = lambda data, findings: _change(args, changes, clearing, data, findings, outcome)
     try:
@@ -194,6 +220,9 @@ def _set_embed(args):
             written = _settings.update(change)
             if "rc" not in outcome:
                 print(f"wrote {_settings.path()}" if written else "no change to write")
+    except TimeoutError as e:
+        print(f"not written: {e}", file=sys.stderr)
+        return 1
     except OSError as e:
         print(f"cannot write {_settings.path()}: {e}", file=sys.stderr)
         return 1
@@ -222,26 +251,15 @@ def _set_embed(args):
 
 def _change(args, changes, clearing, data, findings, outcome):
     """The new settings for `_settings.update`, or None to write nothing, with the exit
-    code to stop with left in `outcome["rc"]`. Runs under the lock unless a dry run."""
-    if findings and not args.reset:
-        print("the settings file has problems; fix them, or pass --reset to rewrite this section anyway:",
-              file=sys.stderr)
-        for f in findings:
-            print(f"  {f}", file=sys.stderr)
+    code to stop with left in `outcome["rc"]`. Runs under the lock unless a dry run. Only
+    an unreadable file blocks, since writing over it loses every piece's settings; --reset
+    writes anyway, after `update` copies the old file to config.json.bak."""
+    if _settings.unreadable(findings) and not args.reset:
+        print(f"{findings[0]}\nfix it, or pass --reset to start the file over (the old one is kept "
+              "as config.json.bak)", file=sys.stderr)
         outcome["rc"] = 1
         return None
     new = _settings.edit(data, "embed", changes, clearing, args.reset, None if args.shared else PIECE)
-    if "model" in changes and not args.no_check:
-        # check against the host the new settings would use, then restore this process's settings
-        view = [("global", new.get("embed"))] if args.shared else _layers(new)
-        with _embed.settings(**{n: getattr(_embed, n) for n in ("MODEL", "OLLAMA", "AUTOSTART", "VENV")}):
-            _embed.apply_config(view)
-            ok, msg = _ollama_check(changes["model"])
-        if msg:
-            print(msg, file=sys.stderr)
-        if not ok:
-            outcome["rc"] = 1
-            return None
     if args.dry_run:
         print(json.dumps(new, indent=2))
         outcome["rc"] = 0
@@ -309,10 +327,11 @@ def _parser():
                         "Name another machine to rank on its GPU; Locket starts ollama itself only on "
                         "this machine. `default` removes the setting. OLLAMA_HOST overrides it.")
     auto = e.add_mutually_exclusive_group()
-    auto.add_argument("--autostart", dest="autostart", action="store_true", default=None,
+    auto.add_argument("--autostart", dest="autostart", nargs="?", const=True, default=None, choices=["default"],
                       help="start `ollama serve` when the port is closed and the binary is on PATH "
-                           "(the default). Hooks never start it, whatever this says.")
-    auto.add_argument("--no-autostart", dest="autostart", action="store_false",
+                           "(the default); `--autostart default` removes the setting. Hooks never start "
+                           "it, whatever this says.")
+    auto.add_argument("--no-autostart", dest="autostart", action="store_false", default=None,
                       help="never start ollama; with it down, rank in-process or by word overlap. "
                            "MEMFIND_NO_AUTOSTART=1 does the same for one shell.")
     e.add_argument("--venv", metavar="PATH",
@@ -390,25 +409,35 @@ def selftest():
                 assert run() == 2, "a run naming nothing to change wrote"
                 before = cfg.read_text()
                 assert run("--model", "m2", "--no-check", "--dry-run") == 0 and cfg.read_text() == before
-                cfg.write_text('{"embed": {"model": 3, "colour": "red"}, "grille": {"embed": {"model": "g"}}}')
-                assert len(load()[1]) == 2 and apply()["model"][1] == "default", f"a bad file took effect: {load()}"
-                assert run("--model", "m3", "--no-check") == 1, "a write over a broken file went ahead"
-                assert run("--reset", "--model", "m3", "--no-check") == 0
-                assert load()[0]["locket"] == {"embed": {"model": "m3"}} and load()[0]["grille"] == {"embed": {"model": "g"}}
+                cfg.write_text('{"embed": {"model": 3, "colour": "red"}, "grille": {"embd": {}, "embed": {"model": "g"}}}')
+                assert len(load()[1]) == 3 and apply()["model"][1] == "default", f"a bad file took effect: {load()}"
+                assert run("--model", "m3", "--no-check") == 0, "a structural finding blocked a write"
+                assert load()[0]["locket"] == {"embed": {"model": "m3"}} and load()[0]["grille"]["embed"] == {"model": "g"}
+                assert run("--no-autostart") == 0 and run("--autostart", "default") == 0
+                assert load()[0]["locket"] == {"embed": {"model": "m3"}}, "--autostart default did not clear it"
+                assert run("--autostart") == 0 and load()[0]["locket"]["embed"]["autostart"] is True
                 cfg.write_text('{"locket": {"embed": {"model": "m4"}}}')
                 assert run("--venv", "rel/v") == 0
                 assert load()[0]["locket"]["embed"]["venv"] == os.path.abspath("rel/v"), "a relative --venv was stored as given"
                 cfg.write_text("{not json")
-                assert load()[0] == {} and "unreadable" in load()[1][0]
+                assert load()[0] == {} and _settings.unreadable(load()[1])
+                assert run("--model", "m5", "--no-check") == 1, "a write over an unreadable file went ahead"
+                assert run("--reset", "--model", "m5", "--no-check") == 0
+                assert cfg.with_name("config.json.bak").read_text() == "{not json", "--reset kept no copy"
                 # Locket 0.10's file: read below the top level, then moved into it
-                cfg.write_text('{"embed": {"model": "m-top"}}')
                 LEGACY.parent.mkdir()
-                LEGACY.write_text('{"embed": {"model": "m-old", "ollama_host": "http://old:1", "colour": "x"}}')
+                LEGACY.write_text('{"embed": {"model": "m-old", "ollama_host": "http://old:1", "venv": "", "colour": "x"}}')
+                cfg.write_text("[]")
+                assert "left in place" in migrate() and LEGACY.exists(), "migrated over an unreadable file"
+                cfg.write_text('{"embed": {"model": "m-top"}}')
                 got = apply()
                 assert got["model"] == ("m-top", "global") and got["ollama_host"][1] == "~/.locket/config.json", got
                 assert migrate() and not LEGACY.exists() and LEGACY.with_name("config.json.migrated").exists()
                 assert load() == ({"embed": {"model": "m-top", "ollama_host": "http://old:1"}}, []), load()
                 assert migrate() is None, "a second migration ran"
+                LEGACY.write_text('{"embed": {"model": "m-again"}}')
+                assert "migrated-" in migrate() and LEGACY.with_name("config.json.migrated").exists(), \
+                    "a second migration overwrote the first one's copy"
     finally:
         LEGACY = saved_legacy
         for v, val in saved_env.items():

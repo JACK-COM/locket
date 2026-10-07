@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/embed.py (28b8143) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/embed.py (87d38f1) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """embed: the embedder ladder the Panoply's pieces share.
 
 Ranks text by meaning on whatever this machine can serve, in order: ollama as it
@@ -128,12 +128,11 @@ def apply_config(section=None):
     for key, (name, env) in CONFIG_KEYS.items():
         # MEMFIND_NO_AUTOSTART counts only as "1", the one value it has ever meant
         set_by = next((v for v in env if (os.environ.get(v) == "1" if key == "autostart" else os.environ.get(v))), None)
-        hit = next(((label, s[key]) for label, s in layers if _usable(key, s)), None)
         if set_by:
             raw = os.environ[set_by]
             value = (raw != "1") if key == "autostart" else Path(raw).expanduser() if key == "venv" else raw
             src = f"env {set_by}"
-        elif hit:
+        elif hit := next(((label, s[key]) for label, s in layers if _usable(key, s)), None):
             value = _file_venv(hit[1]) if key == "venv" else hit[1]
             src = hit[0]
         else:
