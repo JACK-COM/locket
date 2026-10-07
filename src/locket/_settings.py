@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/settings.py (1ad881a) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/settings.py (3d0e3b4) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """settings: the Panoply's one settings file, ~/.panoply/config.json.
 
 Holds the settings two or more pieces share at the top level, and each piece's overrides
@@ -203,8 +203,8 @@ def update(change, p=None):
     """Read, change and write under the lock. `change(data, findings)` returns the new
     settings, or None to write nothing; a return equal to what was read is not written,
     so a no-op never creates the file. Before replacing an unreadable file, which only a
-    change that chose to may do, it is copied to config.json.bak. Returns whether the file
-    was written."""
+    change that chose to may do, it is copied to config.json.bak, or config.json.bak-<time>
+    when an earlier copy is there. Returns whether the file was written."""
     p = Path(p) if p else path()
     with lock(p):
         data, findings = load(p)
@@ -213,6 +213,8 @@ def update(change, p=None):
             return False
         if unreadable(findings) and p.exists():
             bak = p.with_name(p.name + ".bak")
+            if bak.exists():                # an earlier copy is kept, never overwritten
+                bak = p.with_name(f"{p.name}.bak-{int(time.time())}")
             bak.write_bytes(p.read_bytes())
         write_json(p, new)
         return True
@@ -248,6 +250,9 @@ def _selftest():
             path().write_text("{not json")
             assert load()[0] == {} and unreadable(load()[1])
             assert update(lambda data, f: {"embed": {}}) and path().with_name("config.json.bak").read_text() == "{not json"
+            path().write_text("{again")
+            assert update(lambda data, f: {"embed": {"model": "m"}}) and path().with_name("config.json.bak").read_text() == "{not json", \
+                "a second replace overwrote the first copy"
             path().write_text("[]")
             assert load()[0] == {} and unreadable(load()[1]) and "expected an object" in load()[1][0]
             with lock():

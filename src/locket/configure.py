@@ -194,8 +194,16 @@ def _set_embed(args):
     if not (changes or clearing or args.reset or args.index):
         print("nothing to change: name a setting (see `locket configure embedder -h`)", file=sys.stderr)
         return 2
+    empty = [k for k, v in changes.items() if v == ""]
+    if empty:
+        print(f"--{empty[0].replace('_', '-')} is empty; pass `default` to remove the setting", file=sys.stderr)
+        return 2
     if "venv" in changes:                   # absolute: a hook resolves a relative path against its own cwd
-        changes["venv"] = os.path.abspath(Path(changes["venv"]).expanduser())
+        venv = os.path.expanduser(changes["venv"])
+        if venv.startswith("~"):
+            print(f"--venv {changes['venv']}: no such user's home to expand", file=sys.stderr)
+            return 2
+        changes["venv"] = os.path.abspath(venv)
     if "ollama_host" in changes and not changes["ollama_host"].startswith(("http://", "https://")):
         print(f"--ollama-host needs a scheme, e.g. http://{changes['ollama_host']}", file=sys.stderr)
         return 2
@@ -406,6 +414,7 @@ def selftest():
                 assert run("--reset") == 0 and load()[0] == {"embed": {"model": "m-all", "ollama_host": "http://g:1"}}
                 assert run("--reset", "--global") == 0 and load()[0] == {}, load()
                 assert run("--ollama-host", "studio:11434") == 2, "a host with no scheme was written"
+                assert run("--model", "") == 2 and run("--venv", "~no-such-user-x/v") == 2, "a value that cannot take effect was written"
                 assert run() == 2, "a run naming nothing to change wrote"
                 before = cfg.read_text()
                 assert run("--model", "m2", "--no-check", "--dry-run") == 0 and cfg.read_text() == before
