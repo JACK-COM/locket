@@ -5699,10 +5699,10 @@ def main(argv):
                 continue
             seen.add(r)
             what = migrate(r)
-            if what != "none" or one:       # a store with no manifest at all is not news
+            if what not in ("none", "already") or one:  # done or never needed is not news on a sweep
                 print(f"{r}: {what}"); n += 1
         if not n:
-            print("migrate: no store manifest to rename")
+            print("migrate: no store manifest needs renaming")
         return 0
     if mode == "forget":
         if len(argv) < 3:
