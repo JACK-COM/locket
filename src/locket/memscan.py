@@ -5121,9 +5121,10 @@ def bash_write_decision(command, cwd, autonomous=False):
         names = ", ".join(sorted({q.name for q in opaque}))
         return (f"This looks like a scripted write into a memory corpus ({names}). The "
                 f"write-time gate matches Write and Edit, so if it does write there the 2c and "
-                f"2e checks will not fire and nothing will report that they did not. Run "
-                f"`memfind` on what you are about to assert, or route the edit through "
-                f"Write/Edit."), False
+                f"2e checks will not fire and nothing will report that they did not. Route "
+                f"the edit through Write/Edit, or put `{MEMWRITE_ESCAPE} <reason>` in the "
+                f"command if Bash is genuinely right. Running `memfind` first does not "
+                f"substitute: it answers 2e and leaves the 2c check unrun."), False
     if unlisted:
         what = ", ".join(sorted({f"`{w}` on {q.name}" for w, q in unlisted}))
         return (f"This hands a memory file to a command Locket does not know to be read-only "
