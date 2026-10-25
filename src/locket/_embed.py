@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/embed.py (87d38f1) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/embed.py (87d38f1+uncommitted) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """embed: the embedder ladder the Panoply's pieces share.
 
 Ranks text by meaning on whatever this machine can serve, in order: ollama as it
@@ -284,6 +284,24 @@ def model_dir():
     return VENV / "models" / f"{ONNX_MODEL.replace('/', '--')}@{ONNX_REVISION[:12]}"
 
 
+MODEL_FILES = ("tokenizer.json", ONNX_FILE, ONNX_FILE + "_data")
+
+
+def model_missing():
+    """The model files not yet in `model_dir()`, empty once the in-process rung can load."""
+    return [rel for rel in MODEL_FILES if not (model_dir() / rel).exists()]
+
+
+def manual_fetch_help():
+    """How to place the model by hand where huggingface.co is unreachable (an egress
+    allowlist), fetching on any machine that can reach it. A placed file is used as is."""
+    pairs = "\n".join(f"    https://huggingface.co/{ONNX_MODEL}/resolve/{ONNX_REVISION}/{rel}\n"
+                      f"      -> {model_dir() / rel}" for rel in MODEL_FILES)
+    return (f"huggingface.co unreachable? Download each file on any machine that can reach it,\n"
+            f"  then place it at the path beside it, subdirectories included:\n{pairs}\n"
+            f"  or use ollama instead, which pulls from its own registry:  ollama pull {MODEL}")
+
+
 def _fetch_model(quiet):
     """Download the pinned model once, keeping each file only when its sha256 matches,
     so a download cut short is fetched again rather than read as weights. Each process
@@ -293,7 +311,7 @@ def _fetch_model(quiet):
     refuses external weights that resolve outside the model file's own directory."""
     import hashlib
     d = model_dir()
-    for rel in ("tokenizer.json", ONNX_FILE, ONNX_FILE + "_data"):
+    for rel in MODEL_FILES:
         dst = d / rel
         if dst.exists():
             continue
@@ -318,7 +336,8 @@ def _fetch_model(quiet):
             raise
         except Exception as e:              # URLError, OSError, http.client's IncompleteRead
             part.unlink(missing_ok=True)
-            raise RuntimeError(f"cannot fetch {url} ({getattr(e, 'reason', e)})") from None
+            raise RuntimeError(f"cannot fetch {url} ({getattr(e, 'reason', e)})\n"
+                               + manual_fetch_help()) from None
     return d
 
 
@@ -454,9 +473,11 @@ def _selftest_fetch():
                 assert "incomplete" in str(e), e
             data = model_dir() / (ONNX_FILE + "_data")
             assert not data.exists() and not list(data.parent.glob("*.part.*")), "a short file was left"
+            assert model_missing(), "a model with a file refused reads as present"
             served.update(body)
             assert (_fetch_model(quiet=True) / ONNX_FILE).read_bytes() == b"graph"
             assert data.read_bytes() == b"weights", "a verified file did not land"
+            assert not model_missing(), "a fetched model reads as missing"
         def refuse(url, timeout):
             raise urllib.error.URLError("offline")
         _open = refuse
@@ -466,6 +487,9 @@ def _selftest_fetch():
                 raise AssertionError("a failed fetch did not raise")
             except RuntimeError as e:
                 assert "cannot fetch" in str(e), e
+                # the manual path names every file's URL and where it goes
+                assert all(f"{ONNX_REVISION}/{rel}" in str(e) and str(model_dir() / rel) in str(e)
+                           for rel in MODEL_FILES), e
     finally:
         _open = real_open
         ONNX_SHA256.clear()

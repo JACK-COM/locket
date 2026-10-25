@@ -1068,10 +1068,14 @@ def subtract_archived(added, arch):
 
 
 def _inverted(items, df):
-    """Bucket by the 3 rarest tokens, so candidate generation stays near-linear."""
+    """Bucket by the 3 rarest tokens, so candidate generation stays near-linear.
+
+    Ties in rarity break on the token itself: broken by set order they followed
+    the per-process string hash, so each run bucketed differently and a pair
+    found by one `audit` was missing from the next on an unchanged store."""
     inv = defaultdict(list)
     for i, (_, _, ts) in enumerate(items):
-        for w in sorted(ts, key=lambda w: df[w])[:3]:
+        for w in sorted(ts, key=lambda w: (df[w], w))[:3]:
             inv[w].append(i)
     return inv
 
@@ -1103,14 +1107,32 @@ def cross_file_pairs(docs, floor=PAIR_FLOOR, same_file=False):
     return out
 
 
+# A reference target: a URL, a file with an extension (path included), a path
+# anchored at ~, . or / or ending in /, or a ledger query (`Area=substrate`).
+# A bare slash is not a path: "AD/mandate" and "CE-525 / CE-525S" are prose, so an
+# unanchored extensionless path ("memory/projects") is not a target either. The
+# extension list is the memory formats; a generic `.ext` would take "Node.js" and
+# "e.g.". Any `k=v` counts, harmless since a claim keeps its tokens past the floor.
+# Matched on the stripped sentence, so backticks are gone.
+_TARGET = re.compile(r"""https?://\S+|[\w~./-]*\.(?:md|csv|jsonl?|py|sh|txt|toml|ya?ml|pdf)\b|(?<![\w/])[~.]?/[\w./-]+|\b[\w.-]+/(?=\s|$)|\b\w+=[\w.-]+""", re.I)
+_REDIRECT = re.compile(r"(?:see|cf\.?|composes)\s")   # a verb whose object is the reference
+
+
 def pointer_only(sentence):
     """True where a sentence's payload is a cross-reference, not a claim.
 
-    These repeat across files by design (see X, composes Y) and are the noise
-    floor of `audit`.
+    The criterion: an opening redirect ("See X", "Composes Y"), or a sentence naming a
+    reference target that is no longer a claim once the target is removed, by
+    the same MIN_TOKENS floor `claims` uses. These repeat across files by design
+    and are the noise floor of `audit`. It replaced a closed list of opening
+    phrases, under which a pointer worded any other way paired as a fork.
     """
-    s = sentence.lower().lstrip("- ")
-    return s.startswith(("see ", "composes ", "full per-record ledger", "re-verify", "ship-state"))
+    s = sentence.lower().lstrip("-* ")
+    if _REDIRECT.match(s):
+        return True
+    if not _TARGET.search(s):
+        return False
+    return len(tokens(_TARGET.sub(" ", s))) < MIN_TOKENS
 
 
 def score_against(text, docs):
@@ -2336,6 +2358,11 @@ def selftest():
 
     assert pointer_only("See project doc basis per engine class.")
     assert not pointer_only("The default execution path is the dossier pipeline run interactively.")
+    # a pointer that does not open with "see" is still a pointer
+    assert pointer_only("Durable context lives in memory/projects/locket.md for this project.")
+    assert pointer_only("The ruling is a RULINGS.csv row on Area=substrate.")
+    # a claim that happens to cite a file keeps its claim
+    assert not pointer_only("The write gate in memscan.py refuses a fork unless locket find ran earlier in the session.")
 
     ranked = score_against("The default execution path is the dossier pipeline run interactively.", docs)
     assert ranked[0][2] in ("a.md", "b.md"), ranked[0]

@@ -961,6 +961,7 @@ def cmd_doctor():
         if stores else row("fail", "stores", "none found", "locket init <folder of markdown>")
 
     import configure
+    import _embed
     import _settings
     cfg_data, cfg_problems = _settings.load()
     cfg_path = _settings.path()
@@ -984,7 +985,14 @@ def cmd_doctor():
     try:
         name, model = _memfind().resolve_backend()
         src = configure.apply()["model"][1] if name == "ollama" else "fixed in-process model"
-        row("ok", "embedder", f"{name} ({model}; {src})")
+        missing = _embed.model_missing() if name == "onnx" else []
+        if missing:
+            # the rung resolves on its packages alone and fetches the model on first
+            # use, which fails silently into word overlap where huggingface.co is blocked
+            row("warn", "embedder", f"{name} ({model}), model not yet fetched: {', '.join(missing)}",
+                _embed.manual_fetch_help())
+        else:
+            row("ok", "embedder", f"{name} ({model}; {src})")
     except RuntimeError as e:
         # a venv that exists but cannot serve (onnxruntime too old) names its own fix
         fix = str(e).split("Fix: ", 1)[1] if "Fix: " in str(e) else \
@@ -1169,7 +1177,8 @@ def cmd_doctor():
     for level, what, detail, fix in rows:
         print(f"{level:<4}  {what:<{width}}  {detail}")
         if fix and level != "ok":
-            print(f"{'':<4}  {'':<{width}}  fix: {fix}")
+            pad = f"{'':<4}  {'':<{width}}  "
+            print(pad + "fix: " + fix.replace("\n", "\n" + pad + "     "))   # a multi-line fix keeps its column
     fails = sum(r[0] == "fail" for r in rows)
     warns = sum(r[0] == "warn" for r in rows)
     print(f"{len(rows)} checks: {len(rows) - fails - warns} ok, {warns} warning(s), {fails} failure(s)")
