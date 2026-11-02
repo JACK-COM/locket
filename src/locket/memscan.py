@@ -2748,6 +2748,15 @@ def selftest():
         assert bw("gawk --include inplace 1 MEMORY.md")[1], "awk's spaced --include inplace"
         for glued in ("perl -ne'print' MEMORY.md", "perl -e'print 1' MEMORY.md", "perl -CSDio -e 1 MEMORY.md"):
             assert not bw(glued)[1], f"an `i` inside a glued argument read as in-place: {glued}"
+        # a read-only flag's value is an input, scoped to the command that owns the flag
+        for reads in ("claude --bare -p x --append-system-prompt-file MEMORY.md",
+                      "claude -p x --system-prompt-file=MEMORY.md",
+                      "ollama launch claude --append-system-prompt-file MEMORY.md"):
+            assert bw(reads) == (None, False), f"a read-only flag's value warned: {reads}"
+        for writes in ("claude -p x --debug-file MEMORY.md", "other --append-system-prompt-file MEMORY.md",
+                       "ollama launch claude -p x MEMORY.md"):
+            msg, blk = bw(writes)
+            assert msg and not blk, f"a file outside a read-only flag stayed silent: {writes}"
         msg, _ = bw("python3 x.py > /Users/x/elsewhere/log.txt MEMORY.md")
         assert msg and "`python3`" in msg, f"a redirect target was read as the command: {msg}"
         for gitw in ("git checkout -- MEMORY.md", "git restore MEMORY.md", "git rm MEMORY.md",
@@ -2842,6 +2851,43 @@ def selftest():
     assert not prose_like("v_ne\\b"), "a metacharacter disqualifies"
     assert not prose_like("repo"), "one content word is not a question"
     assert not prose_like(""), "an empty pattern must not fire"
+    for ident in ("angle-scout", "cmp-fanout-is-a-dossier", "settings.json",
+                  "REFERENCE-CMP-Rulings.csv", "spec_provenance tcds_ref", "~/brain/fact.md"):
+        assert not prose_like(ident), f"a joined identifier read as a phrase: {ident}"
+    assert prose_like("source of truth for prices"), "a real phrase must still fire"
+    # --- grepassist's decision log: never raises, trims atomically, records every branch
+    import subprocess
+    global GREPASSIST_LOG
+    real_log, logdir = GREPASSIST_LOG, Path(tempfile.mkdtemp())
+    try:
+        GREPASSIST_LOG = logdir / "ro" / "ga.csv"
+        (logdir / "ro").mkdir(); (logdir / "ro").chmod(0o500)
+        assert _grepassist_log("Bash", "declined", "x", "p") == 0, "an unwritable log must not raise"
+        (logdir / "ro").chmod(0o700)
+        GREPASSIST_LOG = logdir / "ga.csv"
+        GREPASSIST_LOG.write_text("".join(f"2026-01-01T00:00:00Z,Bash,declined,x,row {i}\n" for i in range(4000)))
+        _trim_log(GREPASSIST_LOG, 1000)
+        kept = GREPASSIST_LOG.read_text().splitlines()
+        assert kept and kept[-1].endswith("row 3999") and len(kept) < 4000 and all(r.count(",") == 4 for r in kept), \
+            "a trim must keep whole newest rows"
+        assert _grepassist_log("Bash", "declined", "x", "=cmd") == 0 and \
+            GREPASSIST_LOG.read_text().splitlines()[-1].endswith(",'=cmd"), "a formula-led pattern must be quoted"
+        assert GREPASSIST_LOG.stat().st_mode & 0o777 in (0o600, 0o644), GREPASSIST_LOG.stat().st_mode
+        fresh = logdir / "hook.csv"
+        nowhere = Path(tempfile.mkdtemp())
+        for cmd, reason in (("grep -rn 'a fact here' .", "no-corpus"), ("echo hi", None)):
+            payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": str(nowhere),
+                                  "tool_input": {"command": cmd}})
+            r = subprocess.run([sys.executable, os.path.abspath(__file__), "grepassist"], input=payload,
+                               capture_output=True, text=True, timeout=60, cwd=str(nowhere),
+                               env={**os.environ, "LOCKET_GREPASSIST_LOG": str(fresh)})
+            assert r.returncode == 0, (cmd, r.stderr)
+        rows = fresh.read_text().splitlines() if fresh.exists() else []
+        assert len(rows) == 1 and ",declined,no-corpus," in rows[0], rows
+        assert fresh.stat().st_mode & 0o777 == 0o600, "a new log must be created 0600"
+    finally:
+        GREPASSIST_LOG = real_log
+        shutil.rmtree(logdir, ignore_errors=True)
 
     # --- portability: a manifest makes any directory a corpus -----------------
     d = Path(tempfile.mkdtemp())
@@ -2902,6 +2948,16 @@ def selftest():
         pat, words = grep_words(f"grep '{q}' --exclude-dir cwd-store ~/brain", d)
         assert pat == q and search_root(words, d) == store, \
             "a flag value naming a store under the cwd shadowed the path after it"
+        # the first pattern word decides: a regex there means no question, never a later word
+        for regex in ("grep -rln 'NOT-CURATION\\|dossier' hooks/ settings.json",
+                      "grep -c '\\.py' REFERENCE-CMP-Rulings.csv REFERENCE-CMP-Claims.csv",
+                      "grep 'a|b' 'notes about fact here'"):
+            assert grep_words(regex, outside) == ("", []), (regex, grep_words(regex, outside))
+        for valued in (f"grep -A 12 '{q}' ~/brain", f"grep --exclude-dir node_modules -rn '{q}' ~/brain",
+                       f"grep -m 5 --include '*.md' '{q}' ~/brain", f"rg -g '*.md' '{q}' ~/brain",
+                       f"rg -t py '{q}' ~/brain", f"rg -g '!vendor' '{q}' ~/brain",
+                       f"grep -d skip '{q}' ~/brain", f"grep -f pats.txt '{q}' ~/brain"):
+            assert grep_words(valued, outside) == (q, ["~/brain"]), (valued, grep_words(valued, outside))
     finally:
         os.environ["HOME"] = real_home
     # --- a project store answers to its manifest's name, and to its slug still
@@ -4403,7 +4459,10 @@ HOOK MODES (PreToolUse entry points, JSON on stdin; not for manual use)
               a pattern carrying no regex metacharacter and two words of four
               characters or more, so an identifier or an alternation never
               reaches it. Resolves the corpus from the search path, else from
-              the cwd. Silent with the embedder down.
+              the cwd. Silent with the embedder down. Every grep it reads is
+              logged, returned or declined and why, with the pattern's first
+              80 characters, to ~/.locket/grepassist.csv (mode 0600;
+              LOCKET_GREPASSIST_LOG), so a hook gone quiet shows as a rate.
 
 EXAMPLES
   locket corpora                 # what corpora exist, and their sizes
@@ -4876,6 +4935,11 @@ BASH_READERS = frozenset((
     "git gh locket memscan memfind sed gsed awk gawk rm trash touch mkdir chmod "
     # directional: BASH_WRITE reads which argument is the destination
     "cp mv rsync tee").split())
+# Flags whose value a command only reads, keyed by the command they belong to: the file
+# after one of these is an input whatever else the command writes. Scoped per command,
+# never a blanket reader entry, because the same CLI has writing flags (`claude
+# --debug-file`). `ollama launch <cmd>` is judged as `<cmd>`.
+_READ_FLAGS = {"claude": frozenset(("--append-system-prompt-file", "--system-prompt-file"))}
 # Words that run the command after them; the word after is the one judged.
 _SHELL_PREFIXES = frozenset("sudo env command nohup time exec builtin nice xargs caffeinate "
                             "timeout stdbuf ionice setsid "
@@ -5048,9 +5112,15 @@ def _unlisted_commands(command):
             inplace = True
         elif word == "git" and not t.startswith("-") and prev not in _GIT_VALUED:
             word = f"git {t}"                            # judged by its subcommand
-        prev = t
+        elif word == "ollama" and t == "launch":
+            word = None                                  # the launched command is the one judged
+            continue
+        flag, prev = prev, t
         if not t.endswith(".md") or any(c in t for c in "*?[ \t") or "://" in t:
             continue
+        reads = _READ_FLAGS.get(word, ())
+        if flag in reads or t.partition("=")[0] in reads:
+            continue                                     # the value of a read-only flag
         reader = word in BASH_READERS or (word.startswith("git ") and word[4:] not in _GIT_WRITES)
         if reader and not inplace:
             continue
@@ -5163,14 +5233,17 @@ def bash_write_decision(command, cwd, autonomous=False):
 
 
 # A regex handed to an embedding ranker is noise, so the injector fires only on a
-# pattern that reads as a question: two content words, no metacharacters.
+# pattern that reads as a question: two content words, no metacharacters. Words are
+# separated by whitespace only: a token joined by a hyphen, dot, underscore or slash
+# (`angle-scout`, `settings.json`, `spec_provenance`) is one identifier, never a phrase.
 GREP_META = set("|[]()\\^$*+?{}")
 
 
 def prose_like(pattern):
     if not pattern or GREP_META & set(pattern):
         return False
-    return len([w for w in re.split(r"[^A-Za-z0-9_]+", pattern) if len(w) > 3]) >= 2
+    words = (w.strip(",;:.!'\"") for w in pattern.split())
+    return len([w for w in words if re.fullmatch(r"[A-Za-z0-9]{4,}", w)]) >= 2
 
 
 GREP_VERBS = {"grep", "egrep", "rg", "ugrep"}
@@ -5185,9 +5258,9 @@ def grep_words(cmd, cwd=None, _nested=False):
     the command string a shell takes after `-c` (`bash -c '...'`), never in any other
     quoted word, where a commit message or a heredoc that mentions grep would fire it.
     The pattern is the `-e`/`--regexp` value where one is given, otherwise the first word
-    after the verb that is shaped like a question (`prose_like`) and is not shaped like a
-    path; a flag's value is almost never either, so no per-tool list of value-taking flags
-    is needed. The path words are every
+    after the verb that is not a path, a bare count or a non-question value of a bare long
+    option, and it counts only when shaped like a question (`prose_like`); no per-tool list
+    of value-taking flags is needed. The path words are every
     other word after an `-e` pattern, else the words after the pattern, last first, so a
     value-taking flag between pattern and path cannot shadow the path."""
     lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
@@ -5219,8 +5292,11 @@ def grep_words(cmd, cwd=None, _nested=False):
                     seg.pop()               # the `2` of `2>/dev/null` is a descriptor, not a word
                 break
             seg.append(t)
-        flagged, positional, opts, it = None, [], True, iter(seg)
+        flagged, positional, opts, it, after_opt = None, [], True, iter(seg), False
         for w in it:
+            # whether the word before this one was an option that could take it as a value
+            follows_opt = after_opt
+            after_opt = opts and w.startswith("-") and w not in ("-", "--") and "=" not in w
             attached = re.fullmatch(r"-[A-Za-z]*e(.+)", w, re.S) if opts else None
             if opts and w == "--":
                 opts = False
@@ -5232,13 +5308,75 @@ def grep_words(cmd, cwd=None, _nested=False):
             elif attached and not w.startswith("--"):
                 flagged = flagged or attached.group(1)
             elif not (opts and w.startswith("-") and w != "-"):
-                positional.append(w)
+                positional.append((w, follows_opt))
         if flagged:
-            return flagged, positional[::-1]
-        at = next((j for j, w in enumerate(positional) if prose_like(w) and not pathlike(w)), None)
-        if at is not None:
-            return positional[at], positional[at + 1:][::-1]
+            return flagged, [w for w, _ in positional][::-1]
+        # The pattern is the FIRST word that can be one: a path, a bare count (`-A 12`) and a
+        # non-question word right after an option (`-g '*.md'`, `-t py`, `--exclude-dir
+        # node_modules`) are flag values or targets. When that first word is not a question
+        # the grep has none to rank, so the scan stops there; searching further took a
+        # filename (`settings.json`) as the query. ⚠ A regex right after a boolean option
+        # (`grep -r 'a|b' 'two words here'`) is skipped as a value, so a later prose-shaped
+        # path with spaces would be taken; per-tool flag tables were rejected as the fix.
+        at = next((j for j, (w, fl) in enumerate(positional)
+                   if not pathlike(w) and not w.isdigit() and not (fl and not prose_like(w))), None)
+        if at is not None and prose_like(positional[at][0]):
+            return positional[at][0], [w for w, _ in positional[at + 1:]][::-1]
     return "", []
+
+
+GREPASSIST_LOG = Path(os.environ.get("LOCKET_GREPASSIST_LOG", str(REGISTRY.parent / "grepassist.csv"))).expanduser()
+GREPASSIST_LOG_CAP = 1 << 20                # past this the file keeps its newest half
+
+
+def _trim_log(path, cap):
+    """Keep the newest half of `path` by bytes once it passes `cap`. The kept half is
+    written beside the log and renamed over it, so a parallel hook never sees a truncated
+    file; an append racing the rename lands on the old inode and is lost, which a
+    diagnostic log tolerates."""
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return
+    if size <= cap:
+        return
+    with path.open("rb") as fh:
+        fh.seek(size // 2)
+        fh.readline()                       # drop the partial row the seek landed in
+        kept = fh.read()
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".grepassist-")
+    with os.fdopen(fd, "wb") as out:
+        out.write(kept)
+    os.replace(tmp, path)
+
+
+def _grepassist_log(tool, decision, reason, pattern):
+    """Record one grepassist decision and return 0, the hook's exit code.
+
+    The hook runs on every grep and returns neighbours only for a question-shaped one, so
+    a silent call is either a correct decline or a broken hook; this row is what tells
+    the two apart. Columns: UTC time, tool, decision (`returned`/`declined`), reason,
+    pattern's first 80 characters. A grep that never parsed as one is not logged; a grep
+    outside every corpus is (`no-corpus`), because a broken corpus lookup would show as
+    exactly that. The file is 0600, since a pattern can carry a secret. Writing must never
+    break the hook, so every failure here is swallowed."""
+    try:
+        _trim_log(GREPASSIST_LOG, GREPASSIST_LOG_CAP)
+        clean = re.sub(r"[\r\n\t,\"]+", " ", str(pattern))[:80]
+        if clean[:1] in ("=", "+", "-", "@"):
+            clean = "'" + clean             # a spreadsheet reads these as a formula
+        row = f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())},{tool},{decision},{reason},{clean}\n"
+        flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
+        try:
+            fd = os.open(str(GREPASSIST_LOG), flags, 0o600)
+        except FileNotFoundError:
+            GREPASSIST_LOG.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(GREPASSIST_LOG), flags, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(row)                   # one short write: atomic under O_APPEND
+    except Exception:
+        pass
+    return 0
 
 
 def grep_assist(pattern, root, top=4):
@@ -5676,6 +5814,7 @@ def main(argv):
         return emit(payload, msg, blocking, mode)
 
     if mode == "grepassist":                # PreToolUse on Grep|Bash: 2e, automatic
+        tool, pattern = "?", ""
         try:
             payload = read_payload()
             if payload is None:
@@ -5693,11 +5832,14 @@ def main(argv):
             else:
                 return 0
             root = search_root(words, cwd) or corpus_here(cwd)
-            if root is None or not prose_like(pattern):
-                return 0
+            if root is None:
+                return _grepassist_log(tool, "declined", "no-corpus", pattern)
+            if not prose_like(pattern):
+                return _grepassist_log(tool, "declined", "not-a-question", pattern)
             out = grep_assist(pattern, root)
-        except Exception:                   # ollama down, bad payload, anything
-            return 0
+        except Exception as e:              # ollama down, bad payload, anything
+            return _grepassist_log(tool, "declined", f"error:{type(e).__name__}", pattern)
+        _grepassist_log(tool, "returned" if out else "declined", "ranked" if out else "no-neighbours", pattern)
         return emit(payload, out, False, mode)
 
     if mode == "init":                      # needs no corpus of its own: it makes one
