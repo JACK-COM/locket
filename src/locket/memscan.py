@@ -34,6 +34,7 @@ slug (`myapp`), or a literal path. With no argument it takes THIS project's corp
 Stdlib only, by design: this runs inside a PreToolUse hook on every memory
 write, so it pays interpreter startup and nothing else.
 """
+import ast
 import fnmatch
 import hashlib
 import json
@@ -2811,6 +2812,73 @@ def selftest():
                 os.environ[k] = v
         msg, blk = bw("python3 - <<'EOF'\npathlib.Path('MEMORY.md').write_text(s)\nEOF")
         assert msg and not blk, "a scripted write warns rather than blocks"
+        # a Python program's targets are read off the program: names inside its data are not
+        # destinations, and a directory joined in another token still decides membership
+        out = "/Users/x/elsewhere"
+        for quiet in (
+            # CMPCanon: rule names as replacement strings in an edit of a file outside the corpus
+            f"python3 - <<'EOF'\nimport pathlib\np=pathlib.Path('{out}/lint.py')\n"
+            "p.write_text(p.read_text().replace('memory-discipline.md', 'prime-memory-discipline.md'))\nEOF",
+            # CMPCurator: a directory outside the corpus joined to bare names, one an f-string
+            f"cd {out} && python3 - <<'EOF'\nimport pathlib\nFD=pathlib.Path('research/fd')\n"
+            "rows=(FD/'SERVICE-INDEX.md').read_text()\nfor f in ('CT','F2'):\n"
+            "    (FD/f'SERVICE-INDEX-{f}-US.md').write_text(rows)\nEOF",
+            f"python3 - <<'EOF'\nfor n in ['a.md', 'b.md']:\n    open('{out}/' + n, 'w').write('x')\nEOF",
+            f"python3 -c 'import pathlib; pathlib.Path(\"{out}/n.md\").write_text(\"MEMORY.md\")'",
+            "python3 - <<'EOF'\nopen('/Users/x/out.txt', 'w').write(open('MEMORY.md').read())\nEOF",  # a read
+            "python3 - <<'EOF'\nimport json, re\nd = json.loads(s)\nre.sub('a', 'b', d)\nprint('MEMORY.md')\nEOF",  # known calls, no writer
+            f"cd {out} && python3 - <<'EOF'\nimport json, re\nd = json.loads(s)\nre.sub('a', 'b', d)\nEOF",
+            "python3 - <<'EOF'\n" + "s = 'a'" + " + 'a'" * 3000 + "\nEOF",       # too deep to fold: no crash
+            # a routine transform: read the corpus, call unlisted helpers with no `.md` in hand,
+            # write outside it; neutral calls must not reopen the token scan over the read
+            "python3 - <<'EOF'\nimport argparse, datetime, sys, json, re\nfrom collections import Counter\n"
+            "from pathlib import Path\nt = Path('MEMORY.md').read_text()\nnow = datetime.datetime.now()\n"
+            "top = Counter(re.findall('x', t)).most_common(3)\nsys.stdout.write(str(top))\n"
+            "d = dict.fromkeys(['a'])\nargparse.ArgumentParser()\nimport subprocess\n"
+            "subprocess.run(['git', 'status'])\n"
+            "Path('/Users/x/out.json').write_text(json.dumps(d))\nEOF",
+        ):
+            assert bw(quiet) == (None, False), f"a Python program's data read as a target: {quiet!r}"
+        for loud in (
+            "python3 - <<'EOF'\nimport pathlib\nFD=pathlib.Path('.')\n(FD/f'NOTE-{x}.md').write_text(s)\nEOF",
+            f"cd {out} && python3 - <<'EOF'\nFD='{cmem}'\nopen(FD + '/fresh_note.md', 'a').write('x')\nEOF",
+            "python3 - <<'EOF'\nfor n in ['a.py', 'topic_note.md']:\n    open(n, 'w')\nEOF",
+            "python3 -c 'open(\"fresh_note.md\", \"w\")'",
+            "python3 - <<'EOF'\nimport shutil\nshutil.copy('/Users/x/in.txt', 'fresh_note.md')\nEOF",
+            # a target the program computes is undecidable, so the token scan of old still answers
+            "python3 - <<'EOF'\nimport sys, pathlib\np=pathlib.Path(sys.argv[1])\np.write_text('MEMORY.md')\nEOF",
+            "python3 - <<'EOF'\nimport os, pathlib\nos.chdir('/Users/x')\npathlib.Path('MEMORY.md').write_text(s)\nEOF",
+            "python3 - <<'EOF'\nthis does not parse (\nopen('MEMORY.md', 'w')\nEOF",
+            # the convention audit's silent passes: each is a write the first cut missed
+            "python3 - <<'EOF'\nfrom shutil import copy\ncopy('/Users/x/a', 'MEMORY.md')\nEOF",
+            "python3 - <<'EOF'\nimport shutil as sh\nsh.copy('/Users/x/a', 'fresh_note.md')\nEOF",
+            "python3 - <<'EOF'\no = open\no('fresh_note.md', 'w')\nEOF",
+            "python3 - <<'EOF'\nfrom pathlib import Path\nw = Path('MEMORY.md').write_text\nw(s)\nEOF",
+            "python3 - <<'EOF'\nfrom pathlib import Path\ngetattr(Path('MEMORY.md'), 'write_text')(s)\nEOF",
+            "python3 - <<'EOF'\nfrom pathlib import Path\nPath('/Users/x/z').rename('MEMORY.md')\nEOF",
+            "python3 - <<'EOF'\nfrom pathlib import Path\nPath('/Users/x/z').replace('fresh_note.md')\nEOF",
+            "python3 - <<'EOF'\nimport os\nos.open('fresh_note.md', os.O_WRONLY | os.O_CREAT)\nEOF",
+            "python3 - <<'EOF'\nfrom pathlib import Path\nPath('fresh_note.md').touch()\nEOF",
+            "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['cp', '/Users/x/a', 'MEMORY.md'])\nEOF",
+            "python3 - <<'EOF'\nopen('/Users/x/o.txt', 'wb').write(b'x')\nopen('fresh_note.md', 'wb')\nEOF",
+            "python3 - <<'EOF'\np = '/ok.txt'\ntry:\n    pass\nexcept OSError as p:\n    pass\nopen(p, 'w').write('MEMORY.md')\nEOF",
+            f"cd {out} && python3 - <<'EOF'\nimport os\nos.chdir('{cmem}')\nopen('fresh_note.md', 'w')\nEOF",
+            f"cd {out} && python3 - <<'EOF'\nfrom os import chdir\nchdir('{cmem}')\nopen('fresh_note.md', 'w')\nEOF",
+            "python3 - <<'EOF'\nimport shutil\nthis does not parse (\nshutil.copy(a, 'fresh_note.md')\nEOF",
+            "python3 - <<'EOF'\nimport sys\nd = sys.argv[1]\nopen(f'{d}/MEMORY.md', 'w')\nEOF",
+            "python3 - <<'EOF'\nimport sys\nopen(sys.argv[1] + '/MEMORY.md', 'w')\nEOF",
+            # the second pass: an unknown call handed a `.md` path may write it
+            "python3 - <<'EOF'\nimport mylib\nmylib.save('MEMORY.md', 'x')\nEOF",
+            "python3 - <<'EOF'\nimport os\nos.truncate('MEMORY.md', 0)\nEOF",
+            "python3 - <<'EOF'\nimport fileinput\nfor l in fileinput.input('MEMORY.md', inplace=True):\n    print(l)\nEOF",
+            "python3 - <<'EOF'\nfrom shutil import *\ncopy('/Users/x/a', 'MEMORY.md')\nEOF",
+            f"python3 - <<'EOF'\nimport shutil\nshutil.copy('/Users/x/draft.md', '{cmem}')\nEOF",
+            f"python3 - <<'EOF'\nimport shutil\nshutil.move('/Users/x/draft.md', '{cmem}/')\nEOF",
+            "python3 - <<'EOF'\nfrom pathlib import Path\nPath('/Users/x/z').rename(target='MEMORY.md')\nEOF",
+            "python3 - <<'EOF'\nimport codecs\ncodecs.open(filename='fresh_note.md', mode='w')\nEOF",
+        ):
+            msg, blk = bw(loud)
+            assert msg and not blk, f"a scripted corpus write stayed silent: {loud!r}"
         for quiet in (
             "cat MEMORY.md",                               # a read
             "grep -n foo MEMORY.md",                       # a read
@@ -4450,7 +4518,9 @@ HOOK MODES (PreToolUse entry points, JSON on stdin; not for manual use)
               inplace), which `hook` never sees because it matches TOOLS
               rather than paths. Blocks an unambiguous write, warns on a
               scripted one and on a memory file handed to any command not
-              known to be read-only, and is silent for ledgers, holding spaces,
+              known to be read-only. A Python heredoc or `-c` program is
+              parsed and judged by where its writing calls write, so a
+              memory file named only as data passes. Silent for ledgers, holding spaces,
               archive/, the scratchpad and autonomous runs. `MEMWRITE-OK:
               <reason>` in the command declares the exception and passes.
   grepassist  Grep|Bash. Runs memfind on a prose-shaped search pattern and
@@ -5130,6 +5200,365 @@ def _unlisted_commands(command):
     return out
 
 
+# A Python program the command runs: `python3 - <<'EOF'` bodies and `python3 -c '…'`.
+# Its write targets are read off the program rather than off every `.md` token in it:
+# a name inside `.replace("a.md", "b.md")` is data, and `FD / 'X.md'` puts the
+# directory in another token, so a token scan both over-fired (two CMP sessions'
+# routine edits) and could not see the directory that decides membership.
+_PY_WORD = re.compile(r"(?<![\w.-])python[\d.]*(?![\w.-])")
+_PY_HEREDOC = re.compile(r"""<<(-?)\s*(['"]?)(\w+)\2""")
+_PY_DASH_C = re.compile(r"""(?<![\w.-])python[\d.]*(?:\s+-[A-Za-z]+)*?\s+-c\s+(?:'([^']*)'|"((?:[^"\\]|\\.)*)")""")
+_HOLE = "\0"                                     # an f-string value that does not fold
+_FOLD_CAP = 64                                   # candidate strings per expression
+
+# The program counts as read only when EVERY call in it is one of these or a known
+# writer below; any other call (subprocess, an alias, getattr, an unknown module)
+# leaves it unread and the token scan of old answers. ⚠ The first cut listed writers
+# only, and an audit found six silent passes through calls it had not listed; this
+# is BASH_READERS' inversion, so the next unlisted writer announces itself.
+_PY_PURE_BUILTINS = frozenset(
+    "len print sorted reversed list dict set frozenset tuple str int float bool bytes "
+    "enumerate zip range any all min max sum abs round isinstance issubclass repr format "
+    "map filter iter next hasattr type id hash chr ord divmod super".split())
+_PY_PURE_MODULES = frozenset(
+    "re json textwrap collections itertools functools math string difflib hashlib "
+    "fnmatch shlex unicodedata datetime time statistics operator copy pprint typing "
+    "dataclasses enum csv glob tomllib yaml os.path".split())
+_PY_PURE_FUNCS = frozenset(
+    "os.getcwd os.listdir os.walk os.getenv os.environ.get os.scandir os.stat os.remove "
+    "os.unlink os.makedirs os.mkdir sys.exit pathlib.Path pathlib.PurePath "
+    "pathlib.PosixPath pathlib.Path.home pathlib.Path.cwd Path PurePath".split())
+# methods on a value (a string, a list, a path, a match, a handle) that write nothing
+# outside a handle; a handle's own destination is read where `open` made it. Deleting
+# (`unlink`, `os.remove`) is not writing here, as `rm` is a reader to BASH_READERS.
+_PY_PURE_METHODS = frozenset(
+    {m for m in dir(str) if not m.startswith("_")} | set(
+        "append extend insert pop remove clear sort reverse index count get items keys "
+        "values update setdefault add discard union intersection difference copy "
+        "read_text read_bytes read readline readlines exists is_file is_dir glob rglob "
+        "iterdir stat resolve expanduser absolute with_suffix with_name with_stem "
+        "joinpath relative_to as_posix samefile group groups groupdict start end span "
+        "sub subn search match fullmatch findall finditer write writelines close flush seek "
+        "tell home cwd decode mkdir unlink is_symlink".split()))
+# writers: canonical name -> index of the destination argument
+_PY_WRITE_FUNCS = {"open": 0, "io.open": 0, "codecs.open": 0, "os.open": 0,
+                   "shutil.copy": 1, "shutil.copy2": 1, "shutil.copyfile": 1,
+                   "shutil.move": 1, "shutil.copytree": 1, "os.rename": 1,
+                   "os.replace": 1, "os.link": 1, "os.symlink": 1}
+_PY_ESCAPES = frozenset(("getattr", "eval", "exec", "compile", "__import__", "os.system",
+                         "os.popen", "pty.spawn"))
+_PY_INTO_DIR = frozenset(("shutil.copy", "shutil.copy2", "shutil.move", "shutil.copytree"))
+_PY_WRITE_METHODS = frozenset(("write_text", "write_bytes", "touch", "symlink_to", "hardlink_to"))
+_PY_PATH_FUNCS = frozenset(("pathlib.Path", "pathlib.PurePath", "pathlib.PosixPath",
+                            "os.path.join", "Path"))
+_PY_SAME_FUNCS = frozenset(("str", "os.fspath", "os.path.expanduser", "os.path.abspath",
+                            "os.path.realpath", "os.path.normpath"))
+
+
+def _python_programs(command):
+    """[(source, start, end, unreadable)] for each Python program in `command`;
+    offsets span the program text. `unreadable` marks a body whose literals are not
+    the program's: one the shell rewrites first (an unquoted heredoc or a
+    double-quoted `-c` holding `$` or a backtick), or a `-c` body the shell splices
+    on with `'\\''`, which the match sees only the first piece of."""
+    out, pos, lines = [], 0, command.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        pos += len(line) + 1
+        i += 1
+        m = _PY_HEREDOC.search(line)
+        if not (m and _PY_WORD.search(line[:m.start()])):
+            continue
+        body_start, body = pos, []
+        while i < len(lines):
+            ln = lines[i]
+            i += 1
+            pos += len(ln) + 1
+            if (ln.lstrip("\t") if m.group(1) else ln) == m.group(3):
+                break
+            body.append(ln)
+        src = "\n".join(body)
+        out.append((src, body_start, body_start + len(src),
+                    not m.group(2) and any(c in src for c in "$`")))
+    for m in _PY_DASH_C.finditer(command):
+        g = 1 if m.group(1) is not None else 2
+        src = m.group(g)
+        spliced = command[m.end():m.end() + 1] not in ("", " ", "\t", "\n", ";", "&", "|", ")")
+        out.append((src, m.start(g), m.end(g), spliced or (g == 2 and any(c in src for c in "$`"))))
+    return out
+
+
+class _PyWrites:
+    """What a parsed Python program writes: `targets`, the folded destination of every
+    writing call (`_HOLE` where an f-string value does not fold); `writes`, whether it
+    makes any such call; `decided`, whether every destination folded and every call
+    is known. Relative targets are joined to each folded `os.chdir` base as well as
+    returned bare, since the walk is flow-insensitive.
+
+    A name's values are the union of every binding it gets anywhere in the program;
+    any binding that does not fold (a parameter, a call result, an `except … as`, a
+    tuple target) leaves the name unknown. Membership turns on the directory and the
+    file pattern, so a target whose directory folds is decided even with a hole in
+    its file name, and one with a hole in its directory is not."""
+
+    def __init__(self, tree):
+        self.binds, self.unknown, self.aliases, self.defs = {}, set(), {}, set()
+        self.targets, self.writes, self.decided, self.bases = [], False, True, []
+        accepted = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Assign):
+                for t in n.targets:
+                    self._bind(t, n.value, accepted)
+            elif isinstance(n, (ast.AnnAssign, ast.NamedExpr)) and n.value is not None:
+                self._bind(n.target, n.value, accepted)
+            elif isinstance(n, (ast.For, ast.comprehension)) and isinstance(
+                    n.iter, (ast.List, ast.Tuple, ast.Set)) and isinstance(n.target, ast.Name):
+                for e in n.iter.elts:
+                    self._bind(n.target, e, accepted)
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                self.defs.add(n.name)
+            elif isinstance(n, ast.Import):
+                for al in n.names:                        # `import a.b` binds `a`; `as x` binds all of it
+                    if al.asname:
+                        self.aliases[al.asname] = al.name
+                    else:
+                        self.aliases[al.name.split(".")[0]] = al.name.split(".")[0]
+            elif isinstance(n, ast.ImportFrom) and n.module:
+                for al in n.names:
+                    self.aliases[al.asname or al.name] = f"{n.module}.{al.name}"
+        # every other binding site leaves its name unknown, whatever construct made it
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Name) and not isinstance(n.ctx, ast.Load) and id(n) not in accepted:
+                self.unknown.add(n.id)
+            elif isinstance(n, ast.arg):
+                self.unknown.add(n.arg)
+            elif isinstance(n, ast.ExceptHandler) and n.name:
+                self.unknown.add(n.name)
+            for attr in ("name", "rest"):                 # match captures (3.10+)
+                if type(n).__name__ in ("MatchAs", "MatchStar", "MatchMapping") and getattr(n, attr, None):
+                    self.unknown.add(getattr(n, attr))
+        self._calls(tree)
+
+    def _bind(self, target, value, accepted):
+        if isinstance(target, ast.Name):
+            self.binds.setdefault(target.id, []).append(value)
+            accepted.add(id(target))
+
+    def canon(self, f):
+        """The dotted name a callee resolves to through imports (`sh.copy` ->
+        `shutil.copy`), `.method` for a method on a value, or None when the callee
+        is itself computed."""
+        parts = []
+        while isinstance(f, ast.Attribute):
+            parts.append(f.attr)
+            f = f.value
+        if not isinstance(f, ast.Name):
+            return "." + parts[0] if parts else None
+        root = f.id
+        if root in self.aliases:
+            root = self.aliases[root]
+        elif parts:
+            return "." + parts[0]                         # a method on a variable
+        return ".".join([root] + list(reversed(parts)))
+
+    def fold(self, e, seen=()):
+        """Set of strings `e` can be, or None when it cannot be known."""
+        if isinstance(e, ast.Constant):
+            return {e.value} if isinstance(e.value, str) else None
+        if isinstance(e, ast.JoinedStr):
+            parts = [{str(v.value)} if isinstance(v, ast.Constant) else (self.fold(v.value, seen) or {_HOLE})
+                     for v in e.values]
+            return _cross(parts, lambda a, b: a + b) if parts else {""}
+        if isinstance(e, ast.Name):
+            if e.id in self.unknown or e.id not in self.binds or e.id in seen:
+                return None
+            out = set()
+            for v in self.binds[e.id]:
+                f = self.fold(v, seen + (e.id,))
+                if f is None:
+                    return None
+                out |= f
+            return out if len(out) <= _FOLD_CAP else None
+        if isinstance(e, ast.BinOp) and isinstance(e.op, (ast.Div, ast.Add)):
+            return _cross([self.fold(e.left, seen), self.fold(e.right, seen)],
+                          _join if isinstance(e.op, ast.Div) else (lambda a, b: a + b))
+        if isinstance(e, ast.Attribute) and e.attr == "parent":
+            v = self.fold(e.value, seen)
+            return None if v is None else {os.path.dirname(x.rstrip("/")) for x in v}
+        if isinstance(e, ast.Call) and not e.keywords:
+            name = self.canon(e.func) or ""
+            if name in _PY_PATH_FUNCS:
+                return _cross([self.fold(a, seen) for a in e.args], _join) if e.args else {"."}
+            if name == "pathlib.Path.home" or (name == ".home" and not e.args):
+                return {"~"}
+            if name in _PY_SAME_FUNCS and len(e.args) == 1:
+                return self.fold(e.args[0], seen)
+            if name in (".expanduser", ".resolve", ".absolute") and not e.args:
+                return self.fold(e.func.value, seen)
+        return None
+
+    def _calls(self, tree):
+        callees = {id(c.func) for c in ast.walk(tree) if isinstance(c, ast.Call)}
+        for n in ast.walk(tree):
+            # a writer handed on as a value (`o = open`, `map(open, …)`) is called unseen
+            if isinstance(n, (ast.Name, ast.Attribute)) and isinstance(n.ctx, ast.Load) \
+                    and id(n) not in callees:
+                name = self.canon(n) if isinstance(n, ast.Attribute) else self.aliases.get(n.id, n.id)
+                if name in _PY_WRITE_FUNCS or (name or "").lstrip(".") in _PY_WRITE_METHODS:
+                    self.decided, self.writes = False, True
+            if not isinstance(n, ast.Call):
+                continue
+            name = self.canon(n.func)
+            dest = None
+            if name is None:
+                self._unknown(n, n.func)                  # `x[0]()`, `f()()`
+                continue
+            if isinstance(n.func, ast.Name) and n.func.id in self.defs:
+                continue                                  # its body is walked on its own
+            if name in _PY_ESCAPES or name.startswith(("os.exec", "os.spawn", "subprocess.")):
+                self._unknown(n)                          # a shell or dynamic call: write if it names one
+                continue
+            if isinstance(n.func, ast.Name) and (n.func.id in self.binds or n.func.id in self.unknown) \
+                    and n.func.id not in self.aliases:
+                self._unknown(n)                          # a variable called: unknown callee
+                continue
+            if name in ("os.chdir",):
+                v = self.fold(n.args[0]) if n.args else None
+                if v is None or any(_HOLE in x for x in v):
+                    self.decided = False
+                else:
+                    self.bases.extend(v)
+                continue
+            method = name[1:] if name.startswith(".") else None
+            if method in _PY_WRITE_METHODS:
+                dest = n.func.value
+            elif method in ("rename", "replace") and len(n.args) + len(n.keywords) == 1 \
+                    and (n.args or n.keywords[0].arg == "target"):
+                dest = self._arg(n, 0, "target")          # Path.rename(dst); str.replace takes two
+            elif method == "open" or name in ("open", "io.open", "codecs.open"):
+                builtin = method is None
+                path = (self._arg(n, 0, "file") or self._arg(n, 0, "filename")) if builtin else n.func.value
+                mode = self._arg(n, 1 if builtin else 0, "mode")
+                m = {"r"} if mode is None else self.fold(mode)
+                if m is None or any(set(x) & set("wax+") for x in m):
+                    dest = path
+            elif name in _PY_WRITE_FUNCS:
+                dest = self._arg(n, _PY_WRITE_FUNCS[name], "dst" if _PY_WRITE_FUNCS[name] else "path")
+                if name in _PY_INTO_DIR:                  # `copy(src, dir)` lands at dir/basename(src)
+                    self._into_dir(dest, self._arg(n, 0, "src"), tree=name.endswith("copytree"))
+            elif (method == "copy" and len(n.args) >= 2) or not (
+                    method in _PY_PURE_METHODS or name in _PY_PURE_BUILTINS
+                    or name in _PY_PURE_FUNCS or ("." in name.lstrip(".") and name.rsplit(".", 1)[0] in _PY_PURE_MODULES)):
+                self._unknown(n)                          # `x.copy(a, b)` is not dict.copy()
+                continue
+            if dest is None:
+                continue
+            self.writes = True
+            v = self.fold(dest)
+            if v is None:
+                self.decided = False
+                continue
+            for x in v:
+                head = x.rsplit("/", 1)[0] if "/" in x else ""
+                if x.startswith(_HOLE) or _HOLE in head:
+                    self.decided = False                  # the directory itself is unknown
+                else:
+                    self.targets.append(x)
+
+    def _mdish(self, e, seen=()):
+        """Whether expression `e` can evaluate to a `.md` path: a literal or f-string
+        ending in `.md`, a join or concatenation ending in one, a path constructor over
+        one, a collection or subscript holding one, or a name any binding of which can.
+        A call's RESULT is not its argument: `Path('MEMORY.md').read_text()` is the
+        file's text, and reading it as a path re-fired the routine transform."""
+        if isinstance(e, ast.Constant):
+            return isinstance(e.value, str) and e.value.rstrip().endswith(".md")
+        if isinstance(e, ast.JoinedStr):
+            return bool(e.values) and self._mdish(e.values[-1], seen)
+        if isinstance(e, ast.BinOp) and isinstance(e.op, (ast.Add, ast.Div)):
+            return self._mdish(e.right, seen)
+        if isinstance(e, (ast.List, ast.Tuple, ast.Set)):
+            return any(self._mdish(x, seen) for x in e.elts)
+        if isinstance(e, ast.Dict):
+            return any(self._mdish(x, seen) for x in e.values if x is not None)
+        if isinstance(e, ast.Subscript):
+            return self._mdish(e.value, seen)
+        if isinstance(e, ast.Starred):
+            return self._mdish(e.value, seen)
+        if isinstance(e, ast.Name):
+            return e.id in self.binds and e.id not in seen and any(
+                self._mdish(v, seen + (e.id,)) for v in self.binds[e.id])
+        if isinstance(e, ast.Call):
+            name = self.canon(e.func) or ""
+            if name in _PY_PATH_FUNCS or name in _PY_SAME_FUNCS:
+                return bool(e.args) and self._mdish(e.args[-1], seen)
+            if name in (".expanduser", ".resolve", ".absolute", ".with_name", ".with_suffix"):
+                return True if name == ".with_suffix" and e.args and self._mdish(e.args[0], seen) \
+                    else self._mdish(e.func.value, seen)
+        return False
+
+    def _unknown(self, call, *extra):
+        """An unknown call: a write only where its arguments (or receiver) reach a `.md`
+        string. One that never does is neutral whatever its name, so `datetime.now()`,
+        `sys.stdout.write` and `argparse` stay quiet while `mylib.save('MEMORY.md')`,
+        `os.truncate('MEMORY.md', 0)` and `fileinput.input(..., inplace=True)` warn.
+        A write computed with no `.md` text in sight is unseen here and at the token
+        scan alike."""
+        parts = [*call.args, *(k.value for k in call.keywords), *extra]
+        if isinstance(call.func, ast.Attribute):
+            parts.append(call.func.value)
+        if any(self._mdish(p) for p in parts):
+            self.decided, self.writes = False, True
+
+    def _into_dir(self, dst, src, tree=False):
+        """Targets of a copy or move whose destination may be a directory."""
+        d, s = (self.fold(dst) if dst is not None else None), (self.fold(src) if src is not None else None)
+        if d is None:
+            return
+        for x in d:
+            if x.endswith(".md") or _HOLE in x:
+                continue                                  # a file destination, or a directory unknown
+            if tree:
+                self.targets.append(_join(x, _HOLE + ".md"))
+            elif s is None:
+                self.targets.append(_join(x, _HOLE + ".md"))
+            else:
+                self.targets.extend(_join(x, os.path.basename(y)) for y in s)
+
+    @staticmethod
+    def _arg(call, i, kw):
+        for k in call.keywords:
+            if k.arg == kw:
+                return k.value
+        return call.args[i] if len(call.args) > i else None
+
+
+def _cross(sets, op):
+    """Every `op`-combination of one string from each set, or None past the cap."""
+    if any(s is None for s in sets):
+        return None
+    out = set(sets[0])
+    for s in sets[1:]:
+        out = {op(x, y) for x in out for y in s}
+        if len(out) > _FOLD_CAP:
+            return None
+    return out
+
+
+def _join(a, b):
+    return b if b.startswith(("/", "~")) else (a.rstrip("/") + "/" + b if a else b)
+
+
+def _python_writes(source):
+    """`_PyWrites` for a program, or None when it does not parse or is too deep to
+    walk (a RecursionError from a long `+` chain is undecided, never a crash)."""
+    try:
+        return _PyWrites(ast.parse(source))
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+
+
 def bash_write_targets(command, cwd):
     """(blocking, opaque, unlisted) corpus files a Bash command appears to write;
     `unlisted` pairs each with the command word outside BASH_READERS that takes it.
@@ -5166,11 +5595,40 @@ def bash_write_targets(command, cwd):
             hit = resolve(m.group("p"), m.start("p"))
             if hit:
                 (blocking if hit[1] else opaque).append(hit[0])
-    if BASH_WRITE_OPAQUE.search(command):
-        for m in re.finditer(r"[\w./~-]+\.md", command):
-            hit = resolve(m.group(), m.start())
-            if hit and hit[0] not in blocking and hit[0] not in opaque:
-                opaque.append(hit[0])
+
+    def flag(hit):
+        if hit and hit[0] not in blocking and hit[0] not in opaque:
+            opaque.append(hit[0])
+    # A Python program that parses is read on its own, gate or no gate, so a writer the
+    # gate's regex does not spell (`write_bytes`, mode `'wb'`) is still seen. Where every
+    # destination folds and every call is known, its folded targets are the answer;
+    # otherwise it gets the token scan below, as does all text outside a read program.
+    rest = list(command)
+    for src, start, end, unreadable in _python_programs(command):
+        w = None if unreadable else _python_writes(src)
+        if w is None:
+            continue                            # unread: its tokens stay in `rest`
+        rest[start:end] = " " * (end - start)
+        for t in w.targets:
+            # a hole at the end may still be `.md`; inside the name it stands for any text
+            probe = (t + ".md" if t.endswith(_HOLE) else t).replace(_HOLE, "*")
+            if not probe.endswith(".md"):
+                continue
+            flag(resolve(probe, start))
+            if not probe.startswith(("/", "~")):
+                for base in w.bases:            # after an `os.chdir` the program's cwd is that
+                    flag(resolve(_join(base, probe), start))
+        if not w.decided and (w.writes or BASH_WRITE_OPAQUE.search(src)):
+            for m in re.finditer(r"[\w./~-]+\.md", src):
+                # `f'{d}/MEMORY.md'` scans as `/MEMORY.md`: an unknown directory may be the cwd's
+                for tok in {m.group(), os.path.basename(m.group())}:
+                    flag(resolve(tok, start + m.start()))
+                    for base in w.bases:
+                        flag(resolve(_join(base, tok), start + m.start()))
+    rest = "".join(rest)
+    if BASH_WRITE_OPAQUE.search(rest):
+        for m in re.finditer(r"[\w./~-]+\.md", rest):
+            flag(resolve(m.group(), m.start()))
     unlisted = []
     for word, tok, pos, inplace in _unlisted_commands(command):
         hit = resolve(tok, pos)
