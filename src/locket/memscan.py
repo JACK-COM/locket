@@ -350,15 +350,20 @@ def resolve(name):
     p = Path(name).expanduser()
     if p.is_dir():
         return top_of(p.resolve())
-    listed = all_corpora()
-    hits = {k: v for k, v in listed.items() if name.lower() in k.lower()}
-    if not hits:                            # a named project store still answers to its slug
-        tops = set(listed.values())
-        hits = {d.parent.name: d for d in (CLAUDE / "projects").glob("*/memory")
-                if d in tops and name.lower() in d.parent.name.lower()}
-    exact = [v for k, v in hits.items() if k.lower() == name.lower()]
-    if len(exact) == 1:                  # `devdocs` beside `devdocs-persona` is not ambiguous
-        return exact[0]
+    listed, low = all_corpora(), name.lower()
+    # A Claude Code project store also answers to its slug, though a named one is
+    # listed only by name. The passes run exact key, exact slug, key substring,
+    # slug substring, first non-empty wins: an exact slug then beats a longer
+    # sibling slug containing it (`-…-DevDocs` opening `-…-DevDocs-Persona`), and
+    # `devdocs` beside `devdocs-persona` is not ambiguous. Slugs come only from
+    # `projects/`, or a registered `~/vault/memory` would answer to `vault`.
+    slugs = {d.parent.name: d for d in listed.values() if d.parent.parent == CLAUDE / "projects"}
+    exact, part = (lambda k: k.lower() == low), (lambda k: low in k.lower())
+    hits = {}
+    for keyed, test in ((listed, exact), (slugs, exact), (listed, part), (slugs, part)):
+        hits = {k: v for k, v in keyed.items() if test(k)}
+        if hits:
+            break
     if len(hits) == 1:
         return next(iter(hits.values()))
     if not hits:
@@ -3040,6 +3045,21 @@ def selftest():
         assert all_corpora().get("devdocs-main") == proj, "a named project store is keyed by its name"
         assert resolve("devdocs-main") == proj and resolve("-Users-x-devdocs") == proj, \
             "the name resolves, and the slug still does"
+        persona = fake / "projects" / "-Users-x-devdocs-Persona" / "memory"
+        persona.mkdir(parents=True); (persona / "p.md").write_text("A persona note.\n")
+        settings.cache_clear()
+        assert resolve("-Users-x-devdocs") == proj, \
+            "a named store's exact slug beats a longer unnamed slug containing it"
+        assert resolve("-Users-x-devdocs-Persona") == persona and resolve("devdocs-main") == proj
+        assert resolve("-USERS-X-DEVDOCS") == proj, "an exact slug matches without case"
+        shutil.rmtree(persona.parent); settings.cache_clear()
+        loose = fake / "zq-loose-vault" / "memory"; loose.mkdir(parents=True)
+        (loose / "v.md").write_text("A vault note.\n")
+        (loose / MANIFEST).write_text(json.dumps({"name": "zq-named"}))
+        assert register(loose); settings.cache_clear()
+        with contextlib.redirect_stderr(io.StringIO()):
+            assert resolve("zq-loose-vault") is None, "only a projects/ store answers to its parent's name"
+        assert forget(loose); settings.cache_clear()
         kid = fake / "projects" / "-Users-x-kid" / "memory"; kid.mkdir(parents=True)
         (kid / "b.md").write_text("Another note.\n")
         (kid / MANIFEST).write_text(json.dumps({"belongs_to": "-Users-x-devdocs"})); settings.cache_clear()
