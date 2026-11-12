@@ -62,12 +62,13 @@ def _order(rows):
 
 
 def _unfolded(fresh, old):
-    """`fresh` less every row of a month `old` already holds folded for that source. A month
-    folds whole and once; a row read back into it would be counted twice, which happens when
-    the clock steps forward past a fold and back again. A month the ledger never folded (a new
-    ledger, a source that keeps days longer than FOLD_AFTER) passes, and the fold takes it."""
-    folded = {(r["source"], r["date"]) for r in old if not _is_day(r)}
-    return [r for r in fresh if (r["source"], r["date"][:7]) not in folded]
+    """`fresh` less every row whose month, source, project and model `old` already holds
+    folded. A folded month keeps no days, so a day read back into it cannot be told from one
+    already counted and is dropped; that happens when the clock steps forward past a fold and
+    back. A project or model the month never held, and a month never folded (a new ledger, a
+    source that keeps days longer than FOLD_AFTER), pass, and the fold takes them."""
+    folded = {(r["date"], r["source"], r["project"], r["model"]) for r in old if not _is_day(r)}
+    return [r for r in fresh if (r["date"][:7], r["source"], r["project"], r["model"]) not in folded]
 
 
 def fold_cutoff(today=None):
@@ -570,6 +571,9 @@ def selftest():
     # forward past a fold, then back), and a month never folded passes for the fold to take.
     back = _unfolded([f_row("2026-05-20"), f_row("2026-05-20", "hermes"), f_row("2026-11-10")], folded)
     assert [(r["date"], r["source"]) for r in back] == [("2026-11-10", "claude")], back
+    late = dict(f_row("2026-05-20"), model="a-model-first-seen-later")
+    assert _unfolded([late], folded) == [late], "a new model's day in a folded month was dropped"
+    assert _sum(fold(folded + _unfolded([late], folded), f_today))["output"] == _sum(folded)["output"] + 1
     fresh_ledger = fold(_unfolded([f_row("2026-03-02", "hermes")], []), f_today)
     assert [r["date"] for r in fresh_ledger] == ["2026-03"], "a new ledger lost a source's old day"
     print("usage selftest ok")

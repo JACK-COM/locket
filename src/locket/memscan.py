@@ -39,6 +39,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import sys
@@ -914,10 +915,19 @@ def _corpus_dirs(root):
             yield here, sorted(filenames)
 
 
-def has_content(root):
-    """Whether a store, its joined stores included, holds anything to score: a markdown file
-    or a registered CSV source. Stops at the first file, so asking costs almost nothing."""
-    return any(next(_walk_files(r), None) is not None or csv_sources(r) for r in roots_of(root))
+def has_content(root, csv=True):
+    """Whether a store, its joined stores included, holds anything to score: a non-empty
+    markdown file its manifest does not exclude, or with `csv`, a non-empty registered CSV
+    source. Stops at the first one, so a store with memory costs almost nothing to ask.
+    `csv=False` asks what the meaning index can build from, which is markdown only."""
+    def nonempty(p):
+        try:
+            return p.is_file() and p.stat().st_size > 0
+        except OSError:
+            return False
+    return any(any(nonempty(p) and not excluded_file(r, p) for p in _walk_files(r))
+               or (csv and any(nonempty(Path(pth)) for pth, _t, _l in csv_sources(r)))
+               for r in roots_of(root))
 
 
 def _walk_files(root, pattern="*.md"):
@@ -1494,14 +1504,22 @@ def citations(root):
 
 
 def resolve_citation(path, line, idx):
-    """(status, detail) for one citation. Status is ok / eof / missing."""
-    hits = idx.get(os.path.basename(path), [])
-    exact = [h for h in hits if h.endswith("/" + path) or h == path]
-    if "/" in path.strip("/") and not exact:
+    """(status, detail) for one citation. Status is ok / eof / missing; a missing citation's
+    detail is how many indexed files share its name somewhere else."""
+    path = posixpath.normpath(path.replace("\\", "/"))
+    hits = idx.get(posixpath.basename(path), [])
+    if "/" in path:
         # A citation that names a directory means that directory: a file of the same name
         # elsewhere is a different file, and resolving to it reported a stranger as live.
-        return "missing", len(hits)
-    hits = exact or hits
+        # Its first component may abbreviate a repository (`ui/app/x.py` for
+        # `choose-my-plane-ui/app/x.py`) once two or more components follow it.
+        parts = path.split("/")
+        norm = {h: h.replace(os.sep, "/") for h in hits}
+        at = lambda t: [h for h in hits if norm[h] == t or norm[h].endswith("/" + t)]
+        exact = at(path) or (at("/".join(parts[1:])) if len(parts) >= 3 else [])
+        if not exact:
+            return "missing", len(hits)
+        hits = exact
     if not hits:
         return "missing", 0
     # splitlines, not split("\n"): the latter counts a trailing newline as a
@@ -1518,7 +1536,7 @@ def resolve_citation(path, line, idx):
             return "ok", (h, lines, len(hits))
         first = first or (h, len(lines))
     if first is None:
-        return "missing", None
+        return "missing", 0
     return "eof", (first[0], first[1], len(hits))
 
 
@@ -2723,6 +2741,11 @@ def _selftest_inner():
     # A citation naming a directory never resolves to a same-named file in another one.
     assert resolve_citation("b/x.py", 3, cidx)[0] == "ok"
     assert resolve_citation("c/x.py", 1, cidx) == ("missing", 2), "a path resolved to a stranger"
+    assert resolve_citation("./b//x.py", 3, cidx)[0] == "ok", "a normalisable path read as missing"
+    (home / "rules/repo-ui/app").mkdir(parents=True); (home / "rules/repo-ui/app/y.py").write_text("y\n")
+    cidx = code_index([(home / "rules", frozenset())])
+    assert resolve_citation("ui/app/y.py", 1, cidx)[0] == "ok", "an abbreviated repository root read as missing"
+    assert resolve_citation("ui/y.py", 1, cidx)[0] == "missing", "a two-part path matched a stranger's folder"
     # A member path is entered only if every component would be: `memory/archive`
     # stays provenance even when a manifest names it as a member.
     HOST_MEMBERS[home] = {"memory", "rules", "memory/archive"}; settings.cache_clear()

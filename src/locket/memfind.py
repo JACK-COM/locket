@@ -799,7 +799,7 @@ def main(argv):
         # and who should not need this tool's vocabulary to ask it a question.
         rc = 0
         for k, v in sorted(memscan.all_corpora().items()):
-            if not memscan.md_files(v):      # an empty store cannot be indexed
+            if not memscan.has_content(v, csv=False):   # the index builds from markdown only
                 continue
             print(f"== {k}")
             try:

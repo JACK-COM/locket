@@ -825,7 +825,9 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
     It times a registered hook against its
     timeout: `hook` on a new, novel file at each store's root, with an empty transcript so
     the run reaches the meaning-ranked question as well as lexical scoring, or `grepassist`
-    on a prose search of the store. A hook that answers quickly by failing open is caught by
+    on a prose search of the store. A store with neither markdown nor registered rows is not
+    timed, except a host store, whose walk is the cost being measured. A hook that answers
+    quickly by failing open is caught by
     `opened`: each probe runs with its own health record, read for swallowed errors after it
     exits, and a probe that crashes outright counts too. A probe killed at the limit is a
     timeout, reported by `worst`, never a failure to open.
@@ -868,13 +870,13 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
             health = Path(scratch) / f"health-{i}"
             r, secs = _run_hook(cmd, payload, limit, LOCKET_GREPASSIST_LOG=os.devnull,
                                 LOCKET_HEALTH_DIR=str(health))
-            if limit / 2 < secs < limit:
+            crashed = r is not None and (r.returncode not in (0, 2) or "Traceback" in r.stderr)
+            if limit / 2 < secs < limit and not crashed:
                 # A first run after an upgrade, or on a store whose index the OS has not cached,
-                # pays a one-time cost no real write repeats; the second run is what a write pays.
-                r2, secs2 = _run_hook(cmd, payload, limit, LOCKET_GREPASSIST_LOG=os.devnull,
-                                      LOCKET_HEALTH_DIR=str(health))
-                if secs2 < secs:
-                    r, secs = r2, secs2
+                # pays a one-time cost; the second run is what each later write pays, slower or
+                # faster, so it is the one reported, a timeout included.
+                r, secs = _run_hook(cmd, payload, limit, LOCKET_GREPASSIST_LOG=os.devnull,
+                                    LOCKET_HEALTH_DIR=str(health))
             _rec, problems = memscan.health_report(health, fold=False, kinds=("errors",))
             if r is not None and (r.returncode not in (0, 2) or "Traceback" in r.stderr):
                 last = (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1][:120]
@@ -1075,6 +1077,7 @@ def cmd_doctor():
     row("ok", "selftest", last) if rc == 0 else row("fail", "selftest", last[:160], "locket selftest")
 
     stores = memscan.all_corpora()
+    full = []
     if stores:
         # Named stores with something in them first; a project slug or an empty auto-memory
         # (one per folder a session ever ran in) is counted, not listed.
@@ -1086,13 +1089,16 @@ def cmd_doctor():
         full = sorted((n for n, r in stores.items() if _holds(r)), key=lambda n: (n.startswith("-"), n))
         empty = len(stores) - len(full)
         shown = ", ".join(full[:6]) + (f", and {len(full) - 6} more" if len(full) > 6 else "")
-        row("ok", "stores", f"{len(full)} with memory ({shown})"
+        row("ok", "stores", (f"{len(full)} with memory ({shown})" if full else "none holds memory yet")
             + (f"; {empty} empty, not listed" if empty else ""))
     else:
         row("fail", "stores", "none found", "locket init <folder of markdown>")
-    for gone in memscan.registry_stale():
-        row("warn", "registry", f"{gone} is registered but its {memscan.MANIFEST} is gone, so no command can reach it",
-            f"locket init {gone}  (to keep it), or  locket forget {gone}")
+    # A host store or a project memory is a store by convention and needs no manifest.
+    conventional = set(memscan._raw_corpora().values())
+    for gone in (p for p in memscan.registry_stale() if p not in conventional):
+        q = shlex.quote(str(gone))
+        row("warn", "registry", f"{gone} is registered but its {memscan.MANIFEST} is gone, so `all` and the "
+            "store list no longer include it", f"locket init {q}  (to keep it), or  locket forget {q}")
 
     import configure
     import _embed
@@ -1135,7 +1141,8 @@ def cmd_doctor():
 
     # an empty store (an auto-memory folder no session has written to) has nothing to
     # index and `index all` skips it, so it never counts against this check
-    unindexed = [n for n in full if not (stores[n] / ".memfind").is_dir()] if stores else []
+    # The meaning index builds from markdown only, so a store holding only CSV rows has none to build.
+    unindexed = [n for n in full if not (stores[n] / ".memfind").is_dir() and memscan.has_content(stores[n], csv=False)]
     if unindexed:
         row("warn", "index", f"not built for {', '.join(sorted(unindexed))}", "locket index all")
     elif stores:
@@ -1424,11 +1431,15 @@ def _selftest_body():
             slow, _o = _hook_latency("sleep 3", {"full": full}, 1)
             assert slow == ("full", 1.0), f"a hook past its timeout is not reported at the limit: {slow}"
             once = Path(t) / "warmed"
-            cold, _o = _hook_latency(f"[ -e {shlex.quote(str(once))} ] || {{ touch {shlex.quote(str(once))}; sleep 0.7; }}",
-                                     {"full": full}, 1)
-            assert cold[1] < 0.5, f"a one-time cold start was reported as the store's latency: {cold}"
-            steady, _o = _hook_latency("sleep 0.7", {"full": full}, 1)
-            assert 0.6 < steady[1] < 1, f"a store slow on every run was hidden by the retry: {steady}"
+            cold, _o = _hook_latency(f"[ -e {shlex.quote(str(once))} ] || {{ touch {shlex.quote(str(once))}; sleep 2.4; }}",
+                                     {"full": full}, 4)
+            assert cold[1] < 2, f"a one-time cold start was reported as the store's latency: {cold}"
+            steady, _o = _hook_latency("sleep 2.4", {"full": full}, 4)
+            assert 2.3 < steady[1] < 4, f"a store slow on every run was hidden by the retry: {steady}"
+            once.unlink()
+            worse, _o = _hook_latency(f"[ -e {shlex.quote(str(once))} ] && sleep 9 || {{ touch {shlex.quote(str(once))}; sleep 2.4; }}",
+                                      {"full": full}, 4)
+            assert worse[1] == 4.0, f"a retry that timed out was hidden by the faster first run: {worse}"
             quiet, _o = _hook_latency(f'[ "$LOCKET_GREPASSIST_LOG" = {shlex.quote(os.devnull)} ] || sleep 3',
                                   {"full": full}, 1, "grepassist")
             assert quiet[1] < 1, "the grepassist probe writes to the real log"
