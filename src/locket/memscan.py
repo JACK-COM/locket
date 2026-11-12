@@ -885,9 +885,11 @@ def _corpus_dirs(root):
     else:
         # The root's own files count; its other directories are host state.
         try:
-            yield root, sorted(e.name for e in os.scandir(root) if e.is_file())
+            with os.scandir(root) as it:
+                own = sorted(e.name for e in it if e.is_file())
         except OSError:
             return
+        yield root, own
         tops = [root / n for n in sorted(mem) if entered(n) and (root / n).is_dir()]
     for top in tops:
         for dirpath, dirnames, filenames in os.walk(top):
