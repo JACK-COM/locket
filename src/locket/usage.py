@@ -4,8 +4,10 @@ Claude Code writes every response's token counts into its transcripts and delete
 transcript after 30 days; Hermes keeps a running total per session in its state.db and
 prunes sessions after 90. `locket usage record` copies both into one ledger,
 `~/.locket/usage.csv`, one row per day, source, project and model, so a day survives its
-source. It is safe to run any number of times: it rewrites only the days its sources still
-hold, and never replaces a day with a smaller one, which is what a day half-deleted by its
+source. Each record folds every whole month that ended more than FOLD_AFTER days ago into one
+row per month, source, project and model, dated `YYYY-MM`, so the ledger grows by month, not
+by day; the report reads daily rows only, and its widest window sits inside that age. It is
+safe to run any number of times: it rewrites only the days its sources still hold, and never replaces a day with a smaller one, which is what a day half-deleted by its
 source looks like. `locket install --hooks` runs it when each Claude Code session ends, and
 the report runs it first, so the ledger stays current without a scheduler.
 
@@ -44,6 +46,52 @@ NUMS = FIELDS[4:]
 PERIODS = {"today": 1, "week": 7, "month": 30}
 BASELINE = 28       # days before the period whose median day is "typical"
 MIN_BASELINE = 7    # fewer ledger days than this and there is no typical day yet
+# Past the longest a source keeps a day (Hermes prunes at 90), so no source can return a day
+# already folded: one read back would sit beside its month row and be counted twice.
+FOLD_AFTER = 120
+if max(PERIODS.values()) + BASELINE >= FOLD_AFTER:      # a report window must never reach a folded month
+    raise RuntimeError("usage: widen FOLD_AFTER past the longest period plus its baseline")
+
+
+def _is_day(r):
+    return len(r["date"]) == 10
+
+
+def _order(rows):
+    return sorted(rows, key=lambda r: (r["date"], r["source"], r["project"], r["model"]))
+
+
+def _unfolded(fresh, old):
+    """`fresh` less every row of a month `old` already holds folded for that source. A month
+    folds whole and once; a row read back into it would be counted twice, which happens when
+    the clock steps forward past a fold and back again. A month the ledger never folded (a new
+    ledger, a source that keeps days longer than FOLD_AFTER) passes, and the fold takes it."""
+    folded = {(r["source"], r["date"]) for r in old if not _is_day(r)}
+    return [r for r in fresh if (r["source"], r["date"][:7]) not in folded]
+
+
+def fold_cutoff(today=None):
+    """The first day still kept daily: the first of the month after the last whole month that
+    ended more than FOLD_AFTER days ago. Every daily row before it belongs to a folded month."""
+    edge = (today or dt.date.today()) - dt.timedelta(days=FOLD_AFTER)
+    return edge.replace(day=1).isoformat()
+
+
+def fold(rows, today=None):
+    """`rows` with every daily row before the cutoff summed into one row per month, source,
+    project and model. Token counts and responses add exactly; `sessions` adds the daily
+    counts, so a session that crossed midnight counts once per day it touched. Rows already
+    folded pass through and absorb any daily row of their own month."""
+    cut = fold_cutoff(today)
+    kept, months = [], defaultdict(list)
+    for r in rows:
+        if _is_day(r) and r["date"] >= cut:
+            kept.append(r)
+        else:
+            months[(r["date"][:7], r["source"], r["project"], r["model"])].append(r)
+    folded = [{"date": d, "source": src, "project": proj, "model": m, **_sum(group)}
+              for (d, src, proj, m), group in months.items()]
+    return _order(kept + folded)
 
 
 def _claude_dir(flag=None):
@@ -201,8 +249,7 @@ def merge(old, fresh, since_day=None):
             continue
         if sum(r["responses"] for r in rows) >= sum(r["responses"] for r in kept.get(key, [])):
             kept[key] = rows
-    return sorted((r for rows in kept.values() for r in rows),
-                  key=lambda r: (r["date"], r["source"], r["project"], r["model"]))
+    return _order(r for rows in kept.values() for r in rows)
 
 
 def record(claude=None, hermes=None, full=False, ledger=None, quiet=False):
@@ -219,8 +266,10 @@ def record(claude=None, hermes=None, full=False, ledger=None, quiet=False):
     claude_rows = _fresh("claude", read_claude(_claude_dir(claude), since, notes))
     hermes_rows = _fresh("hermes", read_hermes(_hermes_db(hermes), notes))
     old = load(ledger)
+    today = dt.date.today()
+    claude_rows, hermes_rows = _unfolded(claude_rows, old), _unfolded(hermes_rows, old)
     rows = merge(old, [r for r in claude_rows if not since_day or r["date"] >= since_day], since_day)
-    rows = merge(rows, hermes_rows)
+    rows = fold(merge(rows, hermes_rows), today)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     tmp = ledger.with_suffix(".csv.tmp")
     with open(tmp, "w", newline="") as fh:
@@ -262,6 +311,7 @@ def summarize(rows, days, today=None):
     median over the BASELINE days before the period, counted from the ledger's first day,
     so a machine with a week of history is not compared against three empty ones."""
     today = today or dt.date.today()
+    rows = [r for r in rows if _is_day(r)]              # a folded month is history, never a day
     start = today - dt.timedelta(days=days - 1)
     base_start = max(start - dt.timedelta(days=BASELINE),
                      min((dt.date.fromisoformat(r["date"]) for r in rows), default=start))
@@ -493,6 +543,35 @@ def selftest():
         finally:
             globals()["LEDGER"], sys.stdin = saved, stdin
             os.environ.clear(); os.environ.update(env)
+    # The fold: every whole month that ended more than FOLD_AFTER days ago becomes one row per
+    # month, source, project and model; totals are exact; recent days stay daily; a folded
+    # month absorbs a stray day of its own month; and the report never reads a month row.
+    f_today = dt.date(2026, 11, 11)
+    f_day = lambda d: (f_today - dt.timedelta(days=d)).isoformat()
+    f_row = lambda date, src="claude": {"date": date, "source": src, "project": "p", "model": "m",
+                                        **{k: 1 for k in NUMS}}
+    f_rows = [f_row(f_day(d)) for d in range(0, 200)] + [f_row(f_day(d), "hermes") for d in range(150, 200)]
+    folded = fold(f_rows, f_today)
+    cut = fold_cutoff(f_today)
+    assert cut == "2026-07-01", cut
+    months = [r for r in folded if not _is_day(r)]
+    assert months and all(r["date"] < cut[:7] for r in months)
+    assert all(r["date"] >= cut for r in folded if _is_day(r))
+    assert len(months) == len({(r["date"], r["source"], r["project"], r["model"]) for r in months}), \
+        "a month folded into more than one row"
+    assert _sum(folded) == _sum(f_rows), "the fold changed a total"
+    assert fold(folded, f_today) == folded, "a second fold changed the ledger"
+    absorbed = fold(folded + [f_row("2026-05-14")], f_today)
+    assert _sum(absorbed)["output"] == _sum(folded)["output"] + 1 \
+        and sum(1 for r in absorbed if r["date"] == "2026-05" and r["source"] == "claude") == 1
+    s7 = summarize(folded, 7, f_today)
+    assert s7["total"]["output"] == 7 and s7["baseline_days"] == BASELINE, s7["baseline_days"]
+    # A source row of a month the ledger already folded is never read back (the clock stepped
+    # forward past a fold, then back), and a month never folded passes for the fold to take.
+    back = _unfolded([f_row("2026-05-20"), f_row("2026-05-20", "hermes"), f_row("2026-11-10")], folded)
+    assert [(r["date"], r["source"]) for r in back] == [("2026-11-10", "claude")], back
+    fresh_ledger = fold(_unfolded([f_row("2026-03-02", "hermes")], []), f_today)
+    assert [r["date"] for r in fresh_ledger] == ["2026-03"], "a new ledger lost a source's old day"
     print("usage selftest ok")
     return 0
 
