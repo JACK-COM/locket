@@ -667,8 +667,14 @@ _PROBE = ("The doctor probe paragraph states one durable fact about a harbour: t
           "to the port authority before the next high water.")
 
 
-def _registered_hooks(settings):
-    """{verb: command} for the Locket hooks in a Claude Code settings.json."""
+# Claude Code's timeout for a command hook whose entry names none, in seconds.
+CLAUDE_HOOK_DEFAULT_TIMEOUT = 60
+
+
+def _hook_entries(settings):
+    """{verb: (command, timeout seconds)} for the Locket PreToolUse hooks in a Claude Code
+    settings.json, or None when the file is not readable JSON. An entry naming no usable
+    timeout gets Claude Code's default."""
     try:
         data = json.loads(settings.read_text())
     except (OSError, json.JSONDecodeError, ValueError):
@@ -679,10 +685,19 @@ def _registered_hooks(settings):
     for e in pre if isinstance(pre, list) else []:
         for h in (e.get("hooks") or []) if isinstance(e, dict) else []:
             cmd = str(h.get("command", "")) if isinstance(h, dict) else ""
+            t = h.get("timeout") if isinstance(h, dict) else None
+            t = float(t) if isinstance(t, (int, float)) and not isinstance(t, bool) and t > 0 \
+                else CLAUDE_HOOK_DEFAULT_TIMEOUT
             for _, verb, _t in CLAUDE_HOOKS:
                 if _is_locket_hook(cmd, verb):
-                    out.setdefault(verb, cmd)
+                    out.setdefault(verb, (cmd, t))
     return out
+
+
+def _registered_hooks(settings):
+    """{verb: command} for the Locket hooks in a Claude Code settings.json."""
+    entries = _hook_entries(settings)
+    return None if entries is None else {v: c for v, (c, _t) in entries.items()}
 
 
 def _dead_hooks(config):
@@ -742,7 +757,7 @@ def _probe_hook(cmd, codex=False):
     throwaway store repeating a paragraph the store already holds. True when it
     answered, False when it was silent, a string when it failed to run. For Codex
     the write arrives as the patch Codex sends, so the probe crosses the parser."""
-    import subprocess, tempfile
+    import tempfile
     base = memscan.REGISTRY.parent
     base.mkdir(parents=True, exist_ok=True)
     store = Path(tempfile.mkdtemp(prefix="doctor-probe-", dir=base))
@@ -757,11 +772,8 @@ def _probe_hook(cmd, codex=False):
                               "zz-probe.md\n+" + _PROBE + "\n*** End Patch"}})
         # supervised, so a firing hook nudges on stdout and exits 0; exit 2 would
         # also be what python prints for a script path that is gone
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_AUTONOMOUS"}
-        try:
-            r = subprocess.run(cmd, shell=True, input=payload, capture_output=True, text=True,
-                               timeout=30, env=env)
-        except subprocess.TimeoutExpired:
+        r, _secs = _run_hook(cmd, payload, 30)
+        if r is None:
             return "timed out after 30s"
         if r.returncode != 0:
             return (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1]
@@ -770,59 +782,71 @@ def _probe_hook(cmd, codex=False):
         shutil.rmtree(store, ignore_errors=True)
 
 
-def _hook_timeout(settings, verb, default=60):
-    """The timeout, in seconds, Claude Code gives the registered `verb` hook: the entry's own
-    `timeout`, else Claude Code's default for a command hook."""
+def _run_hook(cmd, payload, timeout, **env_extra):
+    """(CompletedProcess or None on timeout, seconds) for one hook run as Claude Code runs
+    it: the command through a shell, the payload on stdin. CLAUDE_AUTONOMOUS is dropped,
+    so the run is supervised and a nudge warns on stdout instead of blocking with exit 2.
+    `env_extra` overrides the environment, so a probe can point a hook's log elsewhere."""
+    import subprocess, time as _time
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_AUTONOMOUS"}
+    env.update(env_extra)
+    t0 = _time.monotonic()
     try:
-        pre = json.loads(settings.read_text())["hooks"]["PreToolUse"]
-        for e in pre:
-            for h in e.get("hooks") or []:
-                if _is_locket_hook(str(h.get("command", "")), verb):
-                    return int(h.get("timeout") or default)
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        pass
-    return default
+        r = subprocess.run(cmd, shell=True, input=payload, capture_output=True, text=True,
+                           timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return None, float(timeout)
+    return r, _time.monotonic() - t0
+
+
+def _hook_timeout(settings, verb):
+    """The timeout, in seconds, Claude Code gives the registered `verb` hook."""
+    entry = (_hook_entries(settings) or {}).get(verb)
+    return entry[1] if entry else CLAUDE_HOOK_DEFAULT_TIMEOUT
 
 
 def _hook_latency(cmd, stores, limit, verb="hook"):
-    """(store, seconds) for the slowest REAL store, timing a registered hook: `hook` on a new,
-    novel file at each store's root (the full path, lexical scoring then the 2e ranking), or
-    `grepassist` on a prose search of the store.
+    """(store, seconds) for the slowest REAL store, timing a registered hook against its
+    timeout: `hook` on a new, novel file at each store's root, with an empty transcript so
+    the run reaches the meaning-ranked question as well as lexical scoring, or `grepassist`
+    on a prose search of the store. None when no store has a file to score.
 
     ⚠ `_probe_hook` proves the hook fires on a throwaway store of one file, and a store that
-    small cannot show a walk that scales with the host tree. On a home of 120,000 directories
-    the hook took 25-35 s against a 10 s timeout and the probe still reported ok, while every
-    real write landed unchecked. Only the real stores can show this. Nothing is written: the
-    hook is PreToolUse and decides on the payload. None when no store has a file to score."""
-    import subprocess, time as _t
+    small cannot show a walk that scales with the host tree: the hook once took 25-35 s on
+    the council store against a 10 s timeout while the probe reported ok and every real
+    write landed unchecked. Only the real stores can show this.
+
+    Nothing lands in a store: the hook is PreToolUse and decides on the payload, and the
+    grepassist log is pointed at the null device so the probe leaves no row. A host store
+    is always timed, since an empty corpus under a large home still pays the walk; any
+    other store is skipped when its walk finds no markdown, checked by the first file."""
+    import tempfile
     body = ("Locket doctor latency probe " + os.urandom(6).hex() + ": a novel paragraph that "
-            "names no fact any store holds, long enough to reach every stage of the write gate, "
-            "including the meaning-ranked question asked once per session. ") * 2
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_AUTONOMOUS"}
+            "names no fact any store holds, long enough to pass the net-new floor of the "
+            "write gate and reach its meaning-ranked question. ") * 2
+    hosts = {Path(p) for p in memscan.HOST_STORES.values()}
     worst = None
-    for name, root in sorted(stores.items()):
-        try:
-            if not memscan.md_files(root):
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as transcript:
+        for name, root in sorted(stores.items()):
+            root = Path(root)
+            try:
+                if root not in hosts and not any(next(memscan._walk_files(r), None) is not None
+                                                 for r in memscan.roots_of(root)):
+                    continue
+            except OSError:
                 continue
-        except OSError:
-            continue
-        # `grepassist` is timed on a prose search of the store, the shape it ranks neighbours for
-        ti = ({"file_path": str(Path(root) / "zz-locket-doctor-probe.md"), "content": body}
-              if verb == "hook" else {"pattern": "where does this store say the gate fails open",
-                                      "path": str(root)})
-        payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Write" if verb == "hook" else "Grep",
-                              "session_id": "locket-doctor-latency", "cwd": str(root), "tool_input": ti})
-        t0 = _t.monotonic()
-        try:
-            subprocess.run(cmd, shell=True, input=payload, capture_output=True, text=True,
-                           timeout=limit, env=env)
-            secs = _t.monotonic() - t0
-        except subprocess.TimeoutExpired:
-            secs = float(limit)
-        if worst is None or secs > worst[1]:
-            worst = (name, secs)
-        if secs >= limit:               # one store past the timeout is the finding; stop paying
-            break
+            ti = ({"file_path": str(root / "zz-locket-doctor-probe.md"), "content": body}
+                  if verb == "hook" else {"pattern": "where does this store say the gate fails open",
+                                          "path": str(root)})
+            payload = json.dumps({"hook_event_name": "PreToolUse",
+                                  "tool_name": "Write" if verb == "hook" else "Grep",
+                                  "session_id": "locket-doctor-latency", "cwd": str(root),
+                                  "transcript_path": transcript.name, "tool_input": ti})
+            _r, secs = _run_hook(cmd, payload, limit, LOCKET_GREPASSIST_LOG=os.devnull)
+            if worst is None or secs > worst[1]:
+                worst = (name, secs)
+            if secs >= limit:           # one store past the timeout is the finding; stop paying
+                break
     return worst
 
 
@@ -1060,7 +1084,7 @@ def cmd_doctor():
     def _has_md(r):
         try:
             return bool(memscan.md_files(r))
-        except OSError:                     # an unreadable store (pathlib raises before 3.13)
+        except OSError:                     # a store whose walk raised anyway: count it empty
             return False
     unindexed = [n for n, r in stores.items()
                  if not (r / ".memfind").is_dir() and _has_md(r)]
@@ -1097,14 +1121,14 @@ def cmd_doctor():
                         name, secs = slow
                         label = f"{verb} latency"
                         if secs >= limit:
-                            row("fail", label, f"{what} takes {secs:.0f}s or more on {name}, past its {limit}s "
+                            row("fail", label, f"{what} takes {secs:.0f}s or more on {name}, past its {limit:g}s "
                                 f"timeout: Claude Code abandons it and {lost}",
                                 "brew upgrade locket; if current, the store's walk is entering host state")
                         elif secs > limit / 2:
-                            row("warn", label, f"{what} takes {secs:.1f}s on {name}, over half its {limit}s "
+                            row("warn", label, f"{what} takes {secs:.1f}s on {name}, over half its {limit:g}s "
                                 f"timeout; past it, {lost}", "find what the store's walk enters that it should not")
                         else:
-                            row("ok", label, f"{secs:.1f}s on the slowest store ({name}), inside its {limit}s timeout")
+                            row("ok", label, f"{secs:.1f}s on the slowest store ({name}), inside its {limit:g}s timeout")
                 else:
                     row("fail", "claude hooks", "registered, but the write hook " +
                         ("stayed silent on a known fork" if probe is False else f"failed: {probe}"),
@@ -1345,6 +1369,33 @@ def main(argv):
                 assert dead == {"SessionEnd", "UserPromptSubmit"}, \
                     f"doctor misread which entries are dead: {_dead_hooks(cfg)}"
             assert _probe_hook("true") is False, "doctor's probe reads a silent command as firing"
+            # doctor's latency check: each entry's own timeout, the default where it names none,
+            # a timeout reported as a fail, an empty store skipped, the grepassist log kept out
+            with tempfile.TemporaryDirectory() as t:
+                cfg = Path(t) / "settings.json"
+                cfg.write_text(json.dumps({"hooks": {"PreToolUse": [
+                    {"matcher": "Write|Edit", "hooks": [{"type": "command", "timeout": 7.5,
+                                                         "command": "/opt/x/bin/locket hook"}]},
+                    {"matcher": "Grep|Bash", "hooks": [{"type": "command", "command": "/opt/x/bin/locket grepassist"}]},
+                    {"matcher": "Bash", "hooks": [{"type": "command", "timeout": True,
+                                                   "command": "/opt/x/bin/locket bashguard"}]}]}}))
+                assert _hook_timeout(cfg, "hook") == 7.5, _hook_entries(cfg)
+                assert _hook_timeout(cfg, "grepassist") == CLAUDE_HOOK_DEFAULT_TIMEOUT
+                assert _hook_timeout(cfg, "bashguard") == CLAUDE_HOOK_DEFAULT_TIMEOUT, "a bool is not a timeout"
+                assert _registered_hooks(cfg)["hook"] == "/opt/x/bin/locket hook"
+                cfg.write_text("{not json")
+                assert _registered_hooks(cfg) is None and _hook_timeout(cfg, "hook") == CLAUDE_HOOK_DEFAULT_TIMEOUT
+                full, empty = Path(t) / "full", Path(t) / "empty"
+                full.mkdir(); empty.mkdir()
+                (full / "a.md").write_text("A fact the latency probe never reads.\n")
+                assert _hook_latency("true", {"empty": empty}, 5) is None, "an empty store is timed"
+                fast = _hook_latency("true", {"empty": empty, "full": full}, 5)
+                assert fast and fast[0] == "full" and fast[1] < 5, fast
+                slow = _hook_latency("sleep 3", {"full": full}, 1)
+                assert slow == ("full", 1.0), f"a hook past its timeout is not reported at the limit: {slow}"
+                quiet = _hook_latency(f'[ "$LOCKET_GREPASSIST_LOG" = {shlex.quote(os.devnull)} ] || sleep 3',
+                                      {"full": full}, 1, "grepassist")
+                assert quiet[1] < 1, "the grepassist probe writes to the real log"
             assert _probe_hook(live, codex=True) is True, \
                 "doctor's Codex probe does not fire through a patch into this memscan.py"
             merged = _add_codex_hooks({})
