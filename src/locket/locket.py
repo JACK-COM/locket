@@ -135,7 +135,9 @@ VERBS = [
      "locket uninstall --yes                remove without asking\n"
      "locket uninstall --purge              also every store's locket.json and the usage ledger"),
     ("status", "", "where the command points and what it can reach", None),
-    ("doctor", "", "check every install step a machine can check, with the fix for each failure", None),
+    ("doctor", "[--ack]", "check every install step a machine can check, with the fix for each failure",
+     "locket doctor                        check, including live hook runs abandoned or failed open\n"
+     "locket doctor --ack                  mark those hook-health counts seen, then check"),
     ("mcp", "", "serve the checks over MCP on stdio, for a host without hooks", None),
     ("selftest", "", "both scripts' internal checks", None),
     ("version", "", "print the version (also --version, -V, -v)", None),
@@ -746,7 +748,8 @@ def _dead_hooks(config):
                                           "tool_name": "Read", "tool_input": {"file_path": f"{d}/x.txt"}})
                     try:
                         r = subprocess.run(cmd, shell=True, input=payload, capture_output=True,
-                                           text=True, timeout=30, cwd=d)
+                                           text=True, timeout=30, cwd=d,
+                                           env=dict(os.environ, LOCKET_HEALTH_DIR=f"{d}/.health"))
                     except subprocess.TimeoutExpired:
                         out.append((event, cmd, "timed out after 30s")); continue
                 if r.returncode not in (0, 2) or "Traceback" in r.stderr:
@@ -783,7 +786,7 @@ def _probe_hook(cmd, codex=False):
                               "zz-probe.md\n+" + _PROBE + "\n*** End Patch"}})
         # supervised, so a firing hook nudges on stdout and exits 0; exit 2 would
         # also be what python prints for a script path that is gone
-        r, _secs = _run_hook(cmd, payload, 30)
+        r, _secs = _run_hook(cmd, payload, 30, LOCKET_HEALTH_DIR=str(store / ".health"))
         if r is None:
             return "timed out after 30s"
         if r.returncode != 0:
@@ -817,10 +820,12 @@ def _hook_timeout(settings, verb):
 
 
 def _hook_latency(cmd, stores, limit, verb="hook"):
-    """(store, seconds) for the slowest REAL store, timing a registered hook against its
+    """((store, seconds) for the slowest REAL store, (store, problem) for the first whose probe
+    swallowed an error, or None for either), timing a registered hook against its
     timeout: `hook` on a new, novel file at each store's root, with an empty transcript so
     the run reaches the meaning-ranked question as well as lexical scoring, or `grepassist`
-    on a prose search of the store. None when no store has a file to score.
+    on a prose search of the store. A hook that answers quickly by failing open is caught by
+    the second value: each probe runs with its own health record, read after it exits.
 
     ⚠ `_probe_hook` proves the hook fires on a throwaway store of one file, and a store that
     small cannot show a walk that scales with the host tree: the hook once took 25-35 s on
@@ -828,7 +833,8 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
     write landed unchecked. Only the real stores can show this.
 
     Nothing lands in a store: the hook is PreToolUse and decides on the payload, and the
-    grepassist log is pointed at the null device so the probe leaves no row. A host store
+    grepassist log is pointed at the null device and hook health at a throwaway directory,
+    so the probe leaves no row and no count. A host store
     is always timed, since an empty corpus under a large home still pays the walk; any
     other store is skipped when its walk finds no markdown, checked by the first file."""
     import tempfile
@@ -836,7 +842,9 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
             "names no fact any store holds, long enough to pass the net-new floor of the "
             "write gate and reach its meaning-ranked question. ") * 2
     hosts = {Path(p) for p in memscan.HOST_STORES.values()}
-    worst = None
+    worst = opened = None
+    # A probe killed at its timeout must not count as a live run the host abandoned, so each
+    # probe keeps its own health record; an error in it is a hook that failed open quickly.
     with tempfile.TemporaryDirectory() as scratch:
         transcript = Path(scratch) / "transcript.jsonl"
         transcript.write_text("")
@@ -856,12 +864,17 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
                                   "tool_name": "Write" if verb == "hook" else "Grep",
                                   "session_id": "locket-doctor-latency", "cwd": str(root),
                                   "transcript_path": str(transcript), "tool_input": ti})
-            _r, secs = _run_hook(cmd, payload, limit, LOCKET_GREPASSIST_LOG=os.devnull)
+            health = Path(scratch) / f"health-{len(name)}-{abs(hash(name))}"
+            _r, secs = _run_hook(cmd, payload, limit, LOCKET_GREPASSIST_LOG=os.devnull,
+                                 LOCKET_HEALTH_DIR=str(health))
+            _rec, problems = memscan.health_report(health)
+            if problems and opened is None:
+                opened = (name, problems[0])
             if worst is None or secs > worst[1]:
                 worst = (name, secs)
             if secs >= limit:           # one store past the timeout is the finding; stop paying
                 break
-    return worst
+    return worst, opened
 
 
 def _codex_trust_from(reply):
@@ -1129,11 +1142,15 @@ def cmd_doctor():
                         if verb not in hooks:
                             continue
                         limit = _hook_timeout(settings, verb)
-                        slow = _hook_latency(hooks[verb], stores, limit, verb)
+                        slow, opened = _hook_latency(hooks[verb], stores, limit, verb)
+                        label = f"{verb} latency"
+                        if opened is not None:
+                            row("fail", label, f"{what} failed open on {opened[0]}: {opened[1]}",
+                                "find the cause in that store (an unreadable file, a broken manifest)")
+                            continue
                         if slow is None:
                             continue
                         name, secs = slow
-                        label = f"{verb} latency"
                         if secs >= limit:
                             row("fail", label, f"{what} takes {secs:.0f}s or more on {name}, past its {limit:g}s "
                                 f"timeout: Claude Code abandons it and {lost}",
@@ -1147,6 +1164,16 @@ def cmd_doctor():
                     row("fail", "claude hooks", "registered, but the write hook " +
                         ("stayed silent on a known fork" if probe is False else f"failed: {probe}"),
                         f"run it by hand: {hooks['hook']}")
+
+    # Live runs, every host alike: a hook the host abandoned at its timeout, or one whose
+    # catch-all swallowed an error, let its call through unchecked.
+    rec, problems = memscan.health_report()
+    if problems:
+        row("fail", "hook health", f"since {rec.get('since', '?')}: " + "; ".join(problems),
+            "find the cause, then `locket doctor --ack` to mark these seen")
+    else:
+        row("ok", "hook health", "no hook run abandoned or failed open " +
+            (f"since {rec.get('since', '?')}" if rec else "on record"))
 
     codex_cfg = memscan.CODEX / "hooks.json"
     if memscan.CODEX.is_dir():
@@ -1405,14 +1432,19 @@ def main(argv):
                 full, empty = Path(t) / "full", Path(t) / "empty"
                 full.mkdir(); empty.mkdir()
                 (full / "a.md").write_text("A fact the latency probe never reads.\n")
-                assert _hook_latency("true", {"empty": empty}, 5) is None, "an empty store is timed"
-                fast = _hook_latency("true", {"empty": empty, "full": full}, 5)
+                assert _hook_latency("true", {"empty": empty}, 5) == (None, None), "an empty store is timed"
+                fast, _o = _hook_latency("true", {"empty": empty, "full": full}, 5)
                 assert fast and fast[0] == "full" and fast[1] < 5, fast
-                slow = _hook_latency("sleep 3", {"full": full}, 1)
+                slow, _o = _hook_latency("sleep 3", {"full": full}, 1)
                 assert slow == ("full", 1.0), f"a hook past its timeout is not reported at the limit: {slow}"
-                quiet = _hook_latency(f'[ "$LOCKET_GREPASSIST_LOG" = {shlex.quote(os.devnull)} ] || sleep 3',
+                quiet, _o = _hook_latency(f'[ "$LOCKET_GREPASSIST_LOG" = {shlex.quote(os.devnull)} ] || sleep 3',
                                       {"full": full}, 1, "grepassist")
                 assert quiet[1] < 1, "the grepassist probe writes to the real log"
+                swallow = (f"{py} -c " + shlex.quote(f"import sys; sys.path.insert(0, {str(HERE)!r}); import memscan; "
+                                                     "memscan.health_error('hook', 'lexical', ValueError())"))
+                _w, opened = _hook_latency(swallow, {"full": full}, 5)
+                assert opened and opened[0] == "full" and "ValueError in lexical" in opened[1], \
+                    f"a hook that fails open quickly passed doctor's latency check: {opened}"
             assert _probe_hook(live, codex=True) is True, \
                 "doctor's Codex probe does not fire through a patch into this memscan.py"
             merged = _add_codex_hooks({})
@@ -1511,6 +1543,8 @@ def main(argv):
     if verb == "status":
         return cmd_status()
     if verb == "doctor":
+        if "--ack" in rest:
+            memscan.health_ack()
         return cmd_doctor()
     if verb == "mcp":                       # the Desktop server, reached through the command
         import runpy

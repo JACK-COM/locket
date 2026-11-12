@@ -2294,6 +2294,112 @@ def cmd_against(root, text, top=3):
 FIRE_FLOOR = 0.45
 
 
+def _selftest_hook_health(fixture):
+    """Hook health against a throwaway directory. The environment is restored on the way
+    out: doctor runs this selftest in-process and reads the live record afterwards, so a
+    redirect left behind made its health row read the fixture, always clean."""
+    import signal, subprocess
+    before = os.environ.get("LOCKET_HEALTH_DIR")
+    live_dir = health_dir()
+    d = fixture / "hook-health"
+    os.environ["LOCKET_HEALTH_DIR"] = str(d)
+    try:
+        _selftest_hook_health_body(d, signal, subprocess)
+    finally:
+        if before is None:
+            os.environ.pop("LOCKET_HEALTH_DIR", None)
+        else:
+            os.environ["LOCKET_HEALTH_DIR"] = before
+    assert health_dir() == live_dir, "the selftest left hook health pointed at its fixture"
+
+
+def _selftest_hook_health_body(d, signal, subprocess):
+    marks = d / "inflight"
+    ls = lambda: sorted(os.listdir(marks))
+    with hook_run("hook"):
+        assert len(ls()) == 1, "a running hook leaves its marker"
+    assert not ls(), "a finished hook leaves a marker behind"
+    assert health_report() == (None, []), "a clean run wrote counters"
+    # A run the host kills never reaches its exit: its marker is the only trace. Killed for
+    # real, so the test is the mechanism and not a model of it. POSIX only: elsewhere a dead
+    # run is known by age alone.
+    if os.name == "posix":
+        prog = (f"import sys, time; sys.path.insert(0, {str(Path(__file__).parent)!r}); import memscan\n"
+                "with memscan.hook_run('grepassist'):\n    print('in', flush=True); time.sleep(60)\n")
+        child = subprocess.Popen([sys.executable, "-c", prog], stdout=subprocess.PIPE, text=True)
+        assert child.stdout.readline().strip() == "in"
+        child.send_signal(signal.SIGKILL)
+        child.wait()
+        assert len(ls()) == 1, "a killed run left no marker"
+        rec, problems = health_report()         # the report folds: no later hook run needed
+        assert rec["verbs"]["grepassist"]["killed"] == 1 and len(problems) == 1, rec
+        assert not ls(), "the killed run's marker was not folded"
+        assert "?" not in problems[0].split("(last ")[1][:4], problems
+    health_ack()
+    # A live run is never folded early, and a clock stepped back reads as young; past the
+    # stale age it folds whoever holds it, which covers a reused PID.
+    stale = HEALTH_STALE_POSIX if os.name == "posix" else HEALTH_STALE_OTHER
+    live = marks / _marker_name("hook", os.getpid(), time.time_ns())
+    live.write_text("{}")
+    _fold_dead_markers(now=time.time() - 3600)
+    _fold_dead_markers()
+    assert live.exists(), "a live run's marker was folded"
+    _fold_dead_markers(now=time.time() + stale + 1)
+    assert not live.exists() and health_report()[0]["verbs"]["hook"]["killed"] == 1
+    # Counted before removed: with the lock held elsewhere the count cannot land, and the
+    # marker must survive for a later fold rather than vanish uncounted.
+    dead = marks / _marker_name("bashguard", 2 ** 22 + 7, time.time_ns() - 10 ** 12)
+    dead.write_text("{}")
+    with open(d / ".lock", "a+") as held:
+        try:
+            import fcntl
+            fcntl.flock(held, fcntl.LOCK_EX)
+            t0 = time.monotonic()
+            _fold_dead_markers(now=time.time() + stale + 1)
+            assert time.monotonic() - t0 < 2, "a held lock made the fold wait"
+            assert dead.exists(), "a marker was removed although its count could not land"
+        except ImportError:
+            pass
+    _fold_dead_markers(now=time.time() + stale + 1)
+    assert not dead.exists() and health_report()[0]["verbs"]["bashguard"]["killed"] == 1
+    # A claim or a temp a dead writer left is reclaimed or removed, never kept forever.
+    orphan = marks / f".claim-999999-{_marker_name('hook', 999999, time.time_ns())}"
+    orphan.write_text("{}")
+    temp = d / ".health-leftover"
+    temp.write_text("{")
+    old = time.time() - HEALTH_TEMP_AGE - 5
+    os.utime(orphan, (old, old)); os.utime(temp, (old, old))
+    health_ack()
+    _fold_dead_markers(now=time.time() + stale + 1)
+    assert not ls() and not temp.exists(), (ls(), temp.exists())
+    assert health_report()[0]["verbs"]["hook"]["killed"] == 1, "an orphaned claim was not counted"
+    # The directory is bounded: past the cap the OLDEST fold, by start time across verbs.
+    health_ack()
+    base = time.time_ns()
+    for i in range(HEALTH_MARKER_CAP + 10):
+        verb = ("bashguard", "hook")[i % 2]     # mixed verbs: a name sort must still be a time sort
+        (marks / _marker_name(verb, os.getpid(), base + i)).write_text("{}")
+    _fold_dead_markers()
+    kept = ls()
+    assert len(kept) == HEALTH_MARKER_CAP, len(kept)
+    assert kept[0] == _marker_name("bashguard", os.getpid(), base + 10), "the cap did not fold the oldest"
+    for n in kept:
+        (marks / n).unlink()
+    # A swallowed error is counted with its detail, the record stays one entry per verb,
+    # an unreadable record is set aside and said so, and an ack zeroes the counters.
+    health_ack()
+    for _ in range(3):
+        health_error("hook", "lexical", ValueError("x"))
+    rec, problems = health_report()
+    assert rec["verbs"]["hook"]["errors"] == 3 and set(rec["verbs"]) == {"hook"}, rec
+    assert any("swallowed 3 error" in p and "ValueError in lexical" in p for p in problems), problems
+    (d / "health.json").write_text("{not json")
+    health_error("hook", "2e", OSError())
+    rec, problems = health_report()
+    assert (d / "health.json.corrupt").exists() and any("set aside" in p for p in problems), problems
+    assert health_ack() and health_report()[1] == []
+
+
 def selftest():
     # Every fixture is synthetic. The live memory store is never read, because a
     # test that reads it encodes the ORIGIN's manifest: on a store with different
@@ -2306,6 +2412,7 @@ def selftest():
     COUNCIL = fixture / "memory"
     COUNCIL.mkdir()
     saved_council = HOST_STORES["council"]
+    _selftest_hook_health(fixture)
     HOST_STORES["council"] = COUNCIL
     settings.cache_clear()
     docs = {
@@ -5968,6 +6075,283 @@ def _trim_log(path, cap):
     os.replace(tmp, path)
 
 
+# Hook health: whether a hook run was abandoned or failed open, read from live runs.
+# A hook the host kills at its timeout, or one whose catch-all swallows an error, lets
+# the call through and says nothing; a doctor probe sees only the runs it makes itself.
+# Both surfaces are bounded by construction (RULINGS.csv on Area=substrate): a run's
+# marker lives only while the run does, so the directory is empty at rest and capped,
+# and the counters are one record per hook verb, rewritten in place.
+HEALTH_MARKER_CAP = 256          # live markers kept; past this the oldest fold whatever their state
+HEALTH_STALE_POSIX = 3600        # seconds; process liveness decides, age only outlasts PID reuse
+HEALTH_STALE_OTHER = 600         # no liveness probe off POSIX; doctor caps any hook timeout at 600 s
+HEALTH_LOCK_WAIT = 0.2           # seconds; a stuck lock holder costs a count, never a hang
+HEALTH_TEMP_AGE = 60             # seconds; a temp or claim left this long belongs to a dead writer
+
+
+def health_dir():
+    """Where hook health lives, read from the environment on every call, so a probe or a
+    test pointed elsewhere never leaves the live record redirected for the rest of a process."""
+    return Path(os.environ.get("LOCKET_HEALTH_DIR", str(REGISTRY.parent / "hook-health"))).expanduser()
+
+
+def _pid_alive(pid):
+    """Whether a process exists. Off POSIX there is no harmless probe (os.kill there
+    terminates), so the answer is always yes and a marker folds on age alone."""
+    if os.name != "posix" or pid <= 0:
+        return os.name != "posix"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:                         # exists, owned by someone else
+        return True
+    return True
+
+
+def _utc(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+class _health_lock:
+    """A non-blocking exclusive lock on `<dir>/.lock`, retried for HEALTH_LOCK_WAIT. `held`
+    is False when it could not be taken; the caller then drops its update rather than wait,
+    because a hook stuck here would be killed by its host and feed the record it guards."""
+
+    def __init__(self, d):
+        self.d, self.fh, self.held = d, None, False
+
+    def __enter__(self):
+        try:
+            self.fh = open(self.d / ".lock", "a+")
+        except OSError:
+            return self
+        deadline = time.monotonic() + HEALTH_LOCK_WAIT
+        while True:
+            try:
+                try:
+                    import fcntl
+                    fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except ImportError:
+                    import msvcrt
+                    self.fh.seek(0)
+                    msvcrt.locking(self.fh.fileno(), msvcrt.LK_NBLCK, 1)
+                self.held = True
+                return self
+            except ImportError:
+                return self                 # no lock primitive at all: proceed unlocked is worse; drop
+            except OSError:
+                if time.monotonic() >= deadline:
+                    return self
+                time.sleep(0.01)
+
+    def __exit__(self, *exc):
+        if self.fh is not None:
+            self.fh.close()                 # closing releases either lock
+        return False
+
+
+def _health_update(change, d=None):
+    """Apply `change(record)` to the counters under the lock and replace the file whole.
+    True when it landed. Never raises: telemetry must not break the hook it watches. An
+    unreadable record is set aside as `health.json.corrupt` (one file, overwritten) and the
+    fresh record says so, rather than zeroing the history in silence."""
+    d = health_dir() if d is None else Path(d)
+    try:
+        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with _health_lock(d) as lock:
+            if not lock.held:
+                return False
+            f = d / "health.json"
+            try:
+                rec = json.loads(f.read_text())
+                if not (isinstance(rec, dict) and isinstance(rec.get("verbs"), dict)):
+                    raise ValueError("not a health record")
+            except FileNotFoundError:
+                rec = {"since": _utc(time.time()), "verbs": {}}
+            except Exception:
+                try:
+                    os.replace(f, d / "health.json.corrupt")
+                except OSError:
+                    pass
+                rec = {"since": _utc(time.time()), "verbs": {},
+                       "reset": f"an unreadable record was set aside as health.json.corrupt at {_utc(time.time())}"}
+            change(rec)
+            fd, tmp = tempfile.mkstemp(dir=str(d), prefix=".health-")
+            try:
+                with os.fdopen(fd, "w") as out:
+                    json.dump(rec, out, indent=1, sort_keys=True)
+                os.replace(tmp, f)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _count(rec, verb, kind, detail):
+    v = rec["verbs"].setdefault(verb, {"killed": 0, "errors": 0})
+    v[kind] = int(v.get(kind, 0)) + 1
+    v["last_killed" if kind == "killed" else "last_error"] = dict(detail, at=_utc(time.time()))
+
+
+def health_error(verb, where, exc):
+    """Record an error a hook swallowed to let the call through."""
+    _health_update(lambda rec: _count(rec, verb, "errors", {"where": where, "what": type(exc).__name__}))
+
+
+def _marker_name(verb, pid, start_ns):
+    """Start time first, so a name sort is a time sort and the cap folds the oldest."""
+    return f"{start_ns:020d}-{pid}-{verb}"
+
+
+def _fold_dead_markers(d=None, now=None):
+    """Count every run that ended without removing its marker, the trace of a run the host
+    killed, then remove those markers. Counted before removed: when the count cannot land,
+    each marker is put back for a later fold, so evidence is never destroyed uncounted.
+
+    A marker is claimed by an atomic rename first, so two folds count it once; a claim whose
+    folder died is reclaimed once it is HEALTH_TEMP_AGE old, so no claim is left forever.
+    Temps a dead writer left are removed here too. Past HEALTH_MARKER_CAP live markers the
+    oldest fold whatever their state, so the directory stays bounded."""
+    d = health_dir() if d is None else Path(d)
+    marks = d / "inflight"
+    now = time.time() if now is None else now
+    stale = HEALTH_STALE_POSIX if os.name == "posix" else HEALTH_STALE_OTHER
+    try:
+        names = sorted(os.listdir(marks))
+    except OSError:
+        return
+    plain = [n for n in names if not n.startswith(".")]
+    excess = len(plain) - HEALTH_MARKER_CAP
+    take = []                               # (original name, verb, age)
+    for i, n in enumerate(plain):
+        try:
+            start_ns, pid, verb = n.split("-", 2)
+            age = max(0.0, now - int(start_ns) / 1e9)   # a clock stepped back reads as young
+            pid = int(pid)
+        except ValueError:
+            take.append((n, "?", 0.0)); continue
+        if i < excess or age > stale or not _pid_alive(pid):
+            take.append((n, verb, age))
+    for n in names:                         # claims and finished markers a dead process left
+        if not n.startswith("."):
+            continue
+        try:
+            old = now - (marks / n).stat().st_mtime > HEALTH_TEMP_AGE
+        except OSError:
+            continue
+        if n.startswith(".claim-") and old:
+            orig = n.split("-", 2)[2] if n.count("-") >= 2 else n
+            try:
+                os.replace(marks / n, marks / orig)     # reclaimable like any marker
+                start_ns, _pid, verb = orig.split("-", 2)
+                take.append((orig, verb, max(0.0, now - int(start_ns) / 1e9)))
+            except (OSError, ValueError):
+                pass
+        elif n.startswith(".done-") and old:
+            try:
+                (marks / n).unlink()
+            except OSError:
+                pass
+    claimed = []
+    for n, verb, age in take:
+        c = marks / f".claim-{os.getpid()}-{n}"
+        try:
+            os.rename(marks / n, c)
+        except OSError:
+            continue                        # another fold claimed it
+        try:
+            cwd = str(json.loads(c.read_text()).get("cwd", ""))[:200]
+        except Exception:
+            cwd = ""
+        claimed.append((c, n, verb, age, cwd))
+    if claimed:
+        def change(rec):
+            for _c, _n, verb, age, cwd in claimed:
+                _count(rec, verb, "killed", {"cwd": cwd, "seconds": round(age, 1)})
+        landed = _health_update(change, d)
+        for c, n, *_ in claimed:
+            try:
+                c.unlink() if landed else os.replace(c, marks / n)
+            except OSError:
+                pass
+    for t in d.glob(".health-*"):           # temps a writer killed mid-replace left behind
+        try:
+            if now - t.stat().st_mtime > HEALTH_TEMP_AGE:
+                t.unlink()
+        except OSError:
+            pass
+
+
+class hook_run:
+    """`with hook_run(verb):` around one hook invocation: folds the traces of earlier
+    killed runs, leaves a marker for this one, and removes it on the way out. A run the
+    host kills never reaches the exit, so its marker is what the next run folds."""
+
+    def __init__(self, verb):
+        self.verb, self.marker = verb, None
+
+    def __enter__(self):
+        try:
+            d = health_dir()
+            (d / "inflight").mkdir(mode=0o700, parents=True, exist_ok=True)
+            _fold_dead_markers(d)
+            self.marker = d / "inflight" / _marker_name(self.verb, os.getpid(), time.time_ns())
+            self.marker.write_text(json.dumps({"cwd": os.getcwd()}))
+        except Exception:
+            self.marker = None
+        return self
+
+    def __exit__(self, *exc):
+        if self.marker is not None:
+            try:
+                self.marker.unlink()
+            except OSError:                 # held open elsewhere: mark it finished, never killed
+                try:
+                    os.replace(self.marker, self.marker.with_name(".done-" + self.marker.name))
+                except OSError:
+                    pass
+        return False
+
+
+def health_report(d=None, fold=True):
+    """(record, problems): the counters, and one line per verb with a kill or an error
+    since they were last acknowledged. Folds first, so a kill shows even when no hook has
+    run since it happened."""
+    d = health_dir() if d is None else Path(d)
+    if fold:
+        _fold_dead_markers(d)
+    try:
+        rec = json.loads((d / "health.json").read_text())
+        assert isinstance(rec, dict)
+    except Exception:
+        return None, []
+    out = []
+    for verb, v in sorted((rec.get("verbs") or {}).items()):
+        if v.get("killed"):
+            lk = v.get("last_killed") or {}
+            out.append(f"{verb} was abandoned {v['killed']}x (last {lk.get('at', '?')}, "
+                       f"{lk.get('seconds', '?')}s, in {lk.get('cwd') or '?'}); those calls ran unchecked")
+        if v.get("errors"):
+            le = v.get("last_error") or {}
+            out.append(f"{verb} swallowed {v['errors']} error(s) (last {le.get('at', '?')}: "
+                       f"{le.get('what', '?')} in {le.get('where', '?')}); those calls ran unchecked")
+    if rec.get("reset"):
+        out.append(rec["reset"])
+    return rec, out
+
+
+def health_ack(d=None):
+    """Zero the counters and restart `since`: the reading is seen. True when it landed."""
+    def change(rec):
+        rec.clear(); rec.update({"since": _utc(time.time()), "verbs": {}})
+    return _health_update(change, d)
+
+
 def _grepassist_log(tool, decision, reason, pattern):
     """Record one grepassist decision and return 0, the hook's exit code.
 
@@ -6356,7 +6740,8 @@ def hook_mode(payload):
                 except OSError:
                     prior = ""
                 msg = source_row_decision(path, ti, prior)[0]
-        except Exception:               # a guardrail must never break a write
+        except Exception as e:          # a guardrail must never break a write
+            health_error("hook", "ledger", e)
             return 0
         return emit(payload, msg, blocking, "hook")
     root = corpus_for(path)
@@ -6376,15 +6761,17 @@ def hook_mode(payload):
             lambda: archived_claims(root),
             autonomous=os.environ.get("CLAUDE_AUTONOMOUS") == "1",
             sets=settings(root), root=root)
-    except Exception:                   # a guardrail must never break a write: a
-        return 0                        # dangling symlink in the corpus raised here
+    except Exception as e:              # a guardrail must never break a write
+        health_error("hook", "lexical", e)
+        return 0
     if msg and blocking:
         return emit(payload, msg, True)
     # The silent path is the paraphrase blind spot: lexical scoring found
     # nothing, which is also what it returns for a fact restated in new words.
     try:
         gate = memfind_gate(payload, name, ti, text, prior, root)
-    except Exception:                   # a guardrail must never break a write
+    except Exception as e:              # a guardrail must never break a write
+        health_error("hook", "2e", e)
         gate = None
     # A non-blocking nudge must still reach the model when the 2e gate blocks,
     # or the warning is discarded by the very write that gets refused. ⚠ It is
@@ -6404,15 +6791,24 @@ def main(argv):
     if mode == "selftest":
         selftest()
         return 0
-    if mode == "hook":                      # PreToolUse entry, JSON on stdin
-        payload = read_payload()
-        if payload is None:
-            return 0
-        return hook_mode(payload)
+    if mode in ("hook", "bashguard", "grepassist"):
+        with hook_run(mode):
+            return _hook_entry(mode)
 
     if mode == "deliver":                   # retired: an older Hermes config still calls it
         sys.stdin.read()
         return 0
+
+    return _main_rest(mode, argv)
+
+
+def _hook_entry(mode):
+    """The three PreToolUse entry points, each reading its JSON payload from stdin."""
+    if mode == "hook":
+        payload = read_payload()
+        if payload is None:
+            return 0
+        return hook_mode(payload)
 
     if mode == "bashguard":                 # PreToolUse on Bash: the writes it misses
         payload = read_payload()
@@ -6427,7 +6823,8 @@ def main(argv):
                 msg, blocking = bash_write_decision(
                     command, payload.get("cwd"),
                     autonomous=os.environ.get("CLAUDE_AUTONOMOUS") == "1")
-        except Exception:                   # a guardrail must never break the shell
+        except Exception as e:              # a guardrail must never break the shell
+            health_error("bashguard", "decision", e)
             return 0
         return emit(payload, msg, blocking, mode)
 
@@ -6456,10 +6853,15 @@ def main(argv):
                 return _grepassist_log(tool, "declined", "not-a-question", pattern)
             out = grep_assist(pattern, root)
         except Exception as e:              # ollama down, bad payload, anything
+            health_error("grepassist", "rank", e)
             return _grepassist_log(tool, "declined", f"error:{type(e).__name__}", pattern)
         _grepassist_log(tool, "returned" if out else "declined", "ranked" if out else "no-neighbours", pattern)
         return emit(payload, out, False, mode)
+    return 0
 
+
+def _main_rest(mode, argv):
+    """Every non-hook mode of `main`."""
     if mode == "init":                      # needs no corpus of its own: it makes one
         rest, flags = list(argv[2:]), {}
         led = [a for a in rest if a == "--ledgers" or a.startswith("--ledgers=")]
