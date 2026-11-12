@@ -914,6 +914,12 @@ def _corpus_dirs(root):
             yield here, sorted(filenames)
 
 
+def has_content(root):
+    """Whether a store, its joined stores included, holds anything to score: a markdown file
+    or a registered CSV source. Stops at the first file, so asking costs almost nothing."""
+    return any(next(_walk_files(r), None) is not None or csv_sources(r) for r in roots_of(root))
+
+
 def _walk_files(root, pattern="*.md"):
     """Every readable file under one store matching `pattern`, by the walk above.
     The match follows the platform's case rule, as `Path.glob` does. A dangling
@@ -1490,10 +1496,14 @@ def citations(root):
 def resolve_citation(path, line, idx):
     """(status, detail) for one citation. Status is ok / eof / missing."""
     hits = idx.get(os.path.basename(path), [])
-    exact = [h for h in hits if h.endswith("/" + path) or h.endswith(path)]
+    exact = [h for h in hits if h.endswith("/" + path) or h == path]
+    if "/" in path.strip("/") and not exact:
+        # A citation that names a directory means that directory: a file of the same name
+        # elsewhere is a different file, and resolving to it reported a stranger as live.
+        return "missing", len(hits)
     hits = exact or hits
     if not hits:
-        return "missing", None
+        return "missing", 0
     # splitlines, not split("\n"): the latter counts a trailing newline as a
     # 89th line in an 88-line file, so a citation one past the end reads as ok.
     # An ambiguous name resolves to the first candidate long enough to hold the line:
@@ -2250,7 +2260,9 @@ def cmd_cites(root, filters=None):
         status, detail = resolve_citation(path, line, idx)
         who = ", ".join(sorted(sources))
         if status == "missing":
-            defects.append(f"!! {path}:{line}  FILE NOT FOUND   <- {who}")
+            elsewhere = (f" ({detail} file{'s share' if detail != 1 else ' shares'} the name, none at this path)"
+                         if detail else "")
+            defects.append(f"!! {path}:{line}  FILE NOT FOUND{elsewhere}   <- {who}")
         elif status == "eof":
             _, length, _ = detail
             defects.append(f"!! {path}:{line}  PAST EOF (file is {length} lines)   <- {who}")
@@ -2687,6 +2699,10 @@ def _selftest_inner():
                      if (p == home / "**") or (home in p.parents
                                                and p.relative_to(home).parts[0] not in ("memory", "rules"))})
     assert not strays, f"the corpus walk entered host state: {strays}"
+    # A store holds content when any markdown or registered row exists; an empty one does not.
+    assert has_content(home)
+    (fixture / "hollow").mkdir(exist_ok=True)
+    assert not has_content(fixture / "hollow"), "an empty folder read as a store with memory"
     # An unlistable home keeps its members: the root listing failing must not empty
     # the store, or every write into it passes unscored.
     if hasattr(os, "getuid") and os.getuid() != 0:
@@ -2704,6 +2720,9 @@ def _selftest_inner():
     cidx = code_index([(home / "rules", frozenset())])
     assert resolve_citation("x.py", 3, cidx)[0] == "ok", "a short first candidate hid a long one"
     assert resolve_citation("x.py", 9, cidx)[0] == "eof"
+    # A citation naming a directory never resolves to a same-named file in another one.
+    assert resolve_citation("b/x.py", 3, cidx)[0] == "ok"
+    assert resolve_citation("c/x.py", 1, cidx) == ("missing", 2), "a path resolved to a stranger"
     # A member path is entered only if every component would be: `memory/archive`
     # stays provenance even when a manifest names it as a member.
     HOST_MEMBERS[home] = {"memory", "rules", "memory/archive"}; settings.cache_clear()
