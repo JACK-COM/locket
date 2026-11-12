@@ -91,7 +91,7 @@ Hermes asks the user once, at the next launch, to approve each new hook; tell th
 
 ## Step 5. `doctor`, then the first audit
 
-Run `locket doctor` until it reports no failure. A warning is a rung missing that Locket works without; say which in the report.
+Run `locket doctor` until it reports no failure. A warning is a rung missing that Locket works without; say which in the report. The two latency rows time the write hook and `grepassist` on every real store against the timeout each is registered with: a hook past its timeout is abandoned by the host and the write lands unchecked, so a failure there is a gate that is off, and goes in the report as one.
 
 Then audit your own store (on a hookless host through the `locket_*` tools). `all` reaches every store on the machine, and on a machine shared with another agent that is someone else's memory: sweep it, and run `across`, only if the user says to.
 
