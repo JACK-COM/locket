@@ -137,7 +137,7 @@ VERBS = [
     ("status", "", "where the command points and what it can reach", None),
     ("doctor", "[--ack]", "check every install step a machine can check, with the fix for each failure",
      "locket doctor                        check, including live hook runs abandoned or failed open\n"
-     "locket doctor --ack                  mark those hook-health counts seen, then check"),
+     "locket doctor --ack                  check, then mark the hook-health counts shown as seen"),
     ("mcp", "", "serve the checks over MCP on stdio, for a host without hooks", None),
     ("selftest", "", "both scripts' internal checks", None),
     ("version", "", "print the version (also --version, -V, -v)", None),
@@ -820,12 +820,15 @@ def _hook_timeout(settings, verb):
 
 
 def _hook_latency(cmd, stores, limit, verb="hook"):
-    """((store, seconds) for the slowest REAL store, (store, problem) for the first whose probe
-    swallowed an error, or None for either), timing a registered hook against its
+    """(worst, opened): `worst` is (store, seconds) for the slowest REAL store, `opened` is
+    (store, problem) for the first store whose probe failed open, and either may be None.
+    It times a registered hook against its
     timeout: `hook` on a new, novel file at each store's root, with an empty transcript so
     the run reaches the meaning-ranked question as well as lexical scoring, or `grepassist`
     on a prose search of the store. A hook that answers quickly by failing open is caught by
-    the second value: each probe runs with its own health record, read after it exits.
+    `opened`: each probe runs with its own health record, read for swallowed errors after it
+    exits, and a probe that crashes outright counts too. A probe killed at the limit is a
+    timeout, reported by `worst`, never a failure to open.
 
     ⚠ `_probe_hook` proves the hook fires on a throwaway store of one file, and a store that
     small cannot show a walk that scales with the host tree: the hook once took 25-35 s on
@@ -848,7 +851,7 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
     with tempfile.TemporaryDirectory() as scratch:
         transcript = Path(scratch) / "transcript.jsonl"
         transcript.write_text("")
-        for name, root in sorted(stores.items()):
+        for i, (name, root) in enumerate(sorted(stores.items())):
             root = Path(root)
             try:
                 if root not in hosts and not any(next(memscan._walk_files(r), None) is not None
@@ -864,10 +867,13 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
                                   "tool_name": "Write" if verb == "hook" else "Grep",
                                   "session_id": "locket-doctor-latency", "cwd": str(root),
                                   "transcript_path": str(transcript), "tool_input": ti})
-            health = Path(scratch) / f"health-{len(name)}-{abs(hash(name))}"
-            _r, secs = _run_hook(cmd, payload, limit, LOCKET_GREPASSIST_LOG=os.devnull,
-                                 LOCKET_HEALTH_DIR=str(health))
-            _rec, problems = memscan.health_report(health)
+            health = Path(scratch) / f"health-{i}"
+            r, secs = _run_hook(cmd, payload, limit, LOCKET_GREPASSIST_LOG=os.devnull,
+                                LOCKET_HEALTH_DIR=str(health))
+            _rec, problems = memscan.health_report(health, fold=False, kinds=("errors",))
+            if r is not None and (r.returncode not in (0, 2) or "Traceback" in r.stderr):
+                last = (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1][:120]
+                problems = [f"the hook crashed ({last}), so the call ran unchecked"] + problems
             if problems and opened is None:
                 opened = (name, problems[0])
             if worst is None or secs > worst[1]:
@@ -1340,6 +1346,177 @@ def _wants_help(verb, rest):
     return "help" in (rest[1:] if verb == "find" else rest) and not Path("help").exists()
 
 
+def _selftest_all():
+    """Every selftest, with hook health pointed at a throwaway directory for the whole run,
+    so a hook a test spawns never writes the live record; restored on the way out."""
+    import tempfile
+    before = os.environ.get("LOCKET_HEALTH_DIR")
+    with tempfile.TemporaryDirectory() as t:
+        os.environ["LOCKET_HEALTH_DIR"] = str(Path(t) / "hook-health")
+        try:
+            return _selftest_body()
+        finally:
+            if before is None:
+                os.environ.pop("LOCKET_HEALTH_DIR", None)
+            else:
+                os.environ["LOCKET_HEALTH_DIR"] = before
+
+
+def _selftest_body():
+    rc = memscan.main(["memscan.py", "selftest"])
+    if not rc:                          # doctor's probe: fires on a live hook, silent on a dead one
+        live = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'memscan.py'))} hook"
+        assert _probe_hook(live) is True, "doctor's probe does not fire through this memscan.py"
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            cfg = Path(t) / "settings.json"
+            py = shlex.quote(sys.executable)
+            cfg.write_text(json.dumps({"hooks": {
+                "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command",
+                    "command": f"{py} {shlex.quote(str(HERE / 'locket.py'))} bashguard"}]}],
+                "SessionEnd": [{"hooks": [{"type": "command", "command": "/nonexistent/bin/locket usage hook"}]}],
+                "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{py} /nonexistent/memscan.py trigger"}]}],
+            }}))
+            dead = {ev for ev, _c, _w in _dead_hooks(cfg)}
+            assert dead == {"SessionEnd", "UserPromptSubmit"}, \
+                f"doctor misread which entries are dead: {_dead_hooks(cfg)}"
+        assert _probe_hook("true") is False, "doctor's probe reads a silent command as firing"
+        # doctor's latency check: each entry's own timeout, the default where it names none,
+        # a timeout reported as a fail, an empty store skipped, the grepassist log kept out
+        with tempfile.TemporaryDirectory() as t:
+            cfg = Path(t) / "settings.json"
+            cfg.write_text(json.dumps({"hooks": {"PreToolUse": [
+                {"matcher": "Write|Edit", "hooks": [{"type": "command", "timeout": 7.5,
+                                                     "command": "/opt/x/bin/locket hook"}]},
+                {"matcher": "Grep|Bash", "hooks": [{"type": "command", "command": "/opt/x/bin/locket grepassist"}]},
+                {"matcher": "Bash", "hooks": [{"type": "command", "timeout": True,
+                                               "command": "/opt/x/bin/locket bashguard"}]}]}}))
+            assert _hook_timeout(cfg, "hook") == 7.5, _hook_entries(cfg)
+            assert _hook_timeout(cfg, "grepassist") == CLAUDE_HOOK_DEFAULT_TIMEOUT
+            assert _hook_timeout(cfg, "bashguard") == CLAUDE_HOOK_DEFAULT_TIMEOUT, "a bool is not a timeout"
+            for bad in (0, -5, float("inf"), 10 ** 400, "10"):
+                assert _usable_timeout(bad) == CLAUDE_HOOK_DEFAULT_TIMEOUT, f"{bad!r} read as a timeout"
+            assert _usable_timeout(1e9) == 600.0, "a huge timeout leaves doctor unbounded"
+            assert _registered_hooks(cfg)["hook"] == "/opt/x/bin/locket hook"
+            cfg.write_text("{not json")
+            assert _registered_hooks(cfg) is None and _hook_timeout(cfg, "hook") == CLAUDE_HOOK_DEFAULT_TIMEOUT
+            full, empty = Path(t) / "full", Path(t) / "empty"
+            full.mkdir(); empty.mkdir()
+            (full / "a.md").write_text("A fact the latency probe never reads.\n")
+            assert _hook_latency("true", {"empty": empty}, 5) == (None, None), "an empty store is timed"
+            fast, _o = _hook_latency("true", {"empty": empty, "full": full}, 5)
+            assert fast and fast[0] == "full" and fast[1] < 5, fast
+            slow, _o = _hook_latency("sleep 3", {"full": full}, 1)
+            assert slow == ("full", 1.0), f"a hook past its timeout is not reported at the limit: {slow}"
+            quiet, _o = _hook_latency(f'[ "$LOCKET_GREPASSIST_LOG" = {shlex.quote(os.devnull)} ] || sleep 3',
+                                  {"full": full}, 1, "grepassist")
+            assert quiet[1] < 1, "the grepassist probe writes to the real log"
+            swallow = (f"{py} -c " + shlex.quote(f"import sys; sys.path.insert(0, {str(HERE)!r}); import memscan; "
+                                                 "memscan.health_error('hook', 'lexical', ValueError())"))
+            _w, opened = _hook_latency(swallow, {"full": full}, 5)
+            assert opened and opened[0] == "full" and "ValueError in lexical" in opened[1], \
+                f"a hook that fails open quickly passed doctor's latency check: {opened}"
+            crash = f"{py} -c " + shlex.quote("raise SystemExit(1)")
+            _w, opened = _hook_latency(crash, {"full": full}, 5)
+            assert opened and "crashed" in opened[1], f"a crashing hook passed: {opened}"
+            hang = (f"{py} -c " + shlex.quote(f"import sys, time; sys.path.insert(0, {str(HERE)!r}); import memscan\n"
+                                              "with memscan.HookRun('hook'): time.sleep(5)"))
+            worst, opened = _hook_latency(hang, {"full": full}, 1)
+            assert worst == ("full", 1.0) and opened is None, \
+                f"a probe killed at its timeout read as failing open: {worst} {opened}"
+        assert _probe_hook(live, codex=True) is True, \
+            "doctor's Codex probe does not fire through a patch into this memscan.py"
+        merged = _add_codex_hooks({})
+        assert "usage (SessionEnd)" not in merged and {"hook", "bashguard", "grepassist"} <= set(merged), merged
+        data = {}
+        _add_codex_hooks(data)
+        assert _add_codex_hooks(data) == [], "a second --codex added its hooks again"
+        assert "SessionEnd" not in data["hooks"], "Codex got the usage recorder, which cannot read its sessions"
+        hk = lambda key, cmd, st: {"key": key, "command": cmd, "trustStatus": st}
+        reply = {"id": 2, "result": {"data": [{"cwd": "/x", "warnings": [], "errors": [], "hooks": [
+            hk("/c/hooks.json:pre_tool_use:0:0", "/opt/homebrew/bin/locket hook", "trusted"),
+            hk("/c/hooks.json:pre_tool_use:1:0", "/opt/homebrew/bin/locket bashguard", "modified"),
+            hk("/c/hooks.json:pre_tool_use:2:0", "/usr/bin/other-tool", "untrusted")]}]}}
+        assert _codex_trust_from(reply) == {"/c/hooks.json:pre_tool_use:0:0": "trusted",
+                                            "/c/hooks.json:pre_tool_use:1:0": "modified"}, \
+            "doctor misread hooks/list, or counted a hook that is not Locket's"
+        assert _codex_trust_from({"id": 2, "error": {"code": -32601}}) is None, "an error reply reads as trust"
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t); k0, k1 = (f"{home}/hooks.json:pre_tool_use:{i}:0" for i in (0, 1))
+            tbl = lambda k: f'[hooks.state."{k}"]\ntrusted_hash = "sha256:00"\n\n'
+            (home / "config.toml").write_text('model = "x"\n\n[hooks.state]\n\n' + tbl(k0))
+            (home / "ollama-launch.config.toml").write_text(tbl(k0) + tbl(k1) + tbl("/elsewhere/hooks.json:x:0:0"))
+            assert _profile_trust_gap(home, [k1]) == {home / "ollama-launch.config.toml": [k1]}, \
+                "the profile trap's gap is misread: only the keys Codex reported lapsed count"
+            assert _profile_trust_gap(home, [k0 + "9"]) == {}, "a lapsed key no profile holds reads as a gap"
+            # _codex_trust against stub servers: one that answers, one that quits on EOF, one that hangs
+            real_path, stub = os.environ["PATH"], home / "codex"
+            os.environ["PATH"] = f"{home}{os.pathsep}{real_path}"
+            answer = {"result": {"data": [{"hooks": [{"key": k0, "command": "locket hook", "trustStatus": "trusted"}]}]}}
+            try:
+                for body, want in (
+                    ("import json,sys\nfor l in sys.stdin:\n m=json.loads(l)\n if m.get('id')==1: print(json.dumps({'id':1,'result':{}}),flush=True)\n"
+                     f" if m.get('id')==2: print(json.dumps({{'id':2,'method':'x'}}),flush=True); print(json.dumps(dict(id=2,**{answer!r})),flush=True)\n",
+                     {k0: "trusted"}),
+                    ("import sys\nsys.stdin.readline()\n", None),
+                    ("import time\ntime.sleep(30)\n", None)):
+                    stub.write_text(f"#!{sys.executable}\n{body}"); stub.chmod(0o755)
+                    got = _codex_trust(timeout=2)
+                    assert got == want, f"_codex_trust read {got!r} from a stub that should give {want!r}"
+            finally:
+                os.environ["PATH"] = real_path
+        live_trigger = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'locket.py'))} trigger"
+        assert _probe_trigger(live_trigger) is True, "doctor's trigger probe does not fire through this locket.py"
+        assert _probe_trigger("true") is False, "doctor's trigger probe reads a silent command as firing"
+        assert _probe_trigger(live_trigger, hermes=True) is True, \
+            "doctor's trigger probe does not fire through this locket.py on Hermes"
+        assert _probe_trigger("echo '[doctor-probe] probe'", hermes=True) is not True, \
+            "doctor's Hermes trigger probe reads a call that was not refused as firing"
+        assert _probe_trigger("exit 2", hermes=True) is False, \
+            "doctor's Hermes trigger probe reads a bare refusal as firing"
+        yaml = ('model: x\nhooks:\n  pre_tool_call:\n    - command: "/opt/homebrew/bin/locket hook"\n'
+                '      matcher:\n        nested: x\n    - command: /opt/homebrew/bin/locket trigger\n'
+                '  pre_llm_call:\n    - command: "/opt/homebrew/bin/locket trigger"\n'
+                'other:\n  pre_tool_call:\n    - command: "locket bashguard"\n')
+        assert _hermes_hooks(yaml) == {"pre_tool_call": ["/opt/homebrew/bin/locket hook",
+                                                         "/opt/homebrew/bin/locket trigger"],
+                                       "pre_llm_call": ["/opt/homebrew/bin/locket trigger"]}, _hermes_hooks(yaml)
+        assert isinstance(_probe_hook(f"{shlex.quote(sys.executable)} /nonexistent/memscan.py hook"), str), \
+            "doctor's probe reads a missing script as firing"
+        import contextlib
+        import io
+        for form in (["audit", "council", "-h"], ["audit", "help"], ["help", "audit"], ["help", "pointers"],
+                     ["dupes", "x", "--help"], ["find", "a statement", "help"]):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = main(["locket", *form])
+            assert code == 0 and out.getvalue().startswith(f"usage: locket {form[1] if form[0] == 'help' else form[0]}"), \
+                f"`locket {' '.join(form)}` did not print that command's help"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["locket", "help", "manifest"])
+        assert code == 0 and out.getvalue().startswith("MANIFEST\n") and "\nMODES" not in out.getvalue() \
+            and "belongs_to" in out.getvalue(), "`locket help manifest` is not the MANIFEST section alone"
+        import tempfile
+        here = os.getcwd()
+        with tempfile.TemporaryDirectory() as t:
+            os.chdir(t)
+            try:
+                assert _wants_help("init", ["help"]), "a bare help with nothing named help is not help"
+                os.mkdir("help")
+                assert not _wants_help("init", ["help"]), "a directory named help was read as a help request"
+                assert not _wants_help("hook", ["-h"]) and not _wants_help("find", ["help"]), \
+                    "a hook verb or find's statement was read as a help request"
+            finally:
+                os.chdir(here)
+        _selftest_uninstall()
+        import trigger
+        import usage
+        import configure
+        rc = trigger.selftest() or usage.selftest() or configure.selftest()
+    return rc or _memfind().main(["memfind.py", "--selftest"])
+
+
 def main(argv):
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
         _parser()[0].print_help()
@@ -1392,150 +1569,8 @@ def main(argv):
     if verb in FIND:
         return _memfind().main(["memfind.py", FIND[verb], *rest])
     if verb == "selftest":
-        rc = memscan.main(["memscan.py", "selftest"])
-        if not rc:                          # doctor's probe: fires on a live hook, silent on a dead one
-            live = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'memscan.py'))} hook"
-            assert _probe_hook(live) is True, "doctor's probe does not fire through this memscan.py"
-            import tempfile
-            with tempfile.TemporaryDirectory() as t:
-                cfg = Path(t) / "settings.json"
-                py = shlex.quote(sys.executable)
-                cfg.write_text(json.dumps({"hooks": {
-                    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command",
-                        "command": f"{py} {shlex.quote(str(HERE / 'locket.py'))} bashguard"}]}],
-                    "SessionEnd": [{"hooks": [{"type": "command", "command": "/nonexistent/bin/locket usage hook"}]}],
-                    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{py} /nonexistent/memscan.py trigger"}]}],
-                }}))
-                dead = {ev for ev, _c, _w in _dead_hooks(cfg)}
-                assert dead == {"SessionEnd", "UserPromptSubmit"}, \
-                    f"doctor misread which entries are dead: {_dead_hooks(cfg)}"
-            assert _probe_hook("true") is False, "doctor's probe reads a silent command as firing"
-            # doctor's latency check: each entry's own timeout, the default where it names none,
-            # a timeout reported as a fail, an empty store skipped, the grepassist log kept out
-            with tempfile.TemporaryDirectory() as t:
-                cfg = Path(t) / "settings.json"
-                cfg.write_text(json.dumps({"hooks": {"PreToolUse": [
-                    {"matcher": "Write|Edit", "hooks": [{"type": "command", "timeout": 7.5,
-                                                         "command": "/opt/x/bin/locket hook"}]},
-                    {"matcher": "Grep|Bash", "hooks": [{"type": "command", "command": "/opt/x/bin/locket grepassist"}]},
-                    {"matcher": "Bash", "hooks": [{"type": "command", "timeout": True,
-                                                   "command": "/opt/x/bin/locket bashguard"}]}]}}))
-                assert _hook_timeout(cfg, "hook") == 7.5, _hook_entries(cfg)
-                assert _hook_timeout(cfg, "grepassist") == CLAUDE_HOOK_DEFAULT_TIMEOUT
-                assert _hook_timeout(cfg, "bashguard") == CLAUDE_HOOK_DEFAULT_TIMEOUT, "a bool is not a timeout"
-                for bad in (0, -5, float("inf"), 10 ** 400, "10"):
-                    assert _usable_timeout(bad) == CLAUDE_HOOK_DEFAULT_TIMEOUT, f"{bad!r} read as a timeout"
-                assert _usable_timeout(1e9) == 600.0, "a huge timeout leaves doctor unbounded"
-                assert _registered_hooks(cfg)["hook"] == "/opt/x/bin/locket hook"
-                cfg.write_text("{not json")
-                assert _registered_hooks(cfg) is None and _hook_timeout(cfg, "hook") == CLAUDE_HOOK_DEFAULT_TIMEOUT
-                full, empty = Path(t) / "full", Path(t) / "empty"
-                full.mkdir(); empty.mkdir()
-                (full / "a.md").write_text("A fact the latency probe never reads.\n")
-                assert _hook_latency("true", {"empty": empty}, 5) == (None, None), "an empty store is timed"
-                fast, _o = _hook_latency("true", {"empty": empty, "full": full}, 5)
-                assert fast and fast[0] == "full" and fast[1] < 5, fast
-                slow, _o = _hook_latency("sleep 3", {"full": full}, 1)
-                assert slow == ("full", 1.0), f"a hook past its timeout is not reported at the limit: {slow}"
-                quiet, _o = _hook_latency(f'[ "$LOCKET_GREPASSIST_LOG" = {shlex.quote(os.devnull)} ] || sleep 3',
-                                      {"full": full}, 1, "grepassist")
-                assert quiet[1] < 1, "the grepassist probe writes to the real log"
-                swallow = (f"{py} -c " + shlex.quote(f"import sys; sys.path.insert(0, {str(HERE)!r}); import memscan; "
-                                                     "memscan.health_error('hook', 'lexical', ValueError())"))
-                _w, opened = _hook_latency(swallow, {"full": full}, 5)
-                assert opened and opened[0] == "full" and "ValueError in lexical" in opened[1], \
-                    f"a hook that fails open quickly passed doctor's latency check: {opened}"
-            assert _probe_hook(live, codex=True) is True, \
-                "doctor's Codex probe does not fire through a patch into this memscan.py"
-            merged = _add_codex_hooks({})
-            assert "usage (SessionEnd)" not in merged and {"hook", "bashguard", "grepassist"} <= set(merged), merged
-            data = {}
-            _add_codex_hooks(data)
-            assert _add_codex_hooks(data) == [], "a second --codex added its hooks again"
-            assert "SessionEnd" not in data["hooks"], "Codex got the usage recorder, which cannot read its sessions"
-            hk = lambda key, cmd, st: {"key": key, "command": cmd, "trustStatus": st}
-            reply = {"id": 2, "result": {"data": [{"cwd": "/x", "warnings": [], "errors": [], "hooks": [
-                hk("/c/hooks.json:pre_tool_use:0:0", "/opt/homebrew/bin/locket hook", "trusted"),
-                hk("/c/hooks.json:pre_tool_use:1:0", "/opt/homebrew/bin/locket bashguard", "modified"),
-                hk("/c/hooks.json:pre_tool_use:2:0", "/usr/bin/other-tool", "untrusted")]}]}}
-            assert _codex_trust_from(reply) == {"/c/hooks.json:pre_tool_use:0:0": "trusted",
-                                                "/c/hooks.json:pre_tool_use:1:0": "modified"}, \
-                "doctor misread hooks/list, or counted a hook that is not Locket's"
-            assert _codex_trust_from({"id": 2, "error": {"code": -32601}}) is None, "an error reply reads as trust"
-            with tempfile.TemporaryDirectory() as t:
-                home = Path(t); k0, k1 = (f"{home}/hooks.json:pre_tool_use:{i}:0" for i in (0, 1))
-                tbl = lambda k: f'[hooks.state."{k}"]\ntrusted_hash = "sha256:00"\n\n'
-                (home / "config.toml").write_text('model = "x"\n\n[hooks.state]\n\n' + tbl(k0))
-                (home / "ollama-launch.config.toml").write_text(tbl(k0) + tbl(k1) + tbl("/elsewhere/hooks.json:x:0:0"))
-                assert _profile_trust_gap(home, [k1]) == {home / "ollama-launch.config.toml": [k1]}, \
-                    "the profile trap's gap is misread: only the keys Codex reported lapsed count"
-                assert _profile_trust_gap(home, [k0 + "9"]) == {}, "a lapsed key no profile holds reads as a gap"
-                # _codex_trust against stub servers: one that answers, one that quits on EOF, one that hangs
-                real_path, stub = os.environ["PATH"], home / "codex"
-                os.environ["PATH"] = f"{home}{os.pathsep}{real_path}"
-                answer = {"result": {"data": [{"hooks": [{"key": k0, "command": "locket hook", "trustStatus": "trusted"}]}]}}
-                try:
-                    for body, want in (
-                        ("import json,sys\nfor l in sys.stdin:\n m=json.loads(l)\n if m.get('id')==1: print(json.dumps({'id':1,'result':{}}),flush=True)\n"
-                         f" if m.get('id')==2: print(json.dumps({{'id':2,'method':'x'}}),flush=True); print(json.dumps(dict(id=2,**{answer!r})),flush=True)\n",
-                         {k0: "trusted"}),
-                        ("import sys\nsys.stdin.readline()\n", None),
-                        ("import time\ntime.sleep(30)\n", None)):
-                        stub.write_text(f"#!{sys.executable}\n{body}"); stub.chmod(0o755)
-                        got = _codex_trust(timeout=2)
-                        assert got == want, f"_codex_trust read {got!r} from a stub that should give {want!r}"
-                finally:
-                    os.environ["PATH"] = real_path
-            live_trigger = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'locket.py'))} trigger"
-            assert _probe_trigger(live_trigger) is True, "doctor's trigger probe does not fire through this locket.py"
-            assert _probe_trigger("true") is False, "doctor's trigger probe reads a silent command as firing"
-            assert _probe_trigger(live_trigger, hermes=True) is True, \
-                "doctor's trigger probe does not fire through this locket.py on Hermes"
-            assert _probe_trigger("echo '[doctor-probe] probe'", hermes=True) is not True, \
-                "doctor's Hermes trigger probe reads a call that was not refused as firing"
-            assert _probe_trigger("exit 2", hermes=True) is False, \
-                "doctor's Hermes trigger probe reads a bare refusal as firing"
-            yaml = ('model: x\nhooks:\n  pre_tool_call:\n    - command: "/opt/homebrew/bin/locket hook"\n'
-                    '      matcher:\n        nested: x\n    - command: /opt/homebrew/bin/locket trigger\n'
-                    '  pre_llm_call:\n    - command: "/opt/homebrew/bin/locket trigger"\n'
-                    'other:\n  pre_tool_call:\n    - command: "locket bashguard"\n')
-            assert _hermes_hooks(yaml) == {"pre_tool_call": ["/opt/homebrew/bin/locket hook",
-                                                             "/opt/homebrew/bin/locket trigger"],
-                                           "pre_llm_call": ["/opt/homebrew/bin/locket trigger"]}, _hermes_hooks(yaml)
-            assert isinstance(_probe_hook(f"{shlex.quote(sys.executable)} /nonexistent/memscan.py hook"), str), \
-                "doctor's probe reads a missing script as firing"
-            import contextlib
-            import io
-            for form in (["audit", "council", "-h"], ["audit", "help"], ["help", "audit"], ["help", "pointers"],
-                         ["dupes", "x", "--help"], ["find", "a statement", "help"]):
-                out = io.StringIO()
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-                    code = main(["locket", *form])
-                assert code == 0 and out.getvalue().startswith(f"usage: locket {form[1] if form[0] == 'help' else form[0]}"), \
-                    f"`locket {' '.join(form)}` did not print that command's help"
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                code = main(["locket", "help", "manifest"])
-            assert code == 0 and out.getvalue().startswith("MANIFEST\n") and "\nMODES" not in out.getvalue() \
-                and "belongs_to" in out.getvalue(), "`locket help manifest` is not the MANIFEST section alone"
-            import tempfile
-            here = os.getcwd()
-            with tempfile.TemporaryDirectory() as t:
-                os.chdir(t)
-                try:
-                    assert _wants_help("init", ["help"]), "a bare help with nothing named help is not help"
-                    os.mkdir("help")
-                    assert not _wants_help("init", ["help"]), "a directory named help was read as a help request"
-                    assert not _wants_help("hook", ["-h"]) and not _wants_help("find", ["help"]), \
-                        "a hook verb or find's statement was read as a help request"
-                finally:
-                    os.chdir(here)
-            _selftest_uninstall()
-            import trigger
-            import usage
-            import configure
-            rc = trigger.selftest() or usage.selftest() or configure.selftest()
-        return rc or _memfind().main(["memfind.py", "--selftest"])
+        return _selftest_all()
+
     if verb == "install":
         return cmd_install(rest)
     if verb == "uninstall":
@@ -1543,9 +1578,11 @@ def main(argv):
     if verb == "status":
         return cmd_status()
     if verb == "doctor":
+        rc = cmd_doctor()                   # shown first, so an ack never hides what it marks seen
         if "--ack" in rest:
-            memscan.health_ack()
-        return cmd_doctor()
+            print("hook health: " + ("the counts above are marked seen" if memscan.health_ack()
+                                     else "could not mark the counts seen (the record was busy); run it again"))
+        return rc
     if verb == "mcp":                       # the Desktop server, reached through the command
         import runpy
         sys.argv = [str(HERE / "locket_mcp.py"), *rest]
