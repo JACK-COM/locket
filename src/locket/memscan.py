@@ -318,16 +318,19 @@ def _label(root):
     return name if isinstance(name, str) and name else Path(root).name
 
 
-def corpus_key(root, path):
+def corpus_key(root, path, roots=None):
     """The corpus-relative key of a file: its path under `root`, or under a joined
     store as `<label>/<path>`. One key per file across every mode and the index,
-    because a joined store's files are not under the root on disk."""
+    because a joined store's files are not under the root on disk. A loop over a
+    store's files passes `roots=roots_of(root)` once: each call otherwise re-reads
+    the registry and every manifest, which was 1.9 of a 2.6 s hook on a store
+    whose files sit mostly in a joined auto-memory."""
     root, path = Path(root), Path(path)
     try:
         return str(path.relative_to(root))
     except ValueError:
         pass
-    for r in roots_of(root)[1:]:
+    for r in (roots_of(root) if roots is None else roots)[1:]:
         try:
             return f"{_label(r)}/{path.relative_to(r)}"
         except ValueError:
@@ -847,38 +850,62 @@ def _own_md(root, pattern="*.md", honor_excluded_files=True):
     `*.csv`), and a sweep that must see a file the manifest hides from claims
     passes `honor_excluded_files=False`."""
     root = Path(root)
-    skip = settings(root)["excluded_dirs"]
-    # A subdirectory carrying its own manifest is a corpus of its own: `_root_of`
-    # resolves a write inside it to the inner store, so counting its files here
-    # too would score them against two stores and report a file against itself
-    # in `across`. `init` refuses to nest, but a manifest written by hand can.
-    nested = {m.parent.relative_to(root) for name in (MANIFEST, OLD_MANIFEST)
-              for m in root.rglob(name) if m.parent != root}
-    # A listed store below this one (a project memory under the council home
-    # carries no manifest) belongs to itself, whatever the member list says.
-    nested |= {r.relative_to(root) for r in _raw_corpora().values()
-               if r != root and root in r.parents}
-    return sorted(p for p in _member_md(root, pattern)
-                  if not any(q.name in skip or q.name.startswith(".") or q in nested
-                             for q in p.relative_to(root).parents)
-                  and not (honor_excluded_files and excluded_file(root, p)))
+    return sorted(p for p in _walk_files(root, pattern)
+                  if not (honor_excluded_files and excluded_file(root, p)))
 
 
-def _member_md(root, pattern="*.md"):
-    """Every markdown file under the root's member directories, plus the root's
-    own. Walking only the members is what keeps a host store cheap: the council
-    home holds session transcripts and plugin trees that a bare rglob would
-    walk on every write-time hook."""
+def _corpus_dirs(root):
+    """Every directory one store's own walk enters: the root, then each member
+    directory and everything below it, never descending into a dot-directory,
+    an excluded directory or a nested store. Yields (dir, filenames).
+
+    ⚠ Pruned on the way DOWN, never filtered after: the hook pays this walk on
+    every memory write under a 10-second budget, and a host home holds tens of
+    thousands of directories of session and job state beside a corpus of a few
+    hundred files. A walk that enters them and discards the results afterwards
+    cost 25 s on one council store and the gate failed open. Anything that asks
+    "what is under this store" walks through here, so what is skipped stays one
+    decision.
+
+    A subdirectory carrying its own manifest is a corpus of its own: `_root_of`
+    resolves a write inside it to the inner store, so its files are not this
+    store's. `init` refuses to nest, but a manifest written by hand can. A
+    listed store below this one (a project memory under the council home carries
+    no manifest) belongs to itself too, whatever the member list says."""
     root = Path(root)
-    mem = settings(root)["members"]
+    s = settings(root)
+    skip, mem = s["excluded_dirs"], s["members"]
+    listed = {str(r) for r in _raw_corpora().values() if r != root and root in r.parents}
+
+    def entered(name):
+        return name not in skip and not name.startswith(".")
+
     if mem is None:
-        yield from root.rglob(pattern)
-        return
-    yield from root.glob(pattern)
-    for name in sorted(mem):
-        d = root / name
-        if d.is_dir():
-            yield from d.rglob(pattern)
+        tops = [root]
+    else:
+        # The root's own files count; its other directories are host state.
+        try:
+            yield root, sorted(e.name for e in os.scandir(root) if e.is_file())
+        except OSError:
+            return
+        tops = [root / n for n in sorted(mem) if entered(n) and (root / n).is_dir()]
+    for top in tops:
+        for dirpath, dirnames, filenames in os.walk(top):
+            if dirpath != str(root) and (dirpath in listed or MANIFEST in filenames
+                                         or OLD_MANIFEST in filenames):
+                dirnames[:] = []
+                continue
+            dirnames[:] = sorted(d for d in dirnames if entered(d))
+            yield Path(dirpath), filenames
+
+
+def _walk_files(root, pattern="*.md"):
+    """Every file under one store matching `pattern`, by the walk above. The
+    match follows the platform's case rule, as `Path.glob` does."""
+    for d, names in _corpus_dirs(root):
+        for n in names:
+            if fnmatch.fnmatch(n, pattern):
+                yield d / n
 
 
 def excluded_file(root, path):
@@ -975,7 +1002,8 @@ def corpus(root, csv=True):
     restated a markdown sentence. `memfind` passes `csv=False` and indexes the
     rows as its own per-row units instead, or they would be embedded twice.
     """
-    docs = {corpus_key(root, p): strip(p.read_text(errors="ignore"))
+    rs = roots_of(root)
+    docs = {corpus_key(root, p, rs): strip(p.read_text(errors="ignore"))
             for p in md_files(root)}
     if csv:
         grouped = defaultdict(list)
@@ -1021,22 +1049,17 @@ def _archive_md(root):
 
 
 def _own_archive_md(root):
+    # The corpus walk prunes `archive` itself, so find each one as a child of a
+    # directory the walk enters, then take everything below it. A host root's own
+    # `archive/` is host state like its other directories, not a member's archive.
     root = Path(root)
-    s = settings(root)
-    others = s["excluded_dirs"] - {"archive"}
-    tops = [root] if s["members"] is None else [root / m for m in sorted(s["members"])]
-    for top in tops:
-        if not top.is_dir():
+    hosted = settings(root)["members"] is not None
+    for d, _ in _corpus_dirs(root):
+        if hosted and d == root:
             continue
-        for a in top.rglob("archive"):
-            if not a.is_dir():
-                continue
-            rel = a.relative_to(root).parts[:-1]
-            if any(q.startswith(".") or q in others for q in rel):
-                continue
-            if any(has_manifest(root / Path(*rel[:i + 1])) for i in range(len(rel))):
-                continue
-            yield from a.rglob("*.md")
+        a = d / "archive"
+        if a.is_dir() and not has_manifest(a):
+            yield from sorted(a.rglob("*.md"))
 
 
 def subtract_archived(added, arch):
@@ -1175,6 +1198,7 @@ def index_hooks(root):
     points into `memory/`."""
     out = []
     index_files = settings(root)["index_files"]
+    rs = roots_of(root)
     for p in md_files(root):
         if p.name not in index_files:
             continue
@@ -1184,7 +1208,7 @@ def index_hooks(root):
                 hook = m.group("hook").lstrip(" —-").strip()
                 if hook:
                     t = p.parent / m.group("target")
-                    out.append((corpus_key(root, p), corpus_key(root, t), m.group("title"), hook, t))
+                    out.append((corpus_key(root, p, rs), corpus_key(root, t, rs), m.group("title"), hook, t))
     return out
 
 
@@ -1327,8 +1351,12 @@ def project_dir_for(corpus_root):
 CLAUDE_SKIP = frozenset({
     "file-history", "projects", "plugins", "backups", "cache", "paste-cache",
     "shell-snapshots", "session-env", "debug", "history", "statsig", "todos",
-    "ide", "daemon", "tasks", "chrome",
+    "ide", "daemon", "tasks", "chrome", "jobs", "sessions", "state",
 })
+# A host home directory past this many subdirectories is reported by `code_index`,
+# because the skip list above is a denylist and a new host-state tree (`jobs/` grew
+# to 56,000 directories) otherwise only shows up as a slow `cites` run.
+LOUD_SUBTREE = 5000
 
 
 def code_roots(corpus_root):
@@ -1370,15 +1398,29 @@ def code_index(roots):
 
     Built up front rather than searched per citation: resolving fifty citations
     by fifty walks re-reads the tree fifty times.
+
+    A host home is walked whole minus CLAUDE_SKIP, so an authored directory added
+    later (`harness/`) is still searched. The cost of that denylist is that a new
+    host-state tree is walked too, so any top-level directory of a host home past
+    LOUD_SUBTREE subdirectories is named on stderr instead of costing time silently.
     """
     idx = defaultdict(list)
     for base, extra in roots:
+        sizes = Counter()
+        base_s = str(base)
         for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = [d for d in dirnames
-                           if d not in SKIP_DIRS and d not in extra
-                           and not d.startswith(".")]
+            # sorted, so the first hit `resolve_citation` reads is the same every run
+            dirnames[:] = sorted(d for d in dirnames
+                                 if d not in SKIP_DIRS and d not in extra
+                                 and not d.startswith("."))
+            if extra and dirpath != base_s:
+                sizes[os.path.relpath(dirpath, base_s).split(os.sep, 1)[0]] += 1
             for fn in filenames:
                 idx[fn].append(os.path.join(dirpath, fn))
+        for top, n in sorted(sizes.items()):
+            if n > LOUD_SUBTREE:
+                print(f"note: walked {n} directories under {Path(base) / top}; if it is host "
+                      "state rather than code, it belongs in memscan.CLAUDE_SKIP", file=sys.stderr)
     return idx
 
 
@@ -1498,7 +1540,8 @@ def across_pairs(stores, floor=PAIR_FLOOR):
     """
     holders, bodies, names = {}, {}, {}
     for k, root in sorted(stores.items()):
-        md = {corpus_key(root, p): str(p.resolve()) for p in md_files(root)}
+        rs = roots_of(root)
+        md = {corpus_key(root, p, rs): str(p.resolve()) for p in md_files(root)}
         csvs = {p.name: str(p.resolve()) for p, _, _ in csv_sources(root)}
         for name, body in corpus(root).items():
             if name in md:
@@ -2042,12 +2085,13 @@ def cmd_budget(root):
     """
     rows, ledgers, history = [], [], {}
     ledger_names = settings(root)["ledger_surfaces"]
+    rs = roots_of(root)
     for p in md_files(root):
         if p.name in ledger_names:           # chronology: length is the design, not a breach
-            ledgers.append(f"{p.stat().st_size // 1024}KB {corpus_key(root, p)}")
+            ledgers.append(f"{p.stat().st_size // 1024}KB {corpus_key(root, p, rs)}")
             continue
         txt = p.read_text(errors="ignore")
-        name = corpus_key(root, p)
+        name = corpus_key(root, p, rs)
         hits = [(i + 1, l.strip()[:110]) for i, l in enumerate(txt.splitlines())
                 if HISTORY_CLAUSE.search(l)]
         if hits:
@@ -2435,6 +2479,23 @@ def selftest():
     assert corpus_for(home / "memory/vault/v.md") == home / "memory/vault", "a nested store is its own"
     got = {str(q.relative_to(home)) for q in md_files(home)}
     assert got == {"CLAUDE.md", "memory/a.md", "rules/r.md"}, got
+    # Host state must not be ENTERED, not merely filtered out afterwards: a home's
+    # job and session trees ran to 120,000 directories, and a walk that visited
+    # them pushed the write hook past its timeout so the gate failed open. Every
+    # directory listing goes through os.scandir (os.walk and Path.glob alike).
+    (home / "plugins/deep/er/locket.json").parent.mkdir(parents=True, exist_ok=True)
+    (home / "plugins/deep/er/locket.json").write_text("{}\n")
+    scanned, real_scandir = [], os.scandir
+    def _spy(p="."):
+        scanned.append(Path(p)); return real_scandir(p)
+    os.scandir = _spy
+    try:
+        md_files(home); list(_archive_md(home)); list(_walk_files(home, "*.csv"))
+    finally:
+        os.scandir = real_scandir
+    strays = sorted({str(p.relative_to(home)) for p in scanned
+                     if home in p.parents and p.relative_to(home).parts[0] not in ("memory", "rules")})
+    assert not strays, f"the corpus walk entered host state: {strays}"
     assert any("superseded" in " ".join(ts) for ts in archived_claims(home)), \
         "provenance is read from the archive under a member, not root/archive alone"
     buf = _io.StringIO()

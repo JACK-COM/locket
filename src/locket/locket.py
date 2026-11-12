@@ -770,6 +770,62 @@ def _probe_hook(cmd, codex=False):
         shutil.rmtree(store, ignore_errors=True)
 
 
+def _hook_timeout(settings, verb, default=60):
+    """The timeout, in seconds, Claude Code gives the registered `verb` hook: the entry's own
+    `timeout`, else Claude Code's default for a command hook."""
+    try:
+        pre = json.loads(settings.read_text())["hooks"]["PreToolUse"]
+        for e in pre:
+            for h in e.get("hooks") or []:
+                if _is_locket_hook(str(h.get("command", "")), verb):
+                    return int(h.get("timeout") or default)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return default
+
+
+def _hook_latency(cmd, stores, limit, verb="hook"):
+    """(store, seconds) for the slowest REAL store, timing a registered hook: `hook` on a new,
+    novel file at each store's root (the full path, lexical scoring then the 2e ranking), or
+    `grepassist` on a prose search of the store.
+
+    ⚠ `_probe_hook` proves the hook fires on a throwaway store of one file, and a store that
+    small cannot show a walk that scales with the host tree. On a home of 120,000 directories
+    the hook took 25-35 s against a 10 s timeout and the probe still reported ok, while every
+    real write landed unchecked. Only the real stores can show this. Nothing is written: the
+    hook is PreToolUse and decides on the payload. None when no store has a file to score."""
+    import subprocess, time as _t
+    body = ("Locket doctor latency probe " + os.urandom(6).hex() + ": a novel paragraph that "
+            "names no fact any store holds, long enough to reach every stage of the write gate, "
+            "including the meaning-ranked question asked once per session. ") * 2
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_AUTONOMOUS"}
+    worst = None
+    for name, root in sorted(stores.items()):
+        try:
+            if not memscan.md_files(root):
+                continue
+        except OSError:
+            continue
+        # `grepassist` is timed on a prose search of the store, the shape it ranks neighbours for
+        ti = ({"file_path": str(Path(root) / "zz-locket-doctor-probe.md"), "content": body}
+              if verb == "hook" else {"pattern": "where does this store say the gate fails open",
+                                      "path": str(root)})
+        payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Write" if verb == "hook" else "Grep",
+                              "session_id": "locket-doctor-latency", "cwd": str(root), "tool_input": ti})
+        t0 = _t.monotonic()
+        try:
+            subprocess.run(cmd, shell=True, input=payload, capture_output=True, text=True,
+                           timeout=limit, env=env)
+            secs = _t.monotonic() - t0
+        except subprocess.TimeoutExpired:
+            secs = float(limit)
+        if worst is None or secs > worst[1]:
+            worst = (name, secs)
+        if secs >= limit:               # one store past the timeout is the finding; stop paying
+            break
+    return worst
+
+
 def _codex_trust_from(reply):
     """{key: trustStatus} for the Locket entries in a `hooks/list` reply, or None when it is not one."""
     try:
@@ -1030,6 +1086,25 @@ def cmd_doctor():
                 probe = _probe_hook(hooks["hook"])
                 if probe is True:
                     row("ok", "claude hooks", "registered, and the write hook fires on a known fork")
+                    for verb, what, lost in (("hook", "the write hook", "the write lands unchecked"),
+                                             ("grepassist", "grepassist", "the search runs without its neighbours")):
+                        if verb not in hooks:
+                            continue
+                        limit = _hook_timeout(settings, verb)
+                        slow = _hook_latency(hooks[verb], stores, limit, verb)
+                        if slow is None:
+                            continue
+                        name, secs = slow
+                        label = f"{verb} latency"
+                        if secs >= limit:
+                            row("fail", label, f"{what} takes {secs:.0f}s or more on {name}, past its {limit}s "
+                                f"timeout: Claude Code abandons it and {lost}",
+                                "brew upgrade locket; if current, the store's walk is entering host state")
+                        elif secs > limit / 2:
+                            row("warn", label, f"{what} takes {secs:.1f}s on {name}, over half its {limit}s "
+                                f"timeout; past it, {lost}", "find what the store's walk enters that it should not")
+                        else:
+                            row("ok", label, f"{secs:.1f}s on the slowest store ({name}), inside its {limit}s timeout")
                 else:
                     row("fail", "claude hooks", "registered, but the write hook " +
                         ("stayed silent on a known fork" if probe is False else f"failed: {probe}"),

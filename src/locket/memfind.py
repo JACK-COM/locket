@@ -112,17 +112,18 @@ def corpus_fingerprint(root):
     # Keyed by corpus-relative path, never basename: a store with depth holds
     # many SKILL.md and MEMORY.md, and a basename key silently overwrote them,
     # leaving stale detection blind to every file but the last of each name.
-    fp = {memscan.corpus_key(root, p): [p.stat().st_mtime_ns, p.stat().st_size]
+    rs = memscan.roots_of(root)
+    fp = {memscan.corpus_key(root, p, rs): [p.stat().st_mtime_ns, p.stat().st_size]
           for p in sorted(memscan.md_files(root))}
     # The registered CSVs and the manifest naming them, so editing either one, or
     # adding a source, invalidates the index exactly as editing a memory file does.
     for pth, _, _ in csv_sources(root):
         fp[pth.name] = [pth.stat().st_mtime_ns, pth.stat().st_size]
-    for r in memscan.roots_of(root):            # a joined store's manifest counts too
+    for r in rs:                                # a joined store's manifest counts too
         for name in (MANIFEST, memscan.MANIFEST, memscan.OLD_MANIFEST):
             man = Path(r) / name
             if man.exists():
-                fp[memscan.corpus_key(root, man)] = [man.stat().st_mtime_ns, man.stat().st_size]
+                fp[memscan.corpus_key(root, man, rs)] = [man.stat().st_mtime_ns, man.stat().st_size]
     # The splitter's version: a change to how a file becomes claims re-embeds
     # every file once, where the per-file reuse below would keep stale claims
     # under an unchanged file forever.
