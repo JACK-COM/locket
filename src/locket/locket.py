@@ -671,6 +671,19 @@ _PROBE = ("The doctor probe paragraph states one durable fact about a harbour: t
 CLAUDE_HOOK_DEFAULT_TIMEOUT = 60
 
 
+def _usable_timeout(t):
+    """A hook entry's timeout in seconds when it is a finite positive number, else the
+    default; capped, so a huge value cannot leave doctor's probe unbounded."""
+    import math
+    try:
+        t = float(t) if isinstance(t, (int, float)) and not isinstance(t, bool) else None
+    except OverflowError:
+        t = None
+    if t is None or not math.isfinite(t) or t <= 0:
+        return CLAUDE_HOOK_DEFAULT_TIMEOUT
+    return min(t, 600.0)
+
+
 def _hook_entries(settings):
     """{verb: (command, timeout seconds)} for the Locket PreToolUse hooks in a Claude Code
     settings.json, or None when the file is not readable JSON. An entry naming no usable
@@ -685,9 +698,7 @@ def _hook_entries(settings):
     for e in pre if isinstance(pre, list) else []:
         for h in (e.get("hooks") or []) if isinstance(e, dict) else []:
             cmd = str(h.get("command", "")) if isinstance(h, dict) else ""
-            t = h.get("timeout") if isinstance(h, dict) else None
-            t = float(t) if isinstance(t, (int, float)) and not isinstance(t, bool) and t > 0 \
-                else CLAUDE_HOOK_DEFAULT_TIMEOUT
+            t = _usable_timeout(h.get("timeout") if isinstance(h, dict) else None)
             for _, verb, _t in CLAUDE_HOOKS:
                 if _is_locket_hook(cmd, verb):
                     out.setdefault(verb, (cmd, t))
@@ -826,13 +837,16 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
             "write gate and reach its meaning-ranked question. ") * 2
     hosts = {Path(p) for p in memscan.HOST_STORES.values()}
     worst = None
-    with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as transcript:
+    with tempfile.TemporaryDirectory() as scratch:
+        transcript = Path(scratch) / "transcript.jsonl"
+        transcript.write_text("")
         for name, root in sorted(stores.items()):
             root = Path(root)
             try:
                 if root not in hosts and not any(next(memscan._walk_files(r), None) is not None
+                                                 or memscan.csv_sources(r)
                                                  for r in memscan.roots_of(root)):
-                    continue
+                    continue                # nothing to score: neither markdown nor registered rows
             except OSError:
                 continue
             ti = ({"file_path": str(root / "zz-locket-doctor-probe.md"), "content": body}
@@ -841,7 +855,7 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
             payload = json.dumps({"hook_event_name": "PreToolUse",
                                   "tool_name": "Write" if verb == "hook" else "Grep",
                                   "session_id": "locket-doctor-latency", "cwd": str(root),
-                                  "transcript_path": transcript.name, "tool_input": ti})
+                                  "transcript_path": str(transcript), "tool_input": ti})
             _r, secs = _run_hook(cmd, payload, limit, LOCKET_GREPASSIST_LOG=os.devnull)
             if worst is None or secs > worst[1]:
                 worst = (name, secs)
@@ -1382,6 +1396,9 @@ def main(argv):
                 assert _hook_timeout(cfg, "hook") == 7.5, _hook_entries(cfg)
                 assert _hook_timeout(cfg, "grepassist") == CLAUDE_HOOK_DEFAULT_TIMEOUT
                 assert _hook_timeout(cfg, "bashguard") == CLAUDE_HOOK_DEFAULT_TIMEOUT, "a bool is not a timeout"
+                for bad in (0, -5, float("inf"), 10 ** 400, "10"):
+                    assert _usable_timeout(bad) == CLAUDE_HOOK_DEFAULT_TIMEOUT, f"{bad!r} read as a timeout"
+                assert _usable_timeout(1e9) == 600.0, "a huge timeout leaves doctor unbounded"
                 assert _registered_hooks(cfg)["hook"] == "/opt/x/bin/locket hook"
                 cfg.write_text("{not json")
                 assert _registered_hooks(cfg) is None and _hook_timeout(cfg, "hook") == CLAUDE_HOOK_DEFAULT_TIMEOUT

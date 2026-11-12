@@ -888,13 +888,21 @@ def _corpus_dirs(root):
         tops = [root]
     else:
         # The root's own files count; its other directories are host state.
+        own = []
         try:
             with os.scandir(root) as it:
-                own = sorted(e.name for e in it if not e.is_dir())
+                for e in it:
+                    try:
+                        if not e.is_dir():
+                            own.append(e.name)
+                    except OSError:         # one entry that cannot be stat'd drops only itself
+                        continue
         except OSError:
-            own = []
+            pass
+        own.sort()
         yield root, own
-        tops = [root / n for n in sorted(mem) if entered(n) and (root / n).is_dir()]
+        tops = [root / n for n in sorted(mem)
+                if all(entered(part) for part in Path(n).parts) and (root / n).is_dir()]
     for top in tops:
         for dirpath, dirnames, filenames in os.walk(top):
             here = Path(dirpath)
@@ -1012,8 +1020,14 @@ def corpus(root, csv=True):
     rows as its own per-row units instead, or they would be embedded twice.
     """
     rs = roots_of(root)
-    docs = {corpus_key(root, p, rs): strip(p.read_text(errors="ignore"))
-            for p in md_files(root)}
+    docs = {}
+    for p in md_files(root):
+        # One unreadable file (mode 000, or deleted since the walk) is skipped: raised,
+        # it emptied the whole read inside the hook, whose catch-all let the write through.
+        try:
+            docs[corpus_key(root, p, rs)] = strip(p.read_text(errors="ignore"))
+        except OSError:
+            continue
     if csv:
         grouped = defaultdict(list)
         for label, text in csv_rows(root):
@@ -1486,10 +1500,15 @@ def resolve_citation(path, line, idx):
     # PAST EOF means no candidate reaches it, never that the first one sorted was short.
     first = None
     for h in hits:
-        lines = Path(h).read_text(errors="replace").splitlines()
+        try:
+            lines = Path(h).read_text(errors="replace").splitlines()
+        except OSError:
+            continue
         if line <= len(lines):
             return "ok", (h, lines, len(hits))
         first = first or (h, len(lines))
+    if first is None:
+        return "missing", None
     return "eof", (first[0], first[1], len(hits))
 
 
@@ -2502,16 +2521,20 @@ def selftest():
     # regression, whatever it lists through.
     (home / "plugins/deep/er/locket.json").parent.mkdir(parents=True, exist_ok=True)
     (home / "plugins/deep/er/locket.json").write_text("{}\n")
-    scanned, real_scandir, real_rglob = [], os.scandir, Path.rglob
+    scanned, real_scandir, real_rglob, real_glob = [], os.scandir, Path.rglob, Path.glob
     def _spy(p="."):
         scanned.append(Path(p)); return real_scandir(p)
     def _rglob_spy(self, *a, **k):
         scanned.append(Path(self) / "**"); return real_rglob(self, *a, **k)
-    os.scandir, Path.rglob = _spy, _rglob_spy
+    def _glob_spy(self, pattern, *a, **k):
+        if "**" in str(pattern):
+            scanned.append(Path(self) / "**")
+        return real_glob(self, pattern, *a, **k)
+    os.scandir, Path.rglob, Path.glob = _spy, _rglob_spy, _glob_spy
     try:
         md_files(home); list(_archive_md(home)); list(_walk_files(home, "*.csv"))
     finally:
-        os.scandir, Path.rglob = real_scandir, real_rglob
+        os.scandir, Path.rglob, Path.glob = real_scandir, real_rglob, real_glob
     strays = sorted({str(p.relative_to(home)) for p in scanned
                      if (p == home / "**") or (home in p.parents
                                                and p.relative_to(home).parts[0] not in ("memory", "rules"))})
@@ -2526,11 +2549,28 @@ def selftest():
             home.chmod(0o755)
         assert got == {"memory/a.md", "rules/r.md"}, f"an unlistable root dropped its members: {got}"
     # An ambiguous citation is PAST EOF only when no same-named file reaches the line.
-    (home / "rules/short").mkdir(); (home / "rules/short/x.py").write_text("a\n")
-    (home / "rules/x.py").write_text("a\nb\nc\n")
+    (home / "rules/a").mkdir(); (home / "rules/a/x.py").write_text("a\n")
+    (home / "rules/b").mkdir(); (home / "rules/b/x.py").write_text("a\nb\nc\n")
+    assert code_index([(home / "rules", frozenset())])["x.py"][0].endswith("a/x.py"), \
+        "the short candidate must sort first, or this test passes on first-match resolution"
     cidx = code_index([(home / "rules", frozenset())])
     assert resolve_citation("x.py", 3, cidx)[0] == "ok", "a short first candidate hid a long one"
     assert resolve_citation("x.py", 9, cidx)[0] == "eof"
+    # A member path is entered only if every component would be: `memory/archive`
+    # stays provenance even when a manifest names it as a member.
+    HOST_MEMBERS[home] = {"memory", "rules", "memory/archive"}; settings.cache_clear()
+    assert not any("archive" in str(q) for q in md_files(home)), "a member path entered an excluded dir"
+    HOST_MEMBERS[home] = {"memory", "rules"}; settings.cache_clear()
+    # One unreadable file is skipped and the rest still score: raised, it emptied the
+    # whole read inside the hook and the catch-all let the write through.
+    if hasattr(os, "getuid") and os.getuid() != 0:
+        (home / "memory/locked.md").write_text("A sentence nobody can read here.\n")
+        (home / "memory/locked.md").chmod(0)
+        try:
+            got = corpus(home)
+        finally:
+            (home / "memory/locked.md").chmod(0o644); (home / "memory/locked.md").unlink()
+        assert "memory/a.md" in got and "memory/locked.md" not in got, sorted(got)
     # A dangling symlink is not a file: reading it raised inside the hook.
     (home / "memory/gone.md").symlink_to(home / "memory/never-there.md")
     assert "memory/gone.md" not in {str(q.relative_to(home)) for q in md_files(home)}
