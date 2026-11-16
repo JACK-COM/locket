@@ -64,7 +64,8 @@ VERBS = [
     ("graduated", "[corpus [floor]]", "scratch-file entries a permanent file already states: ready to clear",
      "locket graduated                      this directory's store\n"
      "locket graduated notes 0.7            only entries at least 0.7 alike (default 0.55)"),
-    ("ledgers", "[corpus]", "schema-governed CSV rows off their schema", "locket ledgers notes"),
+    ("ledgers", "[corpus]", "schema-governed CSV rows off their schema, and declared CSVs past 5 MB",
+     "locket ledgers notes"),
     ("budget", "[corpus]", "files past a byte, history-clause or paragraph budget", "locket budget council"),
     ("pointers", "[corpus]", "index lines beside the files they point at, missing targets first; "
      "needs a reader", "locket pointers council"),
@@ -819,6 +820,17 @@ def _hook_timeout(settings, verb):
     return entry[1] if entry else CLAUDE_HOOK_DEFAULT_TIMEOUT
 
 
+def _probe_problem(r, health):
+    """The first way a probe run failed open, or None: a crash (an exit other than 0 or
+    2, or a traceback) or an error the hook's catch-all swallowed into its health record.
+    A fast run that failed open is not a fast hook, so every latency probe asks this."""
+    _rec, problems = memscan.health_report(health, fold=False, kinds=("errors",))
+    if r is not None and (r.returncode not in (0, 2) or "Traceback" in r.stderr):
+        last = (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1][:120]
+        problems = [f"the hook crashed ({last}), so the call ran unchecked"] + problems
+    return problems[0] if problems else None
+
+
 def _hook_latency(cmd, stores, limit, verb="hook"):
     """(worst, opened): `worst` is (store, seconds) for the slowest REAL store, `opened` is
     (store, problem) for the first store whose probe failed open, and either may be None.
@@ -877,17 +889,108 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
                 # faster, so it is the one reported, a timeout included.
                 r, secs = _run_hook(cmd, payload, limit, LOCKET_GREPASSIST_LOG=os.devnull,
                                     LOCKET_HEALTH_DIR=str(health))
-            _rec, problems = memscan.health_report(health, fold=False, kinds=("errors",))
-            if r is not None and (r.returncode not in (0, 2) or "Traceback" in r.stderr):
-                last = (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1][:120]
-                problems = [f"the hook crashed ({last}), so the call ran unchecked"] + problems
-            if problems and opened is None:
-                opened = (name, problems[0])
+            problem = _probe_problem(r, health)
+            if problem and opened is None:
+                opened = (name, problem)
             if worst is None or secs > worst[1]:
                 worst = (name, secs)
             if secs >= limit:           # one store past the timeout is the finding; stop paying
                 break
     return worst, opened
+
+
+def _declared_sizes(stores, names):
+    """[(store name, path, text column or None, bytes)] for every declared CSV in the
+    named stores, largest first. One walk serves both doctor rows, and a CSV that a
+    parent store and its member both declare is listed once."""
+    out, seen = [], set()
+    for n in names:
+        try:
+            declared = memscan.declared_csvs(Path(stores[n]))
+        except OSError:
+            continue
+        for p, text in declared:
+            try:
+                key, size = p.resolve(), p.stat().st_size
+            except OSError:
+                continue
+            if key not in seen:
+                seen.add(key)
+                out.append((n, p, text, size))
+    return sorted(out, key=lambda x: -x[3])
+
+
+def _csv_probe_edit(path, textcol):
+    """(tool_input, None) for an Edit appending one novel row to `path`, or (None, why)
+    when no faithful probe can be built. The row copies the file's last record with its
+    text column replaced, so it passes the schema and reaches the source scoring.
+
+    The file is read as the hook reads it (universal newlines), and `old_string` is the
+    whole last record, multiline quoting included, because the hook substitutes at the
+    FIRST occurrence: a fragment that also appears mid-file would land the probe inside
+    another record, and the run would time a parse failure, never the scoring."""
+    import csv as _csv, io as _io
+    try:
+        text = path.read_text(errors="ignore")
+        lines = text.splitlines(keepends=True)
+        reader, records, start = _csv.reader(lines), [], 0
+        for rec in reader:
+            if any(x.strip() for x in rec):
+                records.append((rec, start, reader.line_num))
+            start = reader.line_num
+    except (OSError, _csv.Error, UnicodeDecodeError) as e:
+        return None, f"it does not read as CSV ({type(e).__name__})"
+    if len(records) < 2:
+        return None, "it holds no row to model the probe on"
+    header, (rec, s, e) = records[0][0], records[-1]
+    if textcol not in header:
+        return None, f"its header names no {textcol!r} column"
+    if len(rec) != len(header):
+        return None, "its last row has a different field count from the header"
+    old = "".join(lines[s:e]).rstrip("\r\n")
+    if text.count(old) != 1:
+        return None, "its last row also appears earlier in the file"
+    row = list(rec)
+    row[header.index(textcol)] = "Locket doctor latency probe " + os.urandom(6).hex() + " names no fact a store holds."
+    buf = _io.StringIO()
+    _csv.writer(buf, lineterminator="").writerow(row)
+    ti = {"file_path": str(path), "old_string": old, "new_string": old + "\n" + buf.getvalue()}
+    if memscan.ledger_decision(str(path), ti) != (None, False):
+        return None, "a row modelled on its last row breaks its schema"
+    return ti, None
+
+
+def _csv_hook_latency(cmd, target, limit):
+    """(seconds, problem, why not timed) for the write hook on one novel row appended to
+    `target`, a `_declared_sizes` entry that is a registered source. Exactly one of
+    `seconds` and `why` is None; `problem` names a run that failed open or was blocked,
+    because a fast run that never reached the scoring is not a fast hook. Nothing is
+    written: the hook is PreToolUse and decides on the payload alone.
+
+    ⚠ Growth breaks a declared CSV here and nowhere else: grep and row lookups scale,
+    but the hook scores each new row against the whole file and the store, and past
+    its timeout the host abandons it and the row lands unchecked. A split was rejected
+    as the remedy because it hides rows from every reader that names the table."""
+    import tempfile
+    _name, path, textcol, _n = target
+    ti, why = _csv_probe_edit(path, textcol)
+    if ti is None:
+        return None, None, why
+    with tempfile.TemporaryDirectory() as scratch:
+        tr = Path(scratch) / "transcript.jsonl"
+        tr.write_text("")
+        payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Edit",
+                              "session_id": "locket-doctor-latency", "cwd": str(path.parent),
+                              "transcript_path": str(tr), "tool_input": ti})
+        health = Path(scratch) / "health"
+        env = {"LOCKET_GREPASSIST_LOG": os.devnull, "LOCKET_HEALTH_DIR": str(health)}
+        r, secs = _run_hook(cmd, payload, limit, **env)
+        if limit / 2 < secs < limit:       # the second run is what each later write pays
+            r, secs = _run_hook(cmd, payload, limit, **env)
+        problem = _probe_problem(r, health)
+        if problem is None and r is not None and r.returncode == 2:
+            problem = "the hook blocked the probe row, so the scoring was never reached"
+    return secs, problem, None
 
 
 def _codex_trust_from(reply):
@@ -1148,6 +1251,17 @@ def cmd_doctor():
     elif stores:
         row("ok", "index", "built for every store")
 
+    sizes = _declared_sizes(stores, full)
+    reading = f"{memscan.CSV_REPORT_BYTES / 1048576:g} MB"
+    big = [s for s in sizes if s[3] > memscan.CSV_REPORT_BYTES]
+    if big:
+        more = f", and {len(big) - 4} more" if len(big) > 4 else ""
+        row("warn", "csv size", "; ".join(f"{p.name} in {n} is {b / 1048576:.1f} MB" for n, p, _t, b in big[:4])
+            + f"{more}, past the {reading} reading",
+            "read the csv latency row; the file stays whole (RULINGS.csv on Area=substrate)")
+    elif sizes:
+        row("ok", "csv size", f"{len(sizes)} declared CSV(s), every one under {reading}")
+
     settings = memscan.CLAUDE / "settings.json"
     if memscan.CLAUDE.is_dir():
         hooks = _registered_hooks(settings) if settings.is_file() else {}
@@ -1188,6 +1302,39 @@ def cmd_doctor():
                                 f"timeout; past it, {lost}", "find what the store's walk enters that it should not")
                         else:
                             row("ok", label, f"{secs:.1f}s on the slowest store ({name}), inside its {limit:g}s timeout")
+                    # Only a registered source is scored row by row, so only sources are timed; the
+                    # largest three, because the slowest file need not be the largest.
+                    limit = _hook_timeout(settings, "hook")
+                    timed, skipped, failed = [], [], None
+                    for target in [s for s in sizes if s[2] is not None][:3]:
+                        secs, problem, why = _csv_hook_latency(hooks["hook"], target, limit)
+                        if problem:
+                            failed = (target, problem)
+                            break
+                        if why:
+                            skipped.append(f"{target[1].name} ({why})")
+                        else:
+                            timed.append((secs, target))
+                            if secs >= limit:
+                                break
+                    fix = "choose a remedy against this reading (a faster scoring path, an index); never split the file"
+                    if failed:
+                        row("fail", "csv latency", f"the write hook failed on a row into {failed[0][1].name} in "
+                            f"{failed[0][0]}: {failed[1]}", "find the cause in that store")
+                    elif not timed:
+                        row("warn" if skipped else "ok", "csv latency",
+                            ("not timed: " + "; ".join(skipped)) if skipped else "no registered source CSV to time")
+                    if timed and not failed:
+                        secs, big = max(timed, key=lambda x: x[0])
+                        where = f"{big[1].name} in {big[0]} ({big[3] / 1048576:.1f} MB, slowest of {len(timed)} timed)"
+                        if secs >= limit:
+                            row("fail", "csv latency", f"the write hook takes {secs:.0f}s or more on a row into {where}, "
+                                f"past its {limit:g}s timeout: rows land unchecked", fix)
+                        elif secs > limit / 2:
+                            row("warn", "csv latency", f"the write hook takes {secs:.1f}s on a row into {where}, "
+                                f"over half its {limit:g}s timeout", fix)
+                        else:
+                            row("ok", "csv latency", f"{secs:.1f}s on a row into {where}, inside its {limit:g}s timeout")
                 else:
                     row("fail", "claude hooks", "registered, but the write hook " +
                         ("stayed silent on a known fork" if probe is False else f"failed: {probe}"),
@@ -1425,6 +1572,41 @@ def _selftest_body():
             full, empty = Path(t) / "full", Path(t) / "empty"
             full.mkdir(); empty.mkdir()
             (full / "a.md").write_text("A fact the latency probe never reads.\n")
+            # the csv probe: sizes list each declared CSV once with its text column (None for a
+            # schema-only ledger, which doctor never times); the probe is a schema-clean Edit whose
+            # old_string is the whole last record; crashes, blocks and unfaithful files are named
+            rh = "Ruling,Category,Area,Date\n"
+            ref = full / "REF.csv"
+            ref.write_text(rh + '"A row the probe copies.",product,pricing,2026-09-26\n'
+                           + '"A ruling quoted\nover two lines.",product,pricing,2026-09-27\n')
+            (full / memscan.MANIFEST).write_text(json.dumps(
+                {"sources": [{"path": "REF.csv", "text": "Ruling", "label": "Area"}]}))
+            (full / "RULINGS.csv").write_text(rh)
+            sizes = _declared_sizes({"empty": empty, "full": full, "again": full}, ["empty", "full", "again"])
+            assert sorted((x[1].name, x[2]) for x in sizes) == [("REF.csv", "Ruling"), ("RULINGS.csv", None)], sizes
+            target = [x for x in sizes if x[2]][0]
+            seen = Path(t) / "payload.json"
+            secs, problem, why = _csv_hook_latency(f"cat > {shlex.quote(str(seen))}", target, 5)
+            assert secs < 5 and problem is None and why is None, (secs, problem, why)
+            ti = json.loads(seen.read_text())["tool_input"]
+            assert ti["old_string"] == '"A ruling quoted\nover two lines.",product,pricing,2026-09-27', \
+                f"old_string is not the whole multiline last record: {ti['old_string']!r}"
+            assert "latency probe" in ti["new_string"] and ",pricing,2026-09-27" in ti["new_string"], ti
+            assert _csv_hook_latency("sleep 3", target, 1)[0] == 1.0, "a csv probe past the timeout is not at the limit"
+            _s, problem, _w = _csv_hook_latency("exit 1", target, 5)
+            assert problem and "crashed" in problem, f"a hook that crashed fast read as a fast hook: {problem}"
+            _s, problem, _w = _csv_hook_latency("exit 2", target, 5)
+            assert problem and "blocked" in problem, f"a hook that blocked the probe read as a fast hook: {problem}"
+            dup = '"Same row.",product,pricing,2026-09-26\n'
+            ref.write_text(rh + dup + dup)
+            assert _csv_hook_latency("true", target, 5)[2] == "its last row also appears earlier in the file"
+            ref.write_text(rh)
+            assert _csv_hook_latency("true", target, 5)[2] == "it holds no row to model the probe on"
+            ref.write_text(rh + '"Short row.",product\n')
+            assert "field count" in _csv_hook_latency("true", target, 5)[2], "a ragged last row was probed"
+            for f in (ref, full / "RULINGS.csv", full / memscan.MANIFEST):
+                f.unlink()
+            memscan.settings.cache_clear()
             assert _hook_latency("true", {"empty": empty}, 5) == (None, None), "an empty store is timed"
             fast, _o = _hook_latency("true", {"empty": empty, "full": full}, 5)
             assert fast and fast[0] == "full" and fast[1] < 5, fast
