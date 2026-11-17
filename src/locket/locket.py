@@ -259,8 +259,8 @@ def _merge_json(path, merge):
         shutil.copy2(path, bak)
     else:
         bak = None
-        path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    import _settings                        # whole or not at all, and a symlinked file keeps its link
+    _settings.write_json(path, data)
     print(f"edited {path}: added {', '.join(added)}" + (f"; copy at {bak}" if bak else ""))
     return 0
 
@@ -435,8 +435,9 @@ def _embedder_line():
 
 
 def _caches():
-    """Every `.memfind/` cache Locket may have written: at each store root, in
-    each member of a host store (older layout), and in every registered path."""
+    """Every in-store `.memfind/` cache a release before 0.12 may have written: at each
+    store root, in each member of a host store (older layout), and in every registered
+    path. Nothing reads them now; `migrate` names them and `uninstall` removes them."""
     roots = set(memscan._raw_corpora().values()) | set(memscan.registry())
     out = set()
     for r in roots:
@@ -1210,14 +1211,16 @@ def cmd_doctor():
     conventional = set(memscan._raw_corpora().values())
     try:
         loose = memscan.untrusted_stores()
-    except OSError:
-        loose = []
-    for d in loose:
+    except Exception as e:                  # a failed scan is reported, never read as "none found"
+        loose = None
+        row("warn", "trust", f"the scan for untrusted stores failed ({type(e).__name__}: {e})")
+    for d in loose or []:
         row("warn", "trust", f"{d} holds a {memscan.MANIFEST} that is not trusted, so it acts as no store: "
             "its trigger rows, ledger schemas and sources are ignored",
             f"locket trust {shlex.quote(str(d))}  (at a terminal, if you made it), or delete its {memscan.MANIFEST}")
-    row("ok", "trust", "scope: directories Claude Code, Codex or Hermes have opened a session in, and their parents"
-        + ("" if loose else "; no untrusted store found"))
+    if loose is not None:
+        row("ok", "trust", "scope: directories Claude Code, Codex or Hermes have opened a session in, "
+            "and their parents" + ("" if loose else "; no untrusted store found"))
     for gone in (p for p in memscan.registry_stale() if p not in conventional):
         q = shlex.quote(str(gone))
         row("warn", "registry", f"{gone} is registered but its {memscan.MANIFEST} is gone, so `all` and the "
@@ -1265,7 +1268,8 @@ def cmd_doctor():
     # an empty store (an auto-memory folder no session has written to) has nothing to
     # index and `index all` skips it, so it never counts against this check
     # The meaning index builds from markdown only, so a store holding only CSV rows has none to build.
-    unindexed = [n for n in full if not (stores[n] / ".memfind").is_dir() and memscan.has_content(stores[n], csv=False)]
+    unindexed = [n for n in full if not _memfind().cache_paths(stores[n])[0].is_file()
+                 and memscan.has_content(stores[n], csv=False)]
     if unindexed:
         row("warn", "index", f"not built for {', '.join(sorted(unindexed))}", "locket index all")
     elif stores:
@@ -1832,8 +1836,17 @@ def main(argv):
             moved = f"warning: {configure._legacy_path()} not moved ({e}); Locket still reads it"
         if moved:
             print(moved)
+        # 0.12: the index lives in ~/.locket/cache, so a cache inside a store is dead weight
+        for c in _caches():
+            print(f"index: {c} is no longer read; the index now lives in "
+                  f"{memscan.REGISTRY.parent / 'cache'}. Delete it:  rm -r {shlex.quote(str(c))}")
         # 0.12: a manifest acts only once a person trusts it; name the ones that stopped
-        for d in memscan.untrusted_stores():
+        try:
+            loose = memscan.untrusted_stores()
+        except Exception as e:
+            loose = []
+            print(f"trust: the scan for untrusted stores failed ({type(e).__name__}: {e}); run  locket doctor")
+        for d in loose:
             print(f"trust: {d} holds a {memscan.MANIFEST} that is no longer acted on until a person "
                   f"trusts it:  locket trust {shlex.quote(str(d))}")
     if verb in SCAN:

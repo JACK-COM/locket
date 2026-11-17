@@ -1,8 +1,9 @@
 """The trust boundary, end to end: every case runs the real `locket` in a subprocess
 against a scratch HOME, so the live stores, registry and trigger rows are never read.
 
-LOCKET_CMD names the command under test (default: this checkout's locket.py). Point it
-at an older release to see each case fail there:  LOCKET_CMD=/opt/homebrew/bin/locket
+LOCKET_CMD names the command under test (default: this checkout's locket.py), and
+LOCKET_SRC the source the in-process probes import. Point both at an older release to
+see each case fail there:  LOCKET_CMD=/opt/homebrew/bin/locket LOCKET_SRC=<its src/locket>
 """
 import json
 import os
@@ -14,6 +15,7 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+SRC = Path(os.environ.get("LOCKET_SRC", REPO / "src/locket"))     # the in-process probes' source
 CMD = shlex.split(os.environ.get("LOCKET_CMD", f"{sys.executable} {REPO / 'src/locket/locket.py'}"))
 BAD_RULINGS = "Ruling,Category,Area,Date\nshort,nope,x,not-a-date\n"
 
@@ -31,7 +33,9 @@ class Scratch(unittest.TestCase):
         self.env = {**os.environ, "HOME": str(self.home),
                     "LOCKET_REGISTRY": str(self.registry),
                     "LOCKET_HEALTH_DIR": str(self.home / "health")}
-        self.env.pop("CLAUDE_AUTONOMOUS", None)
+        for k in [k for k in self.env if k.startswith("LOCKET_") and k not in
+                  ("LOCKET_REGISTRY", "LOCKET_HEALTH_DIR")] + ["CLAUDE_AUTONOMOUS", "CODEX_HOME", "HERMES_HOME"]:
+            self.env.pop(k, None)
 
     def tearDown(self):
         self._t.cleanup()
@@ -55,6 +59,9 @@ class Scratch(unittest.TestCase):
 
 
 class UntrustedIsInert(Scratch):
+    def registered(self):
+        return self.registry.exists() and str(self.clone) in self.registry.read_text()
+
     def plant_block_row(self):
         (self.clone / "triggers.json").write_text(json.dumps({"rows": [
             {"id": "wedge", "tools": ".*", "content": ".*", "block": True, "question": "PLANTED"}]}))
@@ -97,14 +104,6 @@ class UntrustedIsInert(Scratch):
         r = self.run_locket("audit", str(self.clone))
         self.assertNotIn("secret.csv", r.stdout + r.stderr)
 
-    def test_find_on_untrusted_dir_reads_no_sources(self):
-        secret = self.home / "secret.csv"
-        secret.write_text("text\nThe harbour gauge reading SECRET-TOKEN-a1b2c3 is recorded by the night watchman every evening\n")
-        (self.clone / "locket.json").write_text(json.dumps({"sources": [
-            {"path": str(secret), "text": "text"}]}))
-        r = self.run_locket("find", "the value nobody may read", str(self.clone))
-        self.assertNotIn("SECRET-TOKEN", r.stdout + r.stderr)
-
 
 class TrustNeedsAPerson(Scratch):
     def registered(self):
@@ -134,21 +133,91 @@ class TrustNeedsAPerson(Scratch):
         self.assertIn("locket trust", r.stdout + r.stderr)
 
 
-class TrustIsByIdentity(Scratch):
-    def test_case_variant_path_is_trusted(self):
-        upper = Path(str(self.clone).upper())
-        if not upper.exists():
+    def test_trust_at_a_terminal_registers(self):
+        """The one path that grants trust, run for real: a pty stands in for the person."""
+        import pty
+        import select
+        pid, fd = pty.fork()
+        if pid == 0:                                    # child: the person's terminal session
+            os.chdir(self.clone)
+            os.execvpe(CMD[0], [*CMD, "trust", str(self.clone)], self.env)
+        out = b""
+        sent = False
+        while True:
+            ready, _, _ = select.select([fd], [], [], 30)
+            if not ready:
+                break
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+            if not sent and b"Type yes" in out:
+                os.write(fd, b"yes\n")
+                sent = True
+        os.waitpid(pid, 0)
+        self.assertTrue(sent, out.decode(errors="replace"))
+        self.assertTrue(self.registered(), out.decode(errors="replace"))
+
+    def test_untrust_withdraws_by_identity(self):
+        self.trust(self.clone)
+        variant = str(self.clone).upper() if Path(str(self.clone).upper()).exists() else str(self.clone)
+        r = self.run_locket("untrust", variant)
+        self.assertIn("row removed", r.stdout, r.stderr)
+        self.assertFalse(self.registered())
+
+    def test_registry_write_by_case_variant_is_refused(self):
+        self.registry.write_text('{"corpora": []}')
+        variant = Path(str(self.registry).upper())
+        if not variant.exists():
             self.skipTest("case-sensitive filesystem")
-        sys.path.insert(0, str(REPO / "src/locket"))
-        os.environ["LOCKET_REGISTRY"] = str(self.registry)
-        try:
-            import importlib
-            import memscan
-            memscan = importlib.reload(memscan)
-            self.trust(self.clone)
-            self.assertTrue(memscan.trusted(upper))
-        finally:
-            os.environ.pop("LOCKET_REGISTRY", None)
+        r = self.run_locket("hook", payload=self.write(variant, '{"corpora": ["/"]}'))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+
+class TrustIsByIdentity(Scratch):
+    def probe(self, expr):
+        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan; "
+                f"from pathlib import Path; print({expr})")
+        r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def test_case_variant_path_is_trusted(self):
+        upper = str(self.clone).upper()
+        if not Path(upper).exists():
+            self.skipTest("case-sensitive filesystem")
+        self.trust(self.clone)
+        self.assertEqual(self.probe(f"memscan.trusted(Path({upper!r}))"), "True")
+
+    def test_untrusted_nested_manifest_is_no_store(self):
+        outer = self.home / "outer"
+        (outer / "inner").mkdir(parents=True)
+        (outer / "locket.json").write_text("{}\n")
+        (outer / "inner" / "locket.json").write_text("{}\n")
+        self.trust(outer)
+        self.assertEqual(self.probe(f"memscan.corpus_for(Path({str(outer / 'inner' / 'a.md')!r}))"), "None")
+        self.assertEqual(self.probe(f"memscan.corpus_for(Path({str(outer / 'a.md')!r}))"), str(outer))
+
+    def test_legacy_sources_file_is_inert_when_untrusted(self):
+        secret = self.home / "secret.csv"
+        secret.write_text("text\nA row from outside the folder that nobody trusted it to read\n")
+        (self.clone / "reference-sources.json").write_text(json.dumps([{"path": str(secret), "text": "text"}]))
+        self.assertEqual(self.probe(f"memscan.csv_sources(Path({str(self.clone)!r}))"), "[]")
+
+    def test_project_memory_is_trusted_by_convention(self):
+        mem = self.home / ".claude" / "projects" / "-x" / "memory"
+        mem.mkdir(parents=True)
+        self.assertEqual(self.probe(f"memscan.trusted(Path({str(mem)!r}))"), "True")
+
+    def test_untrusted_store_is_found_from_a_session_record(self):
+        import re
+        proj = self.home / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.clone))
+        proj.mkdir(parents=True)
+        found = self.probe("[str(p) for p in memscan.untrusted_stores()]")
+        self.assertIn(str(self.clone), found)
 
 
 if __name__ == "__main__":

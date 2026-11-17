@@ -40,7 +40,7 @@ which a markdown-only index cannot see at all.
 Falls back with a clear message when ollama is not running; it is never a
 dependency of anything that must succeed.
 """
-import sys, os, json, math, array, time, urllib.request, urllib.error
+import sys, os, json, math, array, time, hashlib, stat, urllib.request, urllib.error
 from operator import mul
 from pathlib import Path
 
@@ -52,7 +52,7 @@ import configure  # noqa: E402
 
 configure.apply()   # ~/.panoply/config.json's embed settings as Locket reads them, under the environment
 
-CACHE_SUBDIR = ".memfind"   # inside the corpus it indexes; with the manifest, the only thing owned there
+CACHE_SUBDIR = ".memfind"   # where 0.11 kept the index, inside the corpus; read by nothing now
 LAST_RANK_MODE = "semantic"
 
 # ---------------------------------------------------------------- embedding
@@ -131,11 +131,37 @@ def corpus_fingerprint(root):
     return fp
 
 
+def cache_dir(root):
+    """`~/.locket/cache/<digest of the store's real path>/`. Outside the corpus on
+    purpose: a cache inside it is a file anyone shipping the directory controls, so
+    a cloned repo could plant ranked text for every hook to print, or symlink the
+    cache onto a file the next build would overwrite."""
+    real = os.path.realpath(str(root))
+    return memscan.REGISTRY.parent / "cache" / hashlib.sha256(real.encode()).hexdigest()[:16]
+
+
 def cache_paths(root):
-    """The index lives INSIDE the corpus, so a corpus copied or moved carries its
-    cache, and removing the tool from one is deleting a directory it can see."""
-    d = Path(root) / CACHE_SUBDIR
+    d = cache_dir(root)
     return d / "index.json", d / "index.vec"
+
+
+def _write_cache(root, flat, meta):
+    """Both cache files, each by atomic rename into a 0700 directory that is no
+    symlink. The JSON carries the vector file's byte length and goes second, so a
+    write cut between the two is a mismatch `_read_vectors` refuses."""
+    d = cache_dir(root)
+    d.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        d.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(d)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise RuntimeError(f"refusing the cache directory {d}: not a directory this user owns")
+    blob = flat.tobytes()
+    meta_p, vec_p = cache_paths(root)
+    memscan._replace_atomic(vec_p, blob, ".index.vec.")
+    memscan._replace_atomic(meta_p, json.dumps({**meta, "vec_bytes": len(blob)}), ".index.json.")
 
 
 def _normalise(vecs):
@@ -173,13 +199,13 @@ def build_index(root, quiet=False):
     old_items, old_flat, old_dim, old_fp = [], None, None, {}
     if meta_p.exists() and vec_p.exists():
         try:
-            m = json.loads(meta_p.read_text())
+            m = _read_meta(meta_p)
             if m.get("model") == active:
                 old_items = [tuple(i) for i in m["items"]]
                 old_dim = m["dim"]
                 old_fp = m.get("fingerprint", {})
                 old_flat = _read_vectors(vec_p, len(old_items), old_dim)
-        except (json.JSONDecodeError, KeyError, ValueError):
+        except (KeyError, ValueError, TypeError, OSError):
             old_items, old_flat = [], None            # unreadable cache: start over
 
     # Two reuse structures, because the two sources change differently. A markdown
@@ -247,13 +273,11 @@ def build_index(root, quiet=False):
                 reused += 1
             items.append((label, text))
 
-    meta_p.parent.mkdir(parents=True, exist_ok=True)
-    vec_p.write_bytes(flat.tobytes())
-    meta_p.write_text(json.dumps({
+    _write_cache(root, flat, {
         "root": str(root), "model": active, "dim": dim,
         "built": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "fingerprint": fp, "items": items,
-    }))
+    })
     if not quiet:
         under = sum(1 for body in docs.values() for _ in memscan.unclaimed(body))
         # A claim past the cap is embedded on its first EMBED_CHARS characters and
@@ -274,14 +298,11 @@ def _full_rebuild(root, per_file, fp, quiet):
     items = [(n, s) for n, ss in per_file.items() for s in ss] + csv_rows(root)
     vs = embed([s for _, s in items], quiet=quiet)
     flat, dim = _normalise(vs), len(vs[0])
-    meta_p, vec_p = cache_paths(root)
-    meta_p.parent.mkdir(parents=True, exist_ok=True)
-    vec_p.write_bytes(flat.tobytes())
-    meta_p.write_text(json.dumps({
+    _write_cache(root, flat, {
         "root": str(root), "model": tag(resolve_backend()[0]), "dim": dim,
         "built": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "fingerprint": fp, "items": items,
-    }))
+    })
     return items, flat, dim
 
 
@@ -292,24 +313,40 @@ def load_index(root, quiet=False):
     cannot pay that takes `load_cached` instead."""
     meta, vec = cache_paths(root)
     if meta.exists() and vec.exists():
-        m = json.loads(meta.read_text())
-        if (m.get("model") == tag(resolve_backend()[0])
-                and m.get("fingerprint") == corpus_fingerprint(root)):
-            try:
+        try:
+            m = _read_meta(meta)
+            if (m.get("model") == tag(resolve_backend()[0])
+                    and m.get("fingerprint") == corpus_fingerprint(root)):
                 return [tuple(i) for i in m["items"]], _read_vectors(vec, len(m["items"]), m["dim"]), m["dim"]
-            except (KeyError, ValueError):
-                pass                                   # damaged cache: rebuild below
+        except (KeyError, ValueError, TypeError, OSError):
+            pass                                       # damaged cache: rebuild below
     return build_index(root, quiet=quiet)
+
+
+def _read_meta(path):
+    """The cache's JSON half; raises ValueError or OSError on a damaged one."""
+    data = json.loads(Path(path).read_text())
+    if not isinstance(data, dict):
+        raise ValueError("cache metadata is not an object")
+    return data
 
 
 def _read_vectors(path, n, dim):
     """The cached vectors, refused unless there are exactly n of length dim: a write cut
     short by a kill leaves a file that frombytes reads without complaint, and every
-    score after the cut would be off misaligned floats."""
+    score after the cut would be off misaligned floats. Read from one descriptor
+    opened without following a link, checked regular and sized before a byte is read,
+    and straight into the array, so the vectors are held once, not twice."""
+    if not isinstance(dim, int) or dim <= 0 or not isinstance(n, int):
+        raise ValueError(f"vector cache shape {n} x {dim}")
     flat = array.array("f")
-    flat.frombytes(path.read_bytes())
-    if not isinstance(dim, int) or dim <= 0 or len(flat) != n * dim:
-        raise ValueError(f"vector cache holds {len(flat)} floats, expected {n} x {dim}")
+    want = n * dim * flat.itemsize
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_size != want:
+            raise ValueError(f"vector cache is {st.st_size} bytes, expected {want}")
+        flat.fromfile(f, n * dim)
     return flat
 
 
@@ -323,7 +360,7 @@ def load_cached(root):
     if not (meta.exists() and vec.exists()):
         return None
     try:
-        m = json.loads(meta.read_text())
+        m = _read_meta(meta)
         # Whichever backend built it: the query is embedded in that same space
         # (`rank` pins the backend from the tag), so no embedder is probed here.
         if m.get("model") not in (tag("ollama"), tag("onnx")):
@@ -404,7 +441,7 @@ def rank(statement, root, top=5, per_file=True, quiet=False, idx=None, lexical=T
         if idx is None:
             which = resolve_backend()[0]
         else:
-            m = json.loads(cache_paths(root)[0].read_text())
+            m = _read_meta(cache_paths(root)[0])
             which = "onnx" if str(m.get("model", "")).startswith("onnx:") else "ollama"
         qv = embed([statement], quiet=True, backend=which)[0]
     except RuntimeError:

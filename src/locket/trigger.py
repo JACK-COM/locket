@@ -107,7 +107,7 @@ def stores_for(cwd, host=None):
 
 def load(path):
     """The rows file as a dict; raises OSError or ValueError on an unreadable one."""
-    data = json.loads(Path(path).read_text())
+    data = json.loads(memscan.read_safe(path))     # a plain file under the size cap, never a FIFO
     if not isinstance(data, dict):
         raise ValueError("top level is not an object")
     return data
@@ -366,6 +366,10 @@ def check(argv):
     if argv:
         root = memscan.resolve(argv[0])
         if root is None:
+            return 1
+        if not memscan.trusted(root):
+            print(f"{root} is not trusted, so its rows file is not read; a person trusts it with  "
+                  f"locket trust {root}", file=sys.stderr)
             return 1
         roots = [root]
     else:

@@ -99,7 +99,7 @@ def t_forget(args):
     d = str(args.get("path") or "").strip()
     if not d:
         raise ValueError("path is required")
-    return (f"{d}: registry row removed. Its locket.json and .memfind/ are yours to delete."
+    return (f"{d}: registry row removed and its trust withdrawn. Its locket.json stays, inert."
             if memscan.forget(d) else f"{d} is not in the registry")
 
 
@@ -255,7 +255,7 @@ TOOLS = {
                             "the reply names that command for you to pass on. Idempotent.",
                     {"path": {"type": "string", "description": "Absolute path of the folder."}}),
     "locket_forget": (t_forget, "Drop a store from the registry. The folder's locket.json and "
-                                ".memfind/ are left for the user to delete.",
+                                "its cache in ~/.locket/cache is rebuilt if it is trusted again.",
                       {"path": {"type": "string", "description": "Absolute path of the folder."}}),
     "locket_find": (t_find,
                     "Which memory files already hold this idea, ranked by meaning. Call it "

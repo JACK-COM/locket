@@ -43,6 +43,7 @@ import os
 import posixpath
 import re
 import shlex
+import stat
 import sys
 import tempfile
 import time
@@ -206,15 +207,40 @@ def registry_stale():
     return [p for p in registry() if not has_manifest(p)]
 
 
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
+
+
+def relay(text, limit=200):
+    """Text from a store, made safe to put in front of an agent or on a terminal:
+    control characters and line breaks become one space (a newline is how a planted
+    label poses as a fresh instruction; an escape sequence rewrites a terminal), and
+    the result is cut to `limit` characters."""
+    flat = _CONTROL.sub(" ", str(text)).strip()
+    return flat if len(flat) <= limit else flat[:limit - 1] + "\u2026"
+
+
+def _same(a, b):
+    """Whether two paths name one directory: by inode where both exist, else by
+    resolved path. Spelling is not identity on a case-insensitive disk."""
+    ia, ib = _inode(a), _inode(b)
+    if ia is not None and ib is not None:
+        return ia == ib
+    return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+
+
+def _write_registry(rows):
+    REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+    _replace_atomic(REGISTRY, json.dumps({"corpora": sorted({str(p) for p in rows})}, indent=2) + "\n",
+                    ".corpora.")
+
+
 def register(root):
     """Add a corpus path to the registry, once. True when it was new."""
     root = Path(root).resolve()
     rows = registry()
-    if root in rows:
+    if any(_same(root, r) for r in rows):
         return False
-    REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-    REGISTRY.write_text(json.dumps(
-        {"corpora": sorted(str(p) for p in rows + [root])}, indent=2) + "\n")
+    _write_registry(rows + [root])
     return True
 
 
@@ -270,11 +296,17 @@ def session_dirs():
     project transcripts, Codex rollouts, Hermes `state.db`. The detection surface
     for an untrusted store; a directory no host has opened is not on it."""
     out = set()
+    def mtime(f):
+        try:
+            return f.stat().st_mtime
+        except OSError:                     # a transcript rotated away mid-scan
+            return 0.0
+
     for proj in (CLAUDE / "projects").glob("*"):
         hit = _unslug(proj.name)
         if hit:
             out.add(hit)
-        logs = sorted(proj.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+        logs = sorted(proj.glob("*.jsonl"), key=mtime, reverse=True)
         for f in logs[:3]:
             cwd = _first_cwd(f)
             if cwd:
@@ -286,8 +318,11 @@ def session_dirs():
         if cwd:
             out.add(cwd)
     db = HERMES / "state.db"
-    if db.is_file():
+    try:
         import sqlite3
+    except ImportError:                     # a Python built without it reads no Hermes record
+        return out
+    if db.is_file():
         try:
             con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
             try:
@@ -327,13 +362,39 @@ def human_confirms(d):
     which the write gate refuses separately."""
     if not (sys.stdin.isatty() and sys.stderr.isatty()):
         return False
-    print(f"Trust {d} as a Locket store? Its manifest can then add trigger rows that "
-          f"refuse tool calls, ledger schemas and source files. Only trust a directory "
-          f"you made or have read.", file=sys.stderr)
+    say = lambda line: print(line, file=sys.stderr)   # one stream for the whole exchange
+    say(f"Trust {d} as a Locket store? Its manifest can then add trigger rows that refuse "
+        f"tool calls, ledger schemas and source files. Only trust a directory you made or have read.")
+    for line in trust_summary(d):
+        say(f"  {relay(line)}")
+    sys.stderr.write("Type yes to trust it: "); sys.stderr.flush()
     try:
-        return input("Type yes to trust it: ").strip() == "yes"
-    except EOFError:
+        return sys.stdin.readline().strip() == "yes"
+    except (EOFError, OSError):
         return False
+
+
+def trust_summary(d):
+    """What trusting `d` would switch on, one line each, read from the files
+    themselves, so the person deciding sees the rows and paths, not a promise."""
+    m = _manifest_data(Path(d))
+    out = [f"{manifest_file(Path(d)).name}: keys {', '.join(sorted(m)) or 'none'}"]
+    for e in m.get("sources") or []:
+        if isinstance(e, dict):
+            out.append(f"source file: {e.get('path')}")
+    for e in m.get("ledgers") or []:
+        if isinstance(e, dict):
+            out.append(f"ledger schema for: {e.get('path')}")
+    rows_name = m.get("triggers") if isinstance(m.get("triggers"), str) else "triggers.json"
+    rows = Path(d) / Path(rows_name).expanduser()
+    try:
+        data = json.loads(read_safe(rows))
+        n = len(data.get("rows") or []) if isinstance(data, dict) else 0
+        blocking = sum(1 for r in (data.get("rows") or []) if isinstance(r, dict) and r.get("block"))
+        out.append(f"trigger rows: {n} in {rows}, {blocking} of them blocking")
+    except (OSError, ValueError):
+        pass
+    return out
 
 
 def grant_trust(d, confirm=None):
@@ -341,7 +402,7 @@ def grant_trust(d, confirm=None):
     True when `d` is trusted afterwards."""
     d = Path(d).expanduser().resolve()
     if _granted(d):
-        print(f"registry: {REGISTRY} (already listed)" if d in registry()
+        print(f"registry: {REGISTRY} (already listed)" if any(_same(d, r) for r in registry())
               else f"trust: {d} is a store by convention on this host")
         return True
     if not (confirm or human_confirms)(d):
@@ -373,10 +434,10 @@ def forget(root):
     stops the listing naming it."""
     root = Path(root).expanduser().resolve()
     rows = registry()
-    if root not in rows:
+    keep = [r for r in rows if not _same(root, r)]
+    if len(keep) == len(rows):
         return False
-    REGISTRY.write_text(json.dumps(
-        {"corpora": sorted(str(p) for p in rows if p != root)}, indent=2) + "\n")
+    _write_registry(keep)
     return True
 
 
@@ -698,7 +759,8 @@ def _manifest_data(root):
     if not m.is_file():
         return {}
     try:
-        data = json.loads(m.read_text())
+        with open_safe(m, binary=True) as f:
+            data = json.loads(f.read().decode("utf-8"))     # strict: a garbled name is no name
         return data if isinstance(data, dict) else {}
     except (ValueError, OSError):           # JSONDecodeError, and a non-UTF-8 file
         return {}
@@ -856,8 +918,15 @@ def _own_walk(root, m=None):
     return members, excluded
 
 
-@lru_cache(maxsize=None)
 def settings(root):
+    """`_settings_for`, cached per store and per state of the trust registry, so a store
+    trusted or untrusted in another process is seen without a restart."""
+    _trusted_ids()
+    return _settings_for(root, next(iter(_TRUST_CACHE)))
+
+
+@lru_cache(maxsize=None)
+def _settings_for(root, _trust_key):
     """Per-corpus name-sets, the module defaults overridden by the manifest.
 
     Every place that once read a module-level set reads this instead, keyed on
@@ -948,6 +1017,8 @@ CLAIMS_VERSION = 2
 _ENDS = re.compile(r"""[.!?;:]["')\]*_`]*\s*$""")
 _LINE_MEANINGFUL = re.compile(r"""\s*(?:[-*+]\s|#|>|\||\d+[.)]\s|```|$)""")
 _NO_JOIN_FROM = re.compile(r"""\s*(?:#|\||```|$)""")   # a bullet's continuation is still its sentence
+
+settings.cache_clear = _settings_for.cache_clear   # every caller's reset still works
 
 
 def unwrap(txt):
@@ -1098,8 +1169,10 @@ def _corpus_dirs(root):
             pass
         own.sort()
         yield root, own
+        # a member that is a symlink would walk wherever it points, outside the store
         tops = [root / n for n in sorted(mem)
-                if all(entered(part) for part in Path(n).parts) and (root / n).is_dir()]
+                if all(entered(part) for part in Path(n).parts)
+                and (root / n).is_dir() and not (root / n).is_symlink()]
     for top in tops:
         for dirpath, dirnames, filenames in os.walk(top):
             here = Path(dirpath)
@@ -1126,15 +1199,73 @@ def has_content(root, csv=True):
                for r in roots_of(root))
 
 
+MAX_FILE_BYTES = 8 * 1024 * 1024      # past the 5 MB a declared CSV is reported at
+MAX_STORE_FILES = 4000
+MAX_STORE_BYTES = 64 * 1024 * 1024
+
+
+def _regular(p):
+    """A plain file, by `lstat`: no symlink, no FIFO, no device, one hard link. A
+    store is read only through files it holds itself, so a link planted in a cloned
+    repository cannot make the walk read a key or a config from elsewhere on disk."""
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+
+
+def open_safe(path, binary=False):
+    """`open` for a corpus file, checked on the descriptor that is read: refused
+    unless it is a regular file of one link under MAX_FILE_BYTES, so a swap between
+    the walk's check and this read gains nothing. Raises OSError on refusal."""
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > MAX_FILE_BYTES:
+            raise OSError(f"{path}: not a plain file under {MAX_FILE_BYTES} bytes")
+        return (os.fdopen(fd, "rb") if binary
+                else os.fdopen(fd, "r", newline="", errors="ignore", encoding="utf-8"))
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def read_safe(path):
+    """A corpus file's text by `open_safe`; raises OSError on refusal."""
+    with open_safe(path) as f:
+        return f.read()
+
+
+def read_or_empty(path):
+    """`read_safe`, or "" for a file that is gone, unreadable or refused."""
+    try:
+        return read_safe(path)
+    except OSError:
+        return ""
+
+
 def _walk_files(root, pattern="*.md"):
     """Every readable file under one store matching `pattern`, by the walk above.
-    The match follows the platform's case rule, as `Path.glob` does. A dangling
-    symlink is dropped here: reading it raised inside the hook, whose catch-all
-    then let the write through unscored."""
+    The match follows the platform's case rule, as `Path.glob` does. Only plain
+    files (`_regular`): a symlink, dangling or not, is dropped, and so is a hard
+    link. The walk stops past MAX_STORE_FILES or MAX_STORE_BYTES and records it."""
+    count = size = 0
     for d, names in _corpus_dirs(root):
         for n in names:
-            if fnmatch.fnmatch(n, pattern) and (d / n).is_file():
-                yield d / n
+            p = d / n
+            if not (fnmatch.fnmatch(n, pattern) and _regular(p)):
+                continue
+            count += 1
+            try:
+                size += os.lstat(p).st_size
+            except OSError:
+                continue
+            if count > MAX_STORE_FILES or size > MAX_STORE_BYTES:
+                health_error("walk", "bound", OSError(
+                    f"{root}: walk stopped past {MAX_STORE_FILES} files or {MAX_STORE_BYTES} bytes"))
+                return
+            yield p
 
 
 def excluded_file(root, path):
@@ -1209,7 +1340,7 @@ def csv_rows(root):
     out = []
     for pth, textcol, labelcol in csv_sources(root):
         try:
-            with open(pth, newline="", errors="ignore") as fh:
+            with open_safe(pth) as fh:
                 for r in _csv.DictReader(fh):
                     t = (r.get(textcol) or "").strip()
                     if not t:
@@ -1237,7 +1368,7 @@ def corpus(root, csv=True):
         # One unreadable file (mode 000, or deleted since the walk) is skipped: raised,
         # it emptied the whole read inside the hook, whose catch-all let the write through.
         try:
-            docs[corpus_key(root, p, rs)] = strip(p.read_text(errors="ignore"))
+            docs[corpus_key(root, p, rs)] = strip(read_safe(p))
         except OSError:
             continue
     if csv:
@@ -1266,7 +1397,7 @@ def archived_claims(root):
     out = []
     for p in sorted(_archive_md(root)):
         try:
-            body = p.read_text(errors="ignore")
+            body = read_safe(p)
         except OSError:
             continue
         out.extend(ts for _, ts in claims(strip(body)))
@@ -1438,7 +1569,7 @@ def index_hooks(root):
     for p in md_files(root):
         if p.name not in index_files:
             continue
-        for line in p.read_text(errors="ignore").splitlines():
+        for line in read_or_empty(p).splitlines():
             m = IDX_LINE.match(line)
             if m:
                 hook = m.group("hook").lstrip(" —-").strip()
@@ -1463,7 +1594,7 @@ def dangling(root):
     by file stem or by the frontmatter `name:`, which is Claude Code's auto-memory
     convention (`[[verify-end-to-end]]` -> `feedback_verify_end_to_end.md`)."""
     files = set()
-    texts = {p: p.read_text(errors="ignore") for p in md_files(root)}
+    texts = {p: read_or_empty(p) for p in md_files(root)}
     for p, txt in texts.items():
         files.add(p.stem.replace("-", "_"))
         name = front_name(txt)
@@ -1505,7 +1636,7 @@ def csv_pointers(root):
     sources = {p.name: p for p, _, _ in csv_sources(root)}
     cache, out = {}, []
     for p in md_files(root):
-        txt = p.read_text(errors="ignore")
+        txt = read_or_empty(p)
         for m in QUERY_PTR.finditer(txt):
             if not re.search(r"\bquery\b", txt[max(0, m.start() - 60):m.end()], re.I):
                 continue
@@ -1694,7 +1825,7 @@ def citations(root):
     """{(path, line): {citing file, ...}} across the corpus."""
     out = defaultdict(set)
     for p in md_files(root):
-        for m in CITE.finditer(p.read_text(errors="ignore")):
+        for m in CITE.finditer(read_or_empty(p)):
             out[(m.group(1), int(m.group(2)))].add(p.name)
     return out
 
@@ -2353,7 +2484,7 @@ def cmd_budget(root):
         if p.name in ledger_names:           # chronology: length is the design, not a breach
             ledgers.append(f"{p.stat().st_size // 1024}KB {corpus_key(root, p, rs)}")
             continue
-        txt = p.read_text(errors="ignore")
+        txt = read_or_empty(p)
         name = corpus_key(root, p, rs)
         hits = [(i + 1, l.strip()[:110]) for i, l in enumerate(txt.splitlines())
                 if HISTORY_CLAUSE.search(l)]
@@ -2664,18 +2795,24 @@ def fixture_trust():
     `yes` is assumed, so behaviour tests read as before. The trust boundary
     itself is tested in tests/test_trust.py against the real check."""
     g = globals()
-    real_trusted, real_confirms = g["trusted"], g["human_confirms"]
+    real_trusted, real_confirms, real_registry = g["trusted"], g["human_confirms"], g["REGISTRY"]
     tmp = Path(tempfile.gettempdir()).resolve()
+    scratch = Path(tempfile.mkdtemp(prefix="locket-selftest-registry-"))
 
     def fixture_trusted(d):
         p = Path(d).resolve()
         return p == tmp or tmp in p.parents or real_trusted(d)
 
+    # a registration the suite makes lands in a scratch registry, never the live one
     g["trusted"], g["human_confirms"] = fixture_trusted, (lambda _d: True)
+    if real_registry == HOME / ".locket" / "corpora.json":
+        g["REGISTRY"] = scratch / "corpora.json"
     try:
         yield
     finally:
-        g["trusted"], g["human_confirms"] = real_trusted, real_confirms
+        g["trusted"], g["human_confirms"], g["REGISTRY"] = real_trusted, real_confirms, real_registry
+        import shutil
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def selftest():
@@ -5601,8 +5738,9 @@ def cmd_ledgers(root):
         return 0
     bad = 0
     for p, schema, glob in files:
-        findings = check_ledger_text(schema, p.read_text(errors="ignore"))
-        rows = max(len(_csv_rows_of(p.read_text(errors="ignore"))) - 1, 0)
+        body = read_or_empty(p)
+        findings = check_ledger_text(schema, body)
+        rows = max(len(_csv_rows_of(body)) - 1, 0)
         print(f"{corpus_key(root, p)}  schema {glob!r}  {rows} rows, {len(findings)} findings")
         for f in findings:
             print(f"  {f}")
@@ -7166,7 +7304,7 @@ def is_registry(path):
     """Whether `path` names the trust registry, by resolved path: a decidable
     question, so the gate on it may block."""
     try:
-        return Path(path).expanduser().resolve() == REGISTRY.expanduser().resolve()
+        return _same(path, REGISTRY)
     except (OSError, RuntimeError, ValueError):
         return False
 
@@ -7183,10 +7321,7 @@ def hook_mode(payload):
         try:
             msg, blocking = ledger_decision(path, ti)
             if not blocking:
-                try:
-                    prior = Path(path).read_text(errors="ignore")
-                except OSError:
-                    prior = ""
+                prior = read_or_empty(path)
                 msg = source_row_decision(path, ti, prior)[0]
         except Exception as e:          # a guardrail must never break a write
             health_error("hook", "ledger", e)
@@ -7196,10 +7331,7 @@ def hook_mode(payload):
     if root is None:
         return 0
     text = str(ti.get("content") or ti.get("new_string") or "")
-    try:
-        prior = Path(path).read_text(errors="ignore")
-    except OSError:                     # new file, or unreadable
-        prior = ""
+    prior = read_or_empty(path)         # "" for a new file, an unreadable one or a refused one
     if ti.get("_append") and prior:     # an append is a Write of prior + entry
         text = prior.rstrip("\n") + "\n" + text
     name = Path(path).name
