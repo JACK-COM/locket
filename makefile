@@ -7,11 +7,12 @@ help: ## | List all available commands
 	| sed -n 's/^\(.*\): \(.*\)##\(.*\)/\1\3/p' \
 	| column -t -s '|'
 
-test: ## | Check the panoply-lib copies, then run the three selftests
+test: ## | Check the panoply-lib copies, then run the selftests and tests/
 	../panoply-lib/sync.sh --check locket
 	python3 src/locket/memscan.py selftest
 	python3 src/locket/locket.py selftest
 	python3 src/locket/locket_mcp.py --selftest
+	python3 -m unittest discover -s tests -t .
 
 version-patch: ## | Release the next PATCH version: stamp, test, tag, push, move the formula
 	@$(MAKE) _bump-version BUMP=patch

@@ -32,6 +32,7 @@ grep -q "^__version__ = \"$version\"" "$src/locket.py" || { echo "could not stam
 python3 "$src/memscan.py" selftest
 python3 "$src/locket.py" selftest
 python3 "$src/locket_mcp.py" --selftest
+(cd "$repo" && python3 -m unittest discover -s tests -t .)
 
 git -C "$repo" commit -qam "$version"
 git -C "$repo" tag -a "v$version" -m "$version"

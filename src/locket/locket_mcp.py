@@ -84,14 +84,14 @@ def t_corpora(args):
 
 
 def t_init(args):
-    """The one call for a folder that already holds markdown: manifest, registry
-    row, index. `memscan.cmd_init` prints its report; stderr carries a refusal."""
+    """Write a folder's manifest. Never trusts it: trust is a person's act at a
+    terminal (`locket trust`), so the reply names that command instead."""
     d = str(args.get("path") or "").strip()
     if not d:
         raise ValueError("path is required: the absolute path of the folder to make a store")
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        rc = memscan.cmd_init(d)
+        rc = memscan.cmd_init(d, confirm=lambda _d: False)
     return (out.getvalue() + err.getvalue()).strip() or f"init returned {rc}"
 
 
@@ -250,9 +250,9 @@ TOOLS = {
     "locket_corpora": (t_corpora, "Every memory store on this machine, with markdown file and "
                                   "registered CSV-row counts, the sources every check reads.", {}),
     "locket_init": (t_init, "Make a folder of markdown a memory store every other tool can find: "
-                            "writes locket.json if absent, registers the path, builds the index. "
-                            "Idempotent. Call it when someone points you at a folder and says it "
-                            "is their memory, vault or notes.",
+                            "writes locket.json if absent. It does not trust the folder: a person must "
+                            "run `locket trust <path>` at a terminal before the store acts, and "
+                            "the reply names that command for you to pass on. Idempotent.",
                     {"path": {"type": "string", "description": "Absolute path of the folder."}}),
     "locket_forget": (t_forget, "Drop a store from the registry. The folder's locket.json and "
                                 ".memfind/ are left for the user to delete.",
@@ -397,10 +397,12 @@ def selftest():
     r = call({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
               "params": {"name": "locket_find", "arguments": {}}})
     assert r["result"]["isError"] and "statement is required" in r["result"]["content"][0]["text"], r
-    # A synthetic store: a manifest makes any directory a corpus, so the live
+    # A synthetic store: a trusted manifest makes a directory a corpus, so the live
     # memory is never read. Reading the first real store made this test depend
     # on whatever shape that store happened to have on the machine running it.
     root = scratch / "store"
+    # the store a person trusted: registered in the scratch registry the server reads
+    (scratch / "corpora.json").write_text(json.dumps({"corpora": [str(root.resolve())]}))
     root.mkdir()
     (root / memscan.MANIFEST).write_text(json.dumps({
         "index_files": [], "ledger_surfaces": [], "holding_spaces": ["INBOX.md"]}))
@@ -432,7 +434,7 @@ def selftest():
     assert "already own" in r["result"]["content"][0]["text"] or "not asked" in \
         r["result"]["content"][0]["text"].replace("has not asked", "not asked"), r
     # a CSV takes the hook's CSV question, the ledger schema, not "outside any store"
-    hist = scratch / "HISTORY-Proj-Sessions.csv"
+    hist = root / "HISTORY-Proj-Sessions.csv"
     hist.write_text("date,title,summary,area,commit_hash\n2026-09-20,Ok,Fine.,api,5ab427a\n")
     r = call({"jsonrpc": "2.0", "id": 15, "method": "tools/call",
               "params": {"name": "locket_check_before_write",
@@ -461,12 +463,14 @@ def selftest():
     r = call({"jsonrpc": "2.0", "id": 12, "method": "tools/call",
               "params": {"name": "locket_init", "arguments": {"path": str(vault)}}})
     txt = r["result"]["content"][0]["text"]
-    assert not r["result"]["isError"] and "(written, name " in txt and "(added)" in txt, txt
+    # the manifest is written but the folder is not trusted: an agent cannot grant it
+    assert "(written, name " in txt and "locket trust " in txt and "(added)" not in txt, txt
+    assert str(vault.resolve()) not in (scratch / "corpora.json").read_text()
     r = call({"jsonrpc": "2.0", "id": 13, "method": "tools/call",
               "params": {"name": "locket_corpora", "arguments": {}}})
-    assert "vault" in r["result"]["content"][0]["text"], r["result"]["content"][0]["text"]
+    assert "vault" not in r["result"]["content"][0]["text"], r["result"]["content"][0]["text"]
     r = call({"jsonrpc": "2.0", "id": 14, "method": "tools/call",
-              "params": {"name": "locket_forget", "arguments": {"path": str(vault)}}})
+              "params": {"name": "locket_forget", "arguments": {"path": str(root)}}})
     assert "row removed" in r["result"]["content"][0]["text"], r
     r = call({"jsonrpc": "2.0", "id": 8, "method": "nope"})
     assert r["error"]["code"] == -32601, r

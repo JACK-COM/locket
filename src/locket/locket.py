@@ -36,7 +36,7 @@ SCRIPTS = ("memscan.py", "memfind.py", "locket.py", "locket_mcp.py", "trigger.py
 # memfind verbs, in memfind's own spelling; `find` is the bare statement form.
 FIND = {"find": None, "siblings": "--siblings", "index": "--index", "embedder": "--embedder"}
 SCAN = ("audit", "across", "dupes", "graduated", "ledgers", "budget", "pointers", "links", "cites",
-        "corpora", "init", "schema", "migrate", "forget", "against")
+        "corpora", "init", "trust", "untrust", "schema", "migrate", "forget", "against")
 
 # The verb table: (name, argument metavar, one-line help, examples). argparse renders
 # `locket -h` and `locket <verb> -h` from it; dispatch below stays by hand, so
@@ -118,7 +118,12 @@ VERBS = [
     ("schema", "[<dir>]", "write the manifest schema, or check a manifest",
      "locket schema                         write ~/.locket/locket.schema.json for editor hints\n"
      "locket schema ~/notes                 check that store's locket.json against it"),
-    ("forget", "<dir>", "stop listing a store; its files and locket.json stay",
+    ("trust", "<dir>", "let a store's locket.json act (trigger rows, ledger schemas, sources); "
+     "asks you to type yes at a terminal, so an agent cannot grant it",
+     "locket trust ~/Software/myapp"),
+    ("untrust", "<dir>", "withdraw a store's trust; its locket.json stays, inert",
+     "locket untrust ~/Software/myapp"),
+    ("forget", "<dir>", "stop listing a store and withdraw its trust; its files and locket.json stay",
      "locket forget ~/old-notes"),
     ("install", "[--hooks] [--codex] [--desktop]",
      "put `locket` on PATH (%s); --hooks merges the write-time hooks into Claude Code's "
@@ -787,7 +792,12 @@ def _probe_hook(cmd, codex=False):
                               "zz-probe.md\n+" + _PROBE + "\n*** End Patch"}})
         # supervised, so a firing hook nudges on stdout and exits 0; exit 2 would
         # also be what python prints for a script path that is gone
-        r, _secs = _run_hook(cmd, payload, 30, LOCKET_HEALTH_DIR=str(store / ".health"))
+        # the probe store is trusted through a registry of its own, so the probe never
+        # adds a row to the live one and an untrusted manifest stays inert as it should
+        reg = store / ".registry.json"
+        reg.write_text(json.dumps({"corpora": [str(store.resolve())]}))
+        r, _secs = _run_hook(cmd, payload, 30, LOCKET_HEALTH_DIR=str(store / ".health"),
+                             LOCKET_REGISTRY=str(reg))
         if r is None:
             return "timed out after 30s"
         if r.returncode != 0:
@@ -1198,6 +1208,16 @@ def cmd_doctor():
         row("fail", "stores", "none found", "locket init <folder of markdown>")
     # A host store or a project memory is a store by convention and needs no manifest.
     conventional = set(memscan._raw_corpora().values())
+    try:
+        loose = memscan.untrusted_stores()
+    except OSError:
+        loose = []
+    for d in loose:
+        row("warn", "trust", f"{d} holds a {memscan.MANIFEST} that is not trusted, so it acts as no store: "
+            "its trigger rows, ledger schemas and sources are ignored",
+            f"locket trust {shlex.quote(str(d))}  (at a terminal, if you made it), or delete its {memscan.MANIFEST}")
+    row("ok", "trust", "scope: directories Claude Code, Codex or Hermes have opened a session in, and their parents"
+        + ("" if loose else "; no untrusted store found"))
     for gone in (p for p in memscan.registry_stale() if p not in conventional):
         q = shlex.quote(str(gone))
         row("warn", "registry", f"{gone} is registered but its {memscan.MANIFEST} is gone, so `all` and the "
@@ -1520,7 +1540,7 @@ def _selftest_all():
     so a hook a test spawns never writes the live record; restored on the way out."""
     import tempfile
     before = os.environ.get("LOCKET_HEALTH_DIR")
-    with tempfile.TemporaryDirectory() as t:
+    with tempfile.TemporaryDirectory() as t, memscan.fixture_trust():
         os.environ["LOCKET_HEALTH_DIR"] = str(Path(t) / "hook-health")
         try:
             return _selftest_body()
@@ -1812,6 +1832,10 @@ def main(argv):
             moved = f"warning: {configure._legacy_path()} not moved ({e}); Locket still reads it"
         if moved:
             print(moved)
+        # 0.12: a manifest acts only once a person trusts it; name the ones that stopped
+        for d in memscan.untrusted_stores():
+            print(f"trust: {d} holds a {memscan.MANIFEST} that is no longer acted on until a person "
+                  f"trusts it:  locket trust {shlex.quote(str(d))}")
     if verb in SCAN:
         return memscan.main(["memscan.py", verb, *rest])
     if verb in HOOK_VERBS:

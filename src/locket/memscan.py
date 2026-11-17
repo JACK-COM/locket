@@ -35,6 +35,7 @@ Stdlib only, by design: this runs inside a PreToolUse hook on every memory
 write, so it pays interpreter startup and nothing else.
 """
 import ast
+import contextlib
 import fnmatch
 import hashlib
 import json
@@ -150,6 +151,56 @@ def registry():
     return [Path(x) for x in rows if isinstance(x, str)] if isinstance(rows, list) else []
 
 
+def _inode(p):
+    """(st_dev, st_ino) of a path, or None. Identity for trust: `Path` equality
+    calls `/users` and `/Users` two directories on a case-insensitive disk."""
+    try:
+        st = os.stat(p)
+    except (OSError, ValueError):
+        return None
+    return st.st_dev, st.st_ino
+
+
+_TRUST_CACHE = {}
+
+
+def _trusted_ids():
+    """Inodes of the host stores and every registered path, recomputed only when
+    the registry file changes, because the walk asks once per manifest it meets."""
+    try:
+        st = REGISTRY.stat()
+        key = (str(REGISTRY), st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = (str(REGISTRY), None, None)
+    key += tuple(str(p) for p in HOST_STORES.values())
+    if key not in _TRUST_CACHE:
+        ids = {_inode(p) for p in [*HOST_STORES.values(), *registry()]}
+        ids.discard(None)
+        _TRUST_CACHE.clear()
+        _TRUST_CACHE[key] = ids
+    return _TRUST_CACHE[key]
+
+
+def trusted(d):
+    """Whether directory `d` may act as a store: a host store, Claude Code's
+    `projects/<slug>/memory`, or a path a human registered (`locket trust`,
+    `locket init` at a terminal). A manifest anywhere else is inert, because a
+    cloned repository carries whatever manifest its author wrote: trigger rows
+    that block every tool call, ledger schemas, `sources` outside the directory."""
+    return _granted(Path(d))
+
+
+def _granted(d):
+    """The real trust check, which the selftest's fixture trust never replaces:
+    `grant_trust` asks it, so a fixture is still registered for real."""
+    ident = _inode(d)
+    if ident is None:
+        return False
+    if ident in _trusted_ids():
+        return True
+    return d.name == "memory" and _inode(d.parent.parent) == _inode(CLAUDE / "projects")
+
+
 def registry_stale():
     """Registered paths whose manifest is gone. Listed, never enumerated."""
     return [p for p in registry() if not has_manifest(p)]
@@ -164,6 +215,140 @@ def register(root):
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     REGISTRY.write_text(json.dumps(
         {"corpora": sorted(str(p) for p in rows + [root])}, indent=2) + "\n")
+    return True
+
+
+def _first_cwd(path, limit=60):
+    """The first `"cwd"` value in a session's JSON lines, or None."""
+    try:
+        with open(path, errors="ignore") as f:
+            for _, line in zip(range(limit), f):
+                if '"cwd"' not in line:
+                    continue
+                m = re.search(r'"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"', line)
+                if m:
+                    return json.loads(f'"{m.group(1)}"')
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _unslug(slug, budget=2000):
+    """The existing directory Claude Code slugified into `slug`, or None. The slug
+    replaces every non-alphanumeric character with `-`, so `a-b` may be `a/b`,
+    `a-b`, `a.b` or `a_b`; matched against the disk one component at a time."""
+    def slugify(name):
+        return re.sub(r"[^A-Za-z0-9]", "-", name)
+
+    steps = [0]
+
+    def walk(d, rest):
+        if not rest:
+            return d
+        steps[0] += 1
+        if steps[0] > budget:
+            return None
+        try:
+            names = os.listdir(d)
+        except OSError:
+            return None
+        for n in sorted(names, key=len, reverse=True):
+            sn = slugify(n)
+            if rest == sn or rest.startswith(sn + "-"):
+                p = os.path.join(d, n)
+                if os.path.isdir(p):
+                    hit = walk(p, rest[len(sn) + 1:])
+                    if hit:
+                        return hit
+        return None
+
+    return walk("/", slug[1:]) if slug.startswith("-") else None
+
+
+def session_dirs():
+    """Every working directory a host's session record names: Claude Code's
+    project transcripts, Codex rollouts, Hermes `state.db`. The detection surface
+    for an untrusted store; a directory no host has opened is not on it."""
+    out = set()
+    for proj in (CLAUDE / "projects").glob("*"):
+        hit = _unslug(proj.name)
+        if hit:
+            out.add(hit)
+        logs = sorted(proj.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+        for f in logs[:3]:
+            cwd = _first_cwd(f)
+            if cwd:
+                out.add(cwd)
+                break
+    rollouts = sorted((CODEX / "sessions").glob("*/*/*/*.jsonl"), reverse=True)
+    for f in rollouts[:500]:
+        cwd = _first_cwd(f, limit=1)
+        if cwd:
+            out.add(cwd)
+    db = HERMES / "state.db"
+    if db.is_file():
+        import sqlite3
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+            try:
+                out.update(r[0] for r in con.execute(
+                    "SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL AND cwd != ''"))
+            finally:
+                con.close()
+        except sqlite3.Error:
+            pass
+    return out
+
+
+def untrusted_stores():
+    """Directories holding a manifest that is not trusted, found on the session
+    record's working directories and their parents up to the home directory."""
+    found, seen = set(), set()
+    for cwd in session_dirs():
+        d = Path(cwd)
+        for p in (d, *d.parents):
+            if p in seen:
+                break
+            seen.add(p)
+            if p == HOME or p == p.parent:
+                break
+            if has_manifest(p) and not _granted(p):
+                found.add(p)
+    return sorted(found)
+
+
+def human_confirms(d):
+    """True only when a person at a terminal types `yes`. Trust turns a passive
+    manifest into one that can block tool calls and read files outside its
+    directory, so it is never granted on an agent's word: a hook-run agent has
+    no terminal, and a harmless-looking `locket init .` planted in a README must
+    not be enough. A determined agent can fake a terminal (`script`, a pty); that
+    is a deliberate circumvention, the same class as editing the registry by hand,
+    which the write gate refuses separately."""
+    if not (sys.stdin.isatty() and sys.stderr.isatty()):
+        return False
+    print(f"Trust {d} as a Locket store? Its manifest can then add trigger rows that "
+          f"refuse tool calls, ledger schemas and source files. Only trust a directory "
+          f"you made or have read.", file=sys.stderr)
+    try:
+        return input("Type yes to trust it: ").strip() == "yes"
+    except EOFError:
+        return False
+
+
+def grant_trust(d, confirm=None):
+    """Register `d` once `confirm(d)` says a person agreed, printing the outcome.
+    True when `d` is trusted afterwards."""
+    d = Path(d).expanduser().resolve()
+    if _granted(d):
+        print(f"registry: {REGISTRY} (already listed)" if d in registry()
+              else f"trust: {d} is a store by convention on this host")
+        return True
+    if not (confirm or human_confirms)(d):
+        print(f"trust: not granted. Trust is given by a person at a terminal, not by an "
+              f"agent; ask the user to run:\n  locket trust {shlex.quote(str(d))}")
+        return False
+    print(f"registry: {REGISTRY} ({'added' if register(d) else 'already listed'})")
     return True
 
 
@@ -438,8 +623,12 @@ def _phys_root_of(d):
     projects = CLAUDE / "projects"
     stores = set(HOST_STORES.values())
     for parent in (d, *d.parents):
-        if parent in stores or has_manifest(parent):
+        if parent in stores:
             return parent
+        if has_manifest(parent):
+            # An untrusted manifest makes its subtree no store at all, never a
+            # member of a trusted store above it: the parent's walk stops here too.
+            return parent if trusted(parent) else None
         if parent.name == "memory" and parent.parent.parent == projects:
             return parent
     return None
@@ -494,10 +683,17 @@ def search_root(words, cwd=None):
 
 
 def _read_manifest(root):
-    """The manifest as a dict, or {} where it is absent or unreadable. A broken
-    manifest must degrade to the defaults rather than take a hook down with it."""
-    if root is None:
+    """The manifest as a dict, or {} where it is absent, unreadable or untrusted.
+    A broken manifest must degrade to the defaults rather than take a hook down
+    with it, and an untrusted one is read as no manifest at all."""
+    if root is None or not trusted(root):
         return {}
+    return _manifest_data(root)
+
+
+def _manifest_data(root):
+    """The manifest file's own contents, trusted or not: for `init` editing a
+    file it is about to rewrite, never for acting on one."""
     m = manifest_file(root)
     if not m.is_file():
         return {}
@@ -987,7 +1183,7 @@ def _own_csv_sources(root):
     entries = _read_manifest(root).get("sources")
     if not isinstance(entries, list):
         m = Path(root) / LEGACY_MANIFEST
-        if not m.is_file():
+        if not m.is_file() or not trusted(root):
             return []
         try:
             entries = json.loads(m.read_text())
@@ -1775,7 +1971,7 @@ def _stores_under(d):
     return [hit] if hit else []
 
 
-def cmd_init(target, index=True, parent=None, name=None, ledgers=None):
+def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=None):
     """Make a directory a corpus every mode can find: write an empty manifest
     where none exists, register the path, build the index where an embedder
     answers, print the corpora line. Running it twice changes nothing. A
@@ -1856,11 +2052,14 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None):
                   f"label the joining store: locket init {d} --parent {parent} --name <label>",
                   file=sys.stderr)
             return 1
-        man = dict(_read_manifest(d))
+        man = dict(_manifest_data(d))
         if name:
             man["name"] = name
         man["belongs_to"] = parent
         m.write_text(json.dumps(man, indent=2) + "\n")
+        settings.cache_clear()
+        if not grant_trust(d, confirm):
+            return 1
         settings.cache_clear()
         if parent_of(d, _raw_corpora()) != target:
             print(f"{d} did not resolve to {target} after the write; check for a cycle "
@@ -1913,7 +2112,7 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None):
     if m.is_file():
         by_convention = d in set(HOST_STORES.values()) or (
             d.name == "memory" and d.parent.parent == CLAUDE / "projects")
-        man = _read_manifest(d)
+        man = _manifest_data(d)
         if name is not None and man.get("name") != name:
             m.write_text(json.dumps({**man, "name": name}, indent=2) + "\n")
             print(f"manifest: {m} (kept, name {name!r})")
@@ -1928,7 +2127,9 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None):
     if by_convention:
         print("registry: not needed; listed by convention")
     else:
-        print(f"registry: {REGISTRY} ({'added' if register(d) else 'already listed'})")
+        if not grant_trust(d, confirm):
+            return 1
+        settings.cache_clear()
     if ledgers is not None and scaffold_ledgers(d, ledgers):
         return 1
     n, rows = len(md_files(d)), len(csv_rows(d))
@@ -2456,11 +2657,32 @@ def _selftest_hook_health_body(d):
     assert health_ack() and not os.listdir(marks)
 
 
+@contextlib.contextmanager
+def fixture_trust():
+    """For the selftests only: the suites' synthetic stores live under the temp
+    dir and are trusted as though a person had registered them, and the person's
+    `yes` is assumed, so behaviour tests read as before. The trust boundary
+    itself is tested in tests/test_trust.py against the real check."""
+    g = globals()
+    real_trusted, real_confirms = g["trusted"], g["human_confirms"]
+    tmp = Path(tempfile.gettempdir()).resolve()
+
+    def fixture_trusted(d):
+        p = Path(d).resolve()
+        return p == tmp or tmp in p.parents or real_trusted(d)
+
+    g["trusted"], g["human_confirms"] = fixture_trusted, (lambda _d: True)
+    try:
+        yield
+    finally:
+        g["trusted"], g["human_confirms"] = real_trusted, real_confirms
+
+
 def selftest():
     """Every memscan selftest, with hook health pointed at a throwaway directory for the
     whole run, so a hook a test spawns never writes the live record; restored after."""
     before = os.environ.get("LOCKET_HEALTH_DIR")
-    with tempfile.TemporaryDirectory() as t:
+    with tempfile.TemporaryDirectory() as t, fixture_trust():
         os.environ["LOCKET_HEALTH_DIR"] = str(Path(t) / "hook-health")
         try:
             return _selftest_inner()
@@ -3807,8 +4029,10 @@ def _selftest_inner():
     hdr = "date,title,summary,area,repo,commit_hash,issue,pr\n"
     good = '2026-09-20,Composite corpus,"Two stores joined into one, links resolved.",api,grp/sub/proj,5ab427a,ENG-42,#155\n'
     hist.write_text(hdr + good)
+    assert ledger_schema_for(hist) == (None, None), "no schema governs a CSV outside every store"
+    (led / MANIFEST).write_text("{}\n")
     sch, glob = ledger_schema_for(hist)
-    assert sch is not None and glob == "HISTORY-*-Sessions.csv", "the built-in governs the file outside any store"
+    assert sch is not None and glob == "HISTORY-*-Sessions.csv", "the built-in governs the file inside a store"
     assert ledger_schema_for(led / "notes.csv") == (None, None)
     assert ledger_decision(str(hist), {"content": hdr + good}) == (None, False), "a clean whole-file write passes"
     assert ledger_decision(str(hist), {"content": hdr}) == (None, False), "a header alone passes"
@@ -3874,7 +4098,7 @@ def _selftest_inner():
     with contextlib.redirect_stdout(buf):
         n = cmd_ledgers(led)
     assert n == 1 and "2 ledger(s) checked, 1 finding(s)" in buf.getvalue(), buf.getvalue()
-    (led / MANIFEST).unlink(); settings.cache_clear()
+    (led / MANIFEST).write_text("{}\n"); settings.cache_clear()
     assert "@@" not in usage() and "caps title ≤90" in usage(), "the help renders the built-ins from the constant"
     # an entry naming a built-in's glob MERGES onto it: only the keys it names change
     (led / MANIFEST).write_text(json.dumps({"ledgers": [
@@ -3888,7 +4112,7 @@ def _selftest_inner():
     assert blocking and "date" in msg, "the built-in date pattern survives an enum override"
     msg, blocking = ledger_decision(str(hist), {"content": hdr + f'2026-09-20,{"t" * 91},s,docs,,,,\n'})
     assert blocking and "cap 90" in msg, "the built-in caps survive an enum override"
-    (led / MANIFEST).unlink(); settings.cache_clear()
+    (led / MANIFEST).write_text("{}\n"); settings.cache_clear()
     # `extends`: a file named outside the glob inherits a built-in by declaration
     odd = led / "HISTORY-session-summary.csv"
     assert ledger_schema_for(odd) == (None, None), "outside the glob, nothing governs it"
@@ -3902,7 +4126,7 @@ def _selftest_inner():
     (led / MANIFEST).write_text(json.dumps({"ledgers": [{"path": odd.name, "extends": "nope"}]}))
     settings.cache_clear()
     assert any("is no built-in" in f for f in validate_manifest(led)), validate_manifest(led)
-    (led / MANIFEST).unlink(); settings.cache_clear()
+    (led / MANIFEST).write_text("{}\n"); settings.cache_clear()
     # an entry naming one file inside the built-in's glob governs the sweep alone
     (led / MANIFEST).write_text(json.dumps({"ledgers": [
         {"path": hist.name, "enum": {"area": ["docs", ""]}}]}))
@@ -3911,7 +4135,7 @@ def _selftest_inner():
     with contextlib.redirect_stdout(buf):
         n = cmd_ledgers(led)
     assert n == 0 and "1 ledger(s) checked, 0 finding(s)" in buf.getvalue(), buf.getvalue()
-    (led / MANIFEST).unlink(); settings.cache_clear(); hist.write_text(hdr + good)
+    (led / MANIFEST).write_text("{}\n"); settings.cache_clear(); hist.write_text(hdr + good)
     # rulings and claims: one glob covers the single-store and the project name
     rh, ch = "Ruling,Category,Area,Date\n", "Claim,Category,Area,Source,Date\n"
     rul = '"Pro unlocks by a one-time purchase, never a subscription.",product,pricing,2026-09-26\n'
@@ -3963,7 +4187,7 @@ def _selftest_inner():
         n = cmd_ledgers(led)
     assert n == 1 and "memory/RULINGS.csv" in buf.getvalue() and "archive/" not in buf.getvalue(), buf.getvalue()
     (led / "memory" / "RULINGS.csv").unlink(); (led / "archive" / "RULINGS.csv").unlink()
-    (led / MANIFEST).unlink(); settings.cache_clear()
+    (led / MANIFEST).write_text("{}\n"); settings.cache_clear()
 
     # --- host adapters: Hermes speaks the same payload in its own vocabulary ---
     h = normalise({"hook_event_name": "pre_tool_call", "tool_name": "write_file",
@@ -4853,8 +5077,11 @@ MODES
   migrate [DIR|all]  rename a store's older `memfind.json` manifest to
             `locket.json` in place; every store on the machine when DIR is
             omitted. Until a store is migrated the old name is still read.
-  forget DIR  drop DIR's registry row. Its manifest and `.memfind/` are yours
-            to delete; without them the directory is no longer a corpus.
+  trust DIR  let DIR's manifest act: its trigger rows, ledger schemas and
+            sources. Asks a person at a terminal to type yes; an agent cannot
+            grant it. Until then a manifest outside the host stores is inert.
+  forget DIR  drop DIR's registry row, which also withdraws its trust (`untrust`
+            is the same verb). Its manifest stays, inert.
   selftest  run the internal checks.
 
 HOOK MODES (PreToolUse entry points, JSON on stdin; not for manual use)
@@ -5048,12 +5275,16 @@ def _merge_schema(base, own):
 def ledger_schema_for(path):
     """(schema, glob) governing a CSV path, or (None, None). A manifest entry is
     matched against the path relative to its store and against the basename;
-    a built-in against the basename anywhere on disk."""
+    a built-in against the basename anywhere inside a trusted store. Outside
+    every store no schema applies: a cloned repo's `RULINGS.csv` must not be
+    able to block a write or put its header text in front of the agent."""
     p = Path(path).expanduser()
     if p.suffix.lower() != ".csv":
         return None, None
     phys = _phys_root_of(p.parent)
-    root = top_of(phys) if phys is not None else None
+    if phys is None:
+        return None, None
+    root = top_of(phys)
     try:
         rel_path = p.relative_to(root).as_posix() if root is not None else p.name
     except ValueError:
@@ -6927,12 +7158,27 @@ def gate_status():
     return "\n".join(lines) if lines else "no known host home found; CLI modes only"
 
 
+REGISTRY_REFUSAL = ("This write edits Locket's trust registry, {reg}. Trust is a person's act at a "
+                    "terminal: ask the user to run  locket trust <dir>  (or  locket untrust <dir>).")
+
+
+def is_registry(path):
+    """Whether `path` names the trust registry, by resolved path: a decidable
+    question, so the gate on it may block."""
+    try:
+        return Path(path).expanduser().resolve() == REGISTRY.expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def hook_mode(payload):
-    """The write-time gate on one normalised Write or Edit: the ledger schema for a
-    CSV, the lexical checks, then the 2e question. Reached from `hook`, and from
-    `bashguard` when a shell call turned out to be a Codex patch."""
+    """The write-time gate on one normalised Write or Edit: the trust registry, the
+    ledger schema for a CSV, the lexical checks, then the 2e question. Reached from
+    `hook`, and from `bashguard` when a shell call turned out to be a Codex patch."""
     ti = payload["tool_input"]
     path = str(ti.get("file_path", ""))
+    if path and is_registry(path):
+        return emit(payload, REGISTRY_REFUSAL.format(reg=REGISTRY), True, "hook")
     if path.lower().endswith(".csv"):  # a ledger row: schema, decidable, may block
         try:
             msg, blocking = ledger_decision(path, ti)
@@ -7019,6 +7265,10 @@ def _hook_entry(mode):
         if payload is None or payload["tool_name"] != "Bash":
             return 0
         command = str(payload["tool_input"].get("command", ""))
+        if ".locket/corpora.json" in command or str(REGISTRY) in command:
+            # a shell command naming the registry: whether it writes is not decidable
+            # from the text, so this warns where the Write/Edit gate refuses
+            return emit(payload, REGISTRY_REFUSAL.format(reg=REGISTRY), False, mode)
         try:
             msg, blocking = ledger_bash_decision(command, payload.get("cwd"))
             if msg is None:
@@ -7096,12 +7346,17 @@ def _main_rest(mode, argv):
         if not n:
             print("migrate: no store manifest needs renaming")
         return 0
-    if mode == "forget":
+    if mode in ("forget", "untrust"):
         if len(argv) < 3:
-            print("forget needs a directory:  locket forget <dir>", file=sys.stderr)
+            print(f"{mode} needs a directory:  locket {mode} <dir>", file=sys.stderr)
             return 1
         print(f"registry: {REGISTRY} ({'row removed' if forget(argv[2]) else 'not listed'})")
         return 0
+    if mode == "trust":
+        if len(argv) < 3 or not Path(argv[2]).expanduser().is_dir():
+            print("trust needs a directory:  locket trust <dir>", file=sys.stderr)
+            return 1
+        return 0 if grant_trust(argv[2]) else 1
     if mode == "schema":                    # needs no corpus: writes the manifest schema
         if len(argv) > 2:
             findings = validate_manifest(Path(argv[2]).expanduser())
@@ -7168,7 +7423,7 @@ def _main_rest(mode, argv):
     else:
         # An unknown mode is usually the corpus argument with the mode omitted.
         print(f"Unknown mode {mode!r}. Did you forget a mode "
-              f"(audit, across, dupes, budget, ledgers, pointers, links, cites, corpora, init, schema, migrate, forget, against)?")
+              f"(audit, across, dupes, budget, ledgers, pointers, links, cites, corpora, init, trust, untrust, schema, migrate, forget, against)?")
         print(usage())
         return 1
     return 0
