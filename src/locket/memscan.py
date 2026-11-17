@@ -2000,7 +2000,7 @@ def cmd_across(floor=PAIR_FLOOR):
     tagged = {(fa, fb, sa) for _, fa, fb, sa, _ in grad}
     for jac, fa, fb, sa, sb in cross:
         tag = " [holding side: promoted, never retired]" if (fa, fb, sa) in tagged or (fb, fa, sb) in tagged else ""
-        print(f"[{jac:.2f}]{tag} {fa}\n       {fb}\n   A: {sa[:200]}\n   B: {sb[:200]}\n")
+        print(f"[{jac:.2f}]{tag} {fa}\n       {fb}\n   A: {relay(sa)}\n   B: {relay(sb)}\n")
     print("Pairs that currently AGREE, so fork risk rather than divergence: once two copies "
           "drift apart the jaccard falls and nothing here sees them. A store derived from "
           "another (a vault distilled from a host's council store) fires here forever once "
@@ -2022,7 +2022,7 @@ def cmd_audit(root, floor=PAIR_FLOOR):
           f"({len(idx_pairs)} index-restates-its-target); {under} sentences under the "
           f"{MIN_TOKENS}-token floor formed no claim and are in nothing above\n")
     for jac, fa, fb, sa, sb in kept:
-        print(f"[{jac:.2f}] {fa}\n       {fb}\n   A: {sa[:200]}\n   B: {sb[:200]}\n")
+        print(f"[{jac:.2f}] {fa}\n       {fb}\n   A: {relay(sa)}\n   B: {relay(sb)}\n")
     return len(kept)
 
 
@@ -2067,7 +2067,7 @@ def cmd_graduated(root, floor=PAIR_FLOOR):
                  f"({', '.join(present)}) against {len(durable)} durable sources, ledgers excluded")
     print(f"{len(hits)} holding-space claims also held by a durable file; {scope}\n")
     for jac, fh, fd, sh, sd in hits:
-        print(f"[{jac:.2f}] {fh}\n       {fd}\n   holding: {sh[:200]}\n   durable: {sd[:200]}\n")
+        print(f"[{jac:.2f}] {fh}\n       {fd}\n   holding: {relay(sh)}\n   durable: {relay(sd)}\n")
     return len(hits)
 
 
@@ -2389,7 +2389,7 @@ def cmd_dupes(root, floor=PAIR_FLOOR, files=None):
     print(f"{len(scope)} file(s) checked for repeated entries: " +
           ", ".join(f"{k} ({per.get(k, 0)})" for k in sorted(scope)) + "\n")
     for jac, fa, _fb, sa, sb in pairs:
-        print(f"[{jac:.2f}] {fa}\n   A: {sa[:200]}\n   B: {sb[:200]}\n")
+        print(f"[{jac:.2f}] {fa}\n   A: {relay(sa)}\n   B: {relay(sb)}\n")
     return len(pairs)
 
 
@@ -4641,7 +4641,7 @@ def hook_decision(name, tool_input, text, prior, docs, archived=None,
             return None, False
         return (f"{lead} {name} is a holding space and its entries are unique by rule: "
                 f"it already holds this one (closest line {hit[0]:.2f}).\n"
-                f"      existing: {hit[2][:160]}\n"
+                f"      existing: {relay(hit[2], 160)}\n"
                 f"Promote it, discard it, or fold it into the entry already there "
                 f"(prime-memory-discipline.md §2)."), autonomous
     # A dated history clause stacked on a durable surface is §2's forbidden shape,
@@ -4694,7 +4694,7 @@ def hook_decision(name, tool_input, text, prior, docs, archived=None,
     for _combined, best, fname, pair in ranked:
         lines.append(f"  - {fname}   (closest claim {best:.2f})")
         if pair:
-            lines.append(f"      existing: {pair[1][:160]}")
+            lines.append(f"      existing: {relay(pair[1], 160)}")
     lines.append("Rewrite the passage that already owns it rather than leaving a sibling "
                  "(prime-memory-discipline.md §2c). If this genuinely is a new fact, nothing "
                  "to do. Provenance is already subtracted: archived text does not reach "
@@ -4924,11 +4924,12 @@ def memfind_gate(payload, name, tool_input, text, prior, root):
         out.append("Closest existing claims by meaning"
                    + (" (from a stale index):" if stale else ":"))
         for c, f, s in rows:
-            out.append(f"  - {f}   ({c:.2f})")
-            out.append(f"      {s[:150]}")
+            out.append(f"  - {relay(f, 120)}   ({c:.2f})")
+            out.append(f"      {relay(s, 150)}")
         out.append("Ranked neighbours, not a verdict: read the top file, then repeat this "
                    "write. To ask about any other statement:")
-    out.append(f'  python3 {Path(__file__).resolve().parent / "locket.py"} find "<statement>" {root}')
+    out.append(f'  python3 {shlex.quote(str(Path(__file__).resolve().parent / "locket.py"))} find '
+               f'"<statement>" {shlex.quote(str(root))}')
     out.append("Fires once per session.")
     return "\n".join(out)
 
@@ -5503,7 +5504,7 @@ def _ledger_header(path):
 
 def ledger_message(path, glob, schema, findings, via):
     return (f"A ledger row breaks its schema and the write is refused ({Path(path).name}, "
-            f"schema {glob!r}, {schema.get('_from', 'built in')}):\n  - " + "\n  - ".join(findings[:12])
+            f"schema {glob!r}, {schema.get('_from', 'built in')}):\n  - " + "\n  - ".join(relay(f, 240) for f in findings[:12])
             + (f"\n  - ... {len(findings) - 12} more" if len(findings) > 12 else "")
             + f"\nA ledger is queried, never read whole, so a row is scanned rather than read: "
               f"shorten the field to the cap, or file the detail where the row points. "
@@ -5577,10 +5578,10 @@ def source_row_decision(path, tool_input, prior, append=False):
     for row in added:
         ranked = [r for r in score_against(row, docs)[:3] if r[1] >= FIRE_FLOOR]
         if ranked:
-            lines.append(f"  row: {row[:120]}")
+            lines.append(f"  row: {relay(row, 120)}")
             for _c, best, fname, pair in ranked:
                 lines.append(f"    - {fname}   (closest claim {best:.2f})"
-                             + (f"\n        existing: {pair[1][:160]}" if pair else ""))
+                             + (f"\n        existing: {relay(pair[1], 160)}" if pair else ""))
     if not lines:
         return None, False
     return (f"{LEAD_WARNING} {p.name} is a registered source, and a row here may restate a claim "
@@ -6971,7 +6972,7 @@ def grep_assist(pattern, root, top=4):
     if not got or not got[0]:
         return None
     rows, _stale = got
-    lines = [f"  [{sc:.3f}] {name}  ::  {claim[:110]}" for sc, name, claim in rows]
+    lines = [f"  [{sc:.3f}] {relay(name, 120)}  ::  {relay(claim, 110)}" for sc, name, claim in rows]
     return ("Before the grep: these rank closest to that text by MEANING, which is what a "
             "grep cannot see (a paraphrase shares too few tokens to match at all).\n"
             + "\n".join(lines)
