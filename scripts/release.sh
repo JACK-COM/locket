@@ -28,7 +28,7 @@ git -C "$repo" rev-parse -q --verify "refs/tags/v$version" >/dev/null && { echo 
 # A module past this many lines is a component that has not been named yet; split it
 # before releasing. Checked before the stamp, so a refused release leaves the tree clean.
 ceiling=800
-over="$(wc -l "$src"/*.py | awk -v c="$ceiling" '$2 != "total" && $1 > c {print "  " $2 ": " $1}')"
+over="$(find "$src" -name "*.py" -not -path "*/__pycache__/*" -exec wc -l {} + | awk -v c="$ceiling" '$2 != "total" && $1 > c {print "  " $2 ": " $1}')"
 [[ -z "$over" ]] || { printf 'modules over %s lines:\n%s\n' "$ceiling" "$over" >&2; exit 1; }
 
 sed -i.bak -E "s/^__version__ = \"[^\"]+\"/__version__ = \"$version\"/" "$src/locket.py" && rm "$src/locket.py.bak"

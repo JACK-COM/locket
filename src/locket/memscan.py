@@ -35,13 +35,11 @@ Standard library only at import, by design: this runs inside a PreToolUse hook o
 every memory write, so it pays interpreter startup and nothing else. memfind, and
 numpy with it, loads only when a check asks for a ranking by meaning.
 """
-import hashlib
 import json
 import os
 import re
 import shlex
 import sys
-import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -51,6 +49,9 @@ from bashguard import (  # noqa: F401  (re-exported)
     SCRATCH_MARKERS, TRUST_REFUSAL, bash_write_decision,
     ledger_bash_decision, oversized_decision, shell_store_config,
 )
+from adapters import emit, gate_status, host_of, normalise, read_payload  # noqa: F401  (re-exported)
+from adapters.codex import parse_patch  # noqa: F401  (re-exported)
+from adapters.hermes import ONCE_NOTE, refuse_once  # noqa: F401  (re-exported)
 import bashguard
 import grepassist
 import ledger
@@ -111,7 +112,7 @@ from ledger import (  # noqa: F401  (re-exported)
     source_row_decision,
 )
 from gate import (  # noqa: F401  (re-exported)
-    CONFIG_REFUSAL, HISTORY_CLAUSE, ISO_DATE, REGISTRY_REFUSAL, _absolute,
+    CONFIG_REFUSAL, HISTORY_CLAUSE, ISO_DATE, REGISTRY_REFUSAL,
     _runs_memfind, added_text, dated_series_pair, evaluate_write, hook_decision,
     is_registry, memfind_asked, memfind_asked_db, memfind_gate, semantic_neighbours,
     session_asked, session_ledger, store_config,
@@ -1371,305 +1372,6 @@ def cmd_ledgers(root):
 # pre_tool_call carry the same stdin JSON by design (`hook_event_name`,
 # `tool_name`, `tool_input`, `cwd`), and differ in tool vocabulary, in how a
 # file edit arrives, and in what a reply may say.
-# ---------------------------------------------------------------------------
-# Per host: how a decision reaches the model (`host_of` tells the payloads apart). `advice` is "context" where a non-blocking message rides the tool event,
-# "refuse-once" where the only same-turn channel is a block; `block` names the
-# reply shape a refusal takes.
-HOSTS = {
-    "claude-code": {"advice": "context", "block": "exit2"},
-    "codex": {"advice": "context", "block": "deny-json"},
-    "hermes": {"advice": "refuse-once", "block": "exit2-json"},
-}
-# Hermes tool name -> the Claude Code tool the hook modes are written against.
-HERMES_TOOLS = {"write_file": "Write", "patch": "Edit", "terminal": "Bash",
-                "search_files": "Grep", "read_file": "Read"}
-# A Codex patch, as the native `apply_patch` tool's `command` or as the body of an
-# `apply_patch` heredoc when the model has no native tool (every model Codex has no
-# metadata for, glm through Ollama among them). Same grammar either way.
-PATCH_BODY = re.compile(r"\*\*\* Begin Patch\n(.*?)\n?\*\*\* End Patch", re.S)
-PATCH_FILE = re.compile(r"\*\*\* (Add|Update|Delete) File: (.+)")
-APPLY_PATCH_CMD = re.compile(r"\s*apply_patch\b")
-
-
-def host_of(payload):
-    """Which host sent this hook payload. Hermes names its events differently;
-    Codex shares Claude Code's event names and is told apart by the fields only it
-    sends (`turn_id`) and by its rollout transcript's file name."""
-    event = str(payload.get("hook_event_name") or "")
-    if event in ("pre_tool_call", "post_tool_call"):
-        return "hermes"
-    if payload.get("turn_id") or Path(str(payload.get("transcript_path") or "")).name.startswith("rollout-"):
-        return "codex"
-    return "claude-code"
-
-
-def parse_patch(text):
-    """[(op, path, added, removed)] for each file a Codex patch touches, op one of
-    add | update | delete; `added` and `removed` are the `+` and `-` lines joined.
-    A `*** Move to:` retargets the update to its destination. [] where the text
-    holds no patch."""
-    # CRLF first: the body match needs a bare newline, and a stray \r would ride into
-    # every added line; a patch that fails to parse passes the gate silently
-    m = PATCH_BODY.search((text or "").replace("\r\n", "\n"))
-    if not m:
-        return []
-    out, cur = [], None
-    for line in m.group(1).split("\n"):
-        f = PATCH_FILE.fullmatch(line.rstrip())
-        if f:
-            cur = [f.group(1).lower(), f.group(2).strip(), [], []]
-            out.append(cur)
-        elif cur is None:
-            continue
-        elif line.startswith("*** Move to: "):
-            cur[1] = line[len("*** Move to: "):].strip()
-        elif line.startswith("+"):
-            cur[2].append(line[1:])
-        elif line.startswith("-"):
-            cur[3].append(line[1:])
-    return [(op, path, "\n".join(a), "\n".join(r)) for op, path, a, r in out]
-
-
-def _patch_input(patch, cwd):
-    """The Write or Edit a Codex patch amounts to, as (tool, tool_input), or None
-    when it adds nothing. A patch can touch several files and a hook judges one, so
-    the most decidable is judged first: the trust registry or a store's configuration
-    (refused outright, so a benign first file cannot carry a manifest past the gate),
-    then a CSV (whose ledger gate may block), then the first file inside a store."""
-    files = [f for f in parse_patch(patch) if f[0] != "delete"]
-    refused = lambda f: is_registry(_absolute(f[1], cwd)) or store_config(_absolute(f[1], cwd)) is not None
-    pick = (next((f for f in files if refused(f)), None)
-            or next((f for f in files if f[1].lower().endswith(".csv")), None)
-            or next((f for f in files if corpus_for(_absolute(f[1], cwd)) is not None), None)
-            or (files[0] if files else None))
-    if pick is None:
-        return None
-    op, path, added, removed = pick
-    if op == "add":
-        return "Write", {"file_path": path, "content": added}
-    return "Edit", {"file_path": path, "old_string": removed, "new_string": added}
-
-
-def read_payload():
-    """The hook payload from stdin, normalised to Claude Code's shape, or None.
-
-    Sets `_host` ("claude-code" | "codex" | "hermes"), maps Hermes tool names, and
-    copies Hermes's `path` into `file_path`. A Codex patch, native or through the
-    shell, becomes the Write or Edit it amounts to. A `patch` call in Hermes's
-    unadvertised V4A mode carries a whole patch string and no `new_string`; it
-    stays opaque and the write modes see an empty text, which is silence rather
-    than a wrong nudge.
-    """
-    try:
-        payload = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    return normalise(payload)
-
-
-def normalise(payload):
-    """`read_payload` on an already-parsed dict, so a test can drive it."""
-    if not isinstance(payload, dict):
-        return None
-    ti = payload.get("tool_input")
-    if not isinstance(ti, dict):
-        ti = payload.get("args") if isinstance(payload.get("args"), dict) else {}
-    ti = dict(ti)
-    host = host_of(payload)
-    tool = payload.get("tool_name")
-    if host == "codex" and (tool == "apply_patch" or (
-            tool == "Bash" and APPLY_PATCH_CMD.match(str(ti.get("command", ""))))):
-        edit = _patch_input(str(ti.get("command", "")), payload.get("cwd"))
-        if edit:
-            tool, ti = edit
-    if host == "hermes" and tool == "memory":
-        # Hermes's own memory writes go through this tool, never write_file, so
-        # without this mapping the store it exists for is the one it never sees.
-        # add = append (an Edit with no anchor), replace = Edit with old_text,
-        # remove = nothing added; `operations` batches several of those.
-        ops = ti.get("operations") if isinstance(ti.get("operations"), list) else [ti]
-        added, old = [], []
-        for op in ops:
-            if not isinstance(op, dict):
-                continue
-            if isinstance(op.get("old_text"), str):
-                old.append(op["old_text"])   # a removed span leaves the corpus too
-            if op.get("action") == "remove":
-                continue
-            txt = op.get("content") or op.get("new_text")
-            if isinstance(txt, str):
-                added.append(txt)
-        target = ti.get("target") or "memory"   # top-level in both shapes
-        ti = {"file_path": str(hosts.hermes() / "memories" / ("USER.md" if target == "user" else "MEMORY.md"))}
-        if old:                              # replace: an Edit with its anchor
-            ti.update(old_string="\n".join(old), new_string="\n".join(added))
-        else:                                # add: an append, so the hook sees
-            ti.update(content="\n".join(added), _append=True)   # prior + entry
-        tool = "Edit"
-    elif host == "hermes":
-        tool = HERMES_TOOLS.get(tool, tool)
-        if "file_path" not in ti and "path" in ti:
-            ti["file_path"] = ti["path"]
-    # A relative path resolves against the SESSION's cwd, which the payload
-    # carries, never against the hook subprocess's own. Left relative it misses
-    # every corpus and the write passes with no gate, silently.
-    fp = ti.get("file_path")
-    if isinstance(fp, str) and fp:
-        ti["file_path"] = _absolute(fp, payload.get("cwd"))
-    payload = dict(payload, tool_input=ti, tool_name=tool, _host=host)
-    return payload
-
-
-def emit(payload, msg, blocking, source="memscan", db=None):
-    """Deliver a hook decision the way THIS host can hear it; returns the exit code.
-
-    Claude Code: exit 2 with the message on stderr blocks; stdout JSON carrying
-    `additionalContext` reaches the model without blocking. Codex: the same
-    `additionalContext` advises, and a block is a `permissionDecision: deny` on
-    stdout, which reaches the model as `Command blocked by PreToolUse hook:
-    <reason>` and the write does not land (measured live on codex-cli 0.157.0;
-    openai/codex#27833 reports older builds ignoring it); exit 0, since exit 2 on
-    a tool event was not measured. Hermes: exit 2 blocks,
-    and the message travels as stdout JSON so it is not cut at the 400 characters
-    Hermes keeps of stderr. ⚠ Hermes
-    has NO same-turn channel for a non-blocking message on a tool event:
-    `pre_tool_call` honours only block, modify and approve, a `post_tool_call`
-    context is discarded, and `pre_llm_call` runs once per user turn, so advice
-    parked for it arrives after the agent has finished. Advice is therefore
-    refused once (`refuse_once`), and `source` names the mode so two modes
-    refusing one call keep separate records; `db` is the state.db to read.
-    """
-    if not msg:
-        return 0
-    host = payload.get("_host", "claude-code")
-    if HOSTS.get(host, {}).get("block") == "deny-json" and blocking:
-        print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse", "permissionDecision": "deny",
-            "permissionDecisionReason": msg}}))
-        return 0
-    if HOSTS.get(host, {}).get("advice") == "refuse-once" and not blocking:
-        msg = refuse_once(payload, msg.replace(LEAD_WARNING, LEAD_BLOCKING, 1), source, db)
-        if msg is None:
-            return 0
-        blocking = True
-    if blocking:
-        if host == "hermes":
-            print(json.dumps({"action": "block", "message": msg}))
-        print(msg, file=sys.stderr)
-        return 2
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "PreToolUse", "additionalContext": msg}}))
-    return 0
-
-
-PENDING_TTL = 3600      # seconds; a refusal record older than this is stale
-ONCE_NOTE = "Locket asks this once; to proceed, repeat the same call unchanged."
-ONCE_MAX = 2            # refusals of one call before it passes whatever state.db says
-
-
-def _pending_ours():
-    """The record directory exists, is no symlink, and is this user's. A directory
-    someone else made could forge or erase the records that let a call through."""
-    try:
-        return (paths.PATHS.pending_dir.is_dir() and not paths.PATHS.pending_dir.is_symlink()
-                and (not hasattr(os, "getuid") or paths.PATHS.pending_dir.stat().st_uid == os.getuid()))
-    except OSError:
-        return False
-
-
-def _strings(value):
-    """Every string inside a parsed JSON value."""
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for v in value.values():
-            yield from _strings(v)
-    elif isinstance(value, list):
-        for v in value:
-            yield from _strings(v)
-
-
-def hermes_shown(session_id, message, since, db=None):
-    """Whether a tool result Hermes stored for this session at or after `since`
-    carries the start of `message`: True, False, or None when state.db cannot say.
-    Hermes stores a blocked call's message as that call's result, JSON-encoded,
-    before the next tool round runs."""
-    db = hosts.hermes() / "state.db" if db is None else Path(db)
-    if not session_id or not db.is_file():
-        return None
-    head = message[:300]            # stored JSON-encoded, so it is read back through json
-    rows = sqlite_rows(db, "select content from messages where session_id=? and role='tool' "
-                           "and timestamp>=?", (session_id, since - 1))
-    if rows is None:                         # locked, missing table, schema drift
-        return None
-    for (content,) in rows:
-        if not isinstance(content, str):
-            continue
-        try:
-            if any(head in s for s in _strings(json.loads(content))):
-                return True
-        except (json.JSONDecodeError, ValueError):
-            continue
-    return False
-
-
-def refuse_once(payload, msg, source, db=None):
-    """The message to refuse a Hermes tool call with, or None to let it pass.
-
-    The same call from the same mode is refused until state.db shows the message
-    reached the model, and at most ONCE_MAX times. Hermes runs every pre_tool_call
-    hook but shows the model only the first block, so a record alone would let a
-    retry pass a second mode's message nobody saw; the cap keeps a result Hermes
-    moved to a file, or a state.db that cannot be read, from refusing forever. The
-    note leads so the model reads how to proceed before the advice.
-    """
-    shown = f"{ONCE_NOTE}\n\n{msg}"
-    try:
-        paths.PATHS.pending_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if not _pending_ours():
-            return None                      # no record means no retry could pass
-        now = time.time()
-        for p in paths.PATHS.pending_dir.iterdir():
-            try:
-                if now - p.stat().st_mtime > PENDING_TTL:
-                    p.unlink()
-            except OSError:
-                continue
-        call = json.dumps([source, payload.get("tool_name"), payload.get("tool_input")],
-                          sort_keys=True, default=str)
-        sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(payload.get("session_id") or "any"))
-        record = paths.PATHS.pending_dir / f"once-{sid}-{hashlib.sha256(call.encode()).hexdigest()[:32]}"
-        count = int(record.read_text() or 0) if record.is_file() else 0
-        if count and (count >= ONCE_MAX or hermes_shown(payload.get("session_id"), shown,
-                                                        record.stat().st_mtime, db) is True):
-            record.unlink()
-            return None
-        record.write_text(str(count + 1))
-        return shown
-    except Exception:                        # a guardrail never breaks the call it watched
-        return None
-
-
-def gate_status():
-    """One line per host on whether the 2e question gate can see a session here,
-    and whether a non-blocking nudge has a way to reach the model."""
-    lines = []
-    if hosts.claude().is_dir():
-        lines.append("2e gate on Claude Code: armed (reads the session transcript "
-                     "Claude Code hands the hook); nudges reach the model on the write")
-    if hosts.codex().is_dir():
-        lines.append("2e gate on Codex: armed (reads the rollout transcript Codex hands the "
-                     "hook); nudges reach the model on the write, once /hooks has trusted them")
-    if hosts.hermes().is_dir():
-        db = hosts.hermes() / "state.db"
-        lines.append("2e gate on Hermes: " + ("armed (reads state.db by session_id)"
-                                              if db.is_file() else
-                                              "UNARMED, state.db not found, so every "
-                                              "write passes the question silently")
-                     + "; a nudge refuses the call once and the same call repeated passes")
-    return "\n".join(lines) if lines else "no known host home found; CLI modes only"
-
-
 def hook_mode(payload):
     """The write gate on one normalised Write or Edit, delivered to the host. Reached
     from `hook`, and from `bashguard` when a shell call turned out to be a Codex patch."""

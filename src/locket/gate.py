@@ -555,7 +555,7 @@ def session_asked(payload):
     return True
 
 
-def _absolute(path, cwd):
+def absolute_path(path, cwd):
     """`path` resolved against the SESSION's cwd, never the hook subprocess's own."""
     return path if Path(path).expanduser().is_absolute() else str(Path(cwd or os.getcwd()) / path)
 
@@ -645,7 +645,7 @@ def _csv_decision(path, ti, append):
 
 
 def _evaluate(path, tool_input, append, autonomous, payload):
-    real = os.path.realpath(_absolute(path, payload.get("cwd"))) if path else ""
+    real = os.path.realpath(absolute_path(path, payload.get("cwd"))) if path else ""
     if real and real != path and (is_registry(real) or store_config(real) is not None
                                   or corpora.corpus_for(real) is not None):
         path = real                         # a link or alias is judged as the file it reaches

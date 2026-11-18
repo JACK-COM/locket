@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import adapters
 import memscan
 import memfind
 
@@ -215,7 +216,7 @@ def t_status(args):
         f"embedder: {emb}",
         f"asked this session: {ASKED}  (a session here is this server process, which the app "
         f"shares across its conversations until it restarts)",
-        memscan.gate_status(),
+        adapters.gate_status(),
     ])
 
 

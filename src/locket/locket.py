@@ -23,6 +23,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import hosts  # noqa: E402
+import adapters  # noqa: E402
 import memscan  # noqa: E402
 import paths  # noqa: E402
 import _settings  # noqa: E402
@@ -669,7 +670,7 @@ def cmd_status():
     print(_embedder_line())
     n = len(memscan.all_corpora())
     print(f"corpora: {n}  (`locket corpora` lists them)")
-    print(memscan.gate_status())
+    print(adapters.gate_status())
     return 0
 
 

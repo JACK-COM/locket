@@ -34,6 +34,7 @@ from pathlib import Path
 
 import hosts
 import fsio
+import adapters
 import memscan
 
 TRIGGERS = "triggers.json"
@@ -200,9 +201,9 @@ def _host_payload(payload):
     if "_host" in payload:
         return payload
     event = payload.get("hook_event_name")
-    if memscan.host_of(payload) == "codex":
+    if adapters.host_of(payload) == "codex":
         if event == "PreToolUse":
-            return dict(memscan.normalise(payload), _host_tool=payload.get("tool_name"))
+            return dict(adapters.normalise(payload), _host_tool=payload.get("tool_name"))
         return dict(payload, _host="codex")
     if event == "pre_llm_call":
         extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
@@ -212,7 +213,7 @@ def _host_payload(payload):
         return dict(payload, hook_event_name="UserPromptSubmit", _host="hermes",
                     prompt=msg if isinstance(msg, str) else "")
     if event == "pre_tool_call":
-        return dict(memscan.normalise(payload), _host_tool=payload.get("tool_name"))
+        return dict(adapters.normalise(payload), _host_tool=payload.get("tool_name"))
     return payload
 
 
@@ -335,7 +336,7 @@ def fire(payload, host=None):
 def hook(stdin=None, host=None):
     """The hook entry: JSON on stdin; context on stdout, or the question on stderr and
     exit 2 for a block. On Hermes a prompt's context is stdout JSON, and a tool call is
-    answered through `memscan.emit`, which refuses it once for a row that does not block.
+    answered through `adapters.emit`, which refuses it once for a row that does not block.
     Any failure exits 0, because a hook that breaks the tool it guards is worse than none."""
     try:
         payload = json.load(stdin or sys.stdin)
@@ -353,12 +354,12 @@ def hook(stdin=None, host=None):
             print(json.dumps({"context": message[:9000]}))
             return 0
         try:
-            return memscan.emit(payload, message, block, "trigger",
+            return adapters.emit(payload, message, block, "trigger",
                                 Path(host or hosts.hermes()) / "state.db")
         except Exception:
             return 0
     if block and payload.get("_host") == "codex" and payload.get("hook_event_name") == "PreToolUse":
-        return memscan.emit(payload, message, True, "trigger")     # Codex refuses a tool by deny JSON
+        return adapters.emit(payload, message, True, "trigger")     # Codex refuses a tool by deny JSON
     if block:
         print(message, file=sys.stderr)
         return 2
