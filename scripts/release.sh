@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Release Locket: stamp the version, test, tag, push, and move the Homebrew
+# Release Locket: test, stamp the version, tag, push, and move the Homebrew
 # formula to the new tarball. Run from anywhere:  scripts/release.sh 0.1.3
 #
 # The tap is a sibling checkout (../homebrew-panoply) unless PANOPLY_TAP names it.
@@ -26,17 +26,17 @@ done
 git -C "$repo" rev-parse -q --verify "refs/tags/v$version" >/dev/null && { echo "v$version is already tagged" >&2; exit 1; }
 
 # A module past this many lines is a component that has not been named yet; split it
-# before releasing. Checked before the stamp, so a refused release leaves the tree clean.
+# before releasing. Every check runs before the stamp, so a refused release leaves the tree clean.
 ceiling=800
 over="$(find "$src" -name "*.py" -not -path "*/__pycache__/*" -exec wc -l {} + | awk -v c="$ceiling" '$2 != "total" && $1 > c {print "  " $2 ": " $1}')"
 [[ -z "$over" ]] || { printf 'modules over %s lines:\n%s\n' "$ceiling" "$over" >&2; exit 1; }
 
-sed -i.bak -E "s/^__version__ = \"[^\"]+\"/__version__ = \"$version\"/" "$src/locket.py" && rm "$src/locket.py.bak"
-grep -q "^__version__ = \"$version\"" "$src/locket.py" || { echo "could not stamp the version" >&2; exit 1; }
+# the panoply-lib copies, the type check, tests/ and the install smoke check
+make -C "$repo" test
 
-"$repo/../panoply-lib/sync.sh" --check locket
-(cd "$repo" && python3 -m unittest discover -s tests -t .)
-python3 "$src/locket.py" selftest
+sed -i.bak -E "s/^__version__ = \"[^\"]+\"/__version__ = \"$version\"/" "$src/locket.py" && rm "$src/locket.py.bak"
+[[ "$(python3 "$src/locket.py" --version)" == *"$version"* ]] || {
+  git -C "$repo" checkout -- src/locket/locket.py; echo "could not stamp the version" >&2; exit 1; }
 
 git -C "$repo" commit -qam "$version"
 git -C "$repo" tag -a "v$version" -m "$version"

@@ -29,6 +29,15 @@ Then ask your agent to run `locket help install` and follow it. `locket doctor` 
 
 Python 3.9 or later and numpy. Ranking by meaning uses [ollama](https://ollama.com) 0.36 or later serving `embeddinggemma-2:270m`, or onnxruntime in the virtualenv the Panoply pieces share; without either, Locket compares words and says so. Supported hosts are Claude Code, Codex, Hermes Agent and any MCP client (`locket mcp`). Tested on macOS and Linux (Debian, Python 3.12); on Windows, run it under WSL.
 
+## Developing
+
+`src/locket` holds one module per job, imported as siblings. Two declarations carry most new work:
+
+- A host is one row in `hosts.TABLE`, naming its home, the directories in it that are memory, and its module, plus that module under `src/locket/adapters/`. The module provides the hook face and the install face declared in `adapters/__init__.py`. The hooks, `install`, `uninstall` and `doctor` all read the hosts off the table, and `make typecheck` fails while a module lacks part of either face.
+- A verb is one `Verb` in its family's `VERBS` under `src/locket/commands/`. The command line, its help and the MCP server's tools are all built from it.
+
+`make test` checks the panoply-lib copies and the types (mypy, reading the code as Python 3.9 does), then runs `tests/` (stdlib `unittest`) and `locket selftest`, the install smoke check a package can run. Modules whose names start with an underscore are copies kept in step by panoply-lib; change them there.
+
 ## Releasing
 
-`make version` (or `version-minor`, `version-major`) computes the next version from `__version__` and hands it to `scripts/release.sh X.Y.Z`, which refuses a module past 800 lines, runs the tests, tags and pushes, then moves the formula in [the tap](https://github.com/JACK-COM/homebrew-panoply) to the new tarball and names any guide page the release has moved past. `make test` runs `tests/` (stdlib `unittest`) and `locket selftest`, the install smoke check a package can run.
+`make version` (or `version-minor`, `version-major`) computes the next version from `__version__` and hands it to `scripts/release.sh X.Y.Z`. The script refuses a module past 800 lines and runs `make test` before it stamps the version, so a failed release leaves the tree clean. It then tags and pushes, moves the formula in [the tap](https://github.com/JACK-COM/homebrew-panoply) to the new tarball, and names any guide page the release has moved past.
