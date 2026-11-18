@@ -9,6 +9,9 @@ from tests.harness import SRC, fixture_env
 
 import locket_mcp as mcp  # noqa: E402
 import memscan  # noqa: E402
+import corpus  # noqa: E402
+import manifest  # noqa: E402
+import trust  # noqa: E402
 
 def _suite():
     import subprocess, tempfile
@@ -45,11 +48,11 @@ def _suite():
     root = scratch / "store"
     # the store a person trusted: registered in the scratch registry the server reads
     root.mkdir()
-    (root / memscan.MANIFEST).write_text(json.dumps({
+    (root / manifest.MANIFEST).write_text(json.dumps({
         "index_files": [], "ledger_surfaces": [], "holding_spaces": ["INBOX.md"]}))
     # the store a person trusted, pinned to its manifest, in the scratch registry the server reads
     (scratch / "corpora.json").write_text(json.dumps({
-        "corpora": [str(root.resolve())], "pins": {str(root.resolve()): memscan.config_digest(root.resolve())}}))
+        "corpora": [str(root.resolve())], "pins": {str(root.resolve()): trust.config_digest(root.resolve())}}))
     (root / "facts.md").write_text(
         "The default execution path is the dossier pipeline run interactively.\n"
         "Silhouette glyphs scale by wingspan across the comparison cards.\n")
@@ -65,7 +68,7 @@ def _suite():
     assert not r["result"]["isError"] and "not asked" in txt.replace("has not asked", "not asked"), txt
     # a rewrite in place of an existing file adds nothing and must draw no nudge,
     # or the tool fires on exactly the operation the discipline asks for
-    f0 = memscan.md_files(root)[0]
+    f0 = corpus.md_files(root)[0]
     body = f0.read_text(errors="ignore")
     r = call({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
               "params": {"name": "locket_check_before_write",
@@ -92,7 +95,7 @@ def _suite():
     # the hook's own gate: the registry and a store's manifest are refused, and a link
     # into a store is judged as the file it reaches
     for i, (target, said) in enumerate(((scratch / "corpora.json", "trust registry"),
-                                        (root / memscan.MANIFEST, "configuration"))):
+                                        (root / manifest.MANIFEST, "configuration"))):
         r = call({"jsonrpc": "2.0", "id": 30 + i, "method": "tools/call",
                   "params": {"name": "locket_check_before_write",
                              "arguments": {"text": "{}", "path": str(target)}}})

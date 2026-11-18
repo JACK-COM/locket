@@ -10,6 +10,8 @@ from tests.harness import fixture_env
 import _embed  # noqa: E402
 import memfind as mf  # noqa: E402
 import memscan  # noqa: E402
+import corpora  # noqa: E402
+import manifest  # noqa: E402
 
 def _ranked():
     # A synthetic store, never the live one. Reading whatever this machine holds
@@ -37,8 +39,8 @@ def _ranked():
         "| aircraft | engine | note |\n|---|---|---|\n"
         + "".join(f"| Type {i} | Engine {i} | a row about airframe number {i} in the fleet table |\n"
                   for i in range(40)))
-    (root / memscan.MANIFEST).write_text(json.dumps({"index_files": ["INDEX.md"]}))
-    memscan.settings.cache_clear()
+    (root / manifest.MANIFEST).write_text(json.dumps({"index_files": ["INDEX.md"]}))
+    corpora.settings.cache_clear()
     items, flat, dim = mf.load_index(root, quiet=True)
     assert flat.shape == (len(items), dim), "vector file does not match item count"
     assert sum(1 for f, _ in items if f == "fleet.md") == 40, "table rows must index one claim each"
@@ -89,7 +91,7 @@ def _ranked():
     # three files the three residuals sum to zero, so every subject score is
     # negative and their order says little. Siblings is a maintenance tool for a
     # corpus of dozens of files; what is checked here is shape, not judgment.
-    memscan.settings.cache_clear()
+    corpora.settings.cache_clear()
     shutil.rmtree(d, ignore_errors=True)
 def _lexical():
     """The no-embedder rung, which needs no embedder to test, so it runs on the

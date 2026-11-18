@@ -10,6 +10,9 @@ import tests.harness  # noqa: F401  (puts the source under test on sys.path)
 import memscan  # noqa: E402
 import shellwrites  # noqa: E402
 import paths  # noqa: E402
+import claims  # noqa: E402
+import corpus  # noqa: E402
+import shellscan  # noqa: E402
 
 CASES = 20000
 
@@ -18,9 +21,9 @@ def unwrap_reference(txt):
     out = []
     for ln in txt.split("\n"):
         prev = out[-1] if out else None
-        if (prev is not None and prev.strip() and not memscan._ENDS.search(prev)
-                and not memscan._NO_JOIN_FROM.match(prev)
-                and ln.strip() and not memscan._LINE_MEANINGFUL.match(ln)):
+        if (prev is not None and prev.strip() and not claims._ENDS.search(prev)
+                and not claims._NO_JOIN_FROM.match(prev)
+                and ln.strip() and not claims._LINE_MEANINGFUL.match(ln)):
             out[-1] = prev.rstrip() + " " + ln.strip()
         else:
             out.append(ln)
@@ -29,7 +32,7 @@ def unwrap_reference(txt):
 
 def cd_reference(command, cwd, pos):
     here = cwd
-    for m in shellwrites._CD.finditer(memscan._shell_code(command)):
+    for m in shellwrites._CD.finditer(shellscan.shell_code(command)):
         if pos is not None and m.start() >= pos:
             break
         if m.group(1) == "popd":
@@ -51,17 +54,17 @@ def cd_reference(command, cwd, pos):
 
 def score_reference(text, docs):
     """`score_against` as the all-pairs loop the claim index replaced."""
-    incoming = list(memscan.claims(memscan.strip(text)))
+    incoming = list(claims.claims(claims.strip(text)))
     if not incoming:
         return []
     inc_all = set().union(*(ts for _, ts in incoming))
     ranked = []
     for name, body in docs.items():
         best, best_pair, overlap = 0.0, None, 0
-        for s, ts in memscan.claims(body):
+        for s, ts in claims.claims(body):
             overlap += len(ts & inc_all)
             for isent, its in incoming:
-                jac = memscan.similar(ts, its)
+                jac = claims.similar(ts, its)
                 if jac > best:
                     best, best_pair = jac, (isent, s)
         ranked.append((best + min(overlap / 400.0, 0.35), best, name, best_pair))
@@ -71,9 +74,9 @@ def score_reference(text, docs):
 
 def subtract_reference(added, arch):
     if not arch:
-        return memscan.strip(added)
-    return "\n".join(s for s, ts in memscan.claims(memscan.strip(added))
-                     if not any(memscan.similar(ts, a) >= memscan.FIRE_FLOOR for a in arch))
+        return claims.strip(added)
+    return "\n".join(s for s, ts in claims.claims(claims.strip(added))
+                     if not any(claims.similar(ts, a) >= claims.FIRE_FLOOR for a in arch))
 
 
 # a small vocabulary, so random sentences share five tokens often enough to pair
@@ -99,7 +102,7 @@ class Equivalence(unittest.TestCase):
         for _ in range(CASES):
             txt = "\n".join(" ".join(rnd.choice(PROSE) for _ in range(rnd.randint(0, 4)))
                             for _ in range(rnd.randint(0, 12)))
-            self.assertEqual(memscan.unwrap(txt), unwrap_reference(txt), repr(txt))
+            self.assertEqual(claims.unwrap(txt), unwrap_reference(txt), repr(txt))
 
     def test_score_against(self):
         rnd = random.Random(13)
@@ -107,24 +110,24 @@ class Equivalence(unittest.TestCase):
             docs = {f"f{k}.md": _prose(rnd, rnd.randint(0, 8)) for k in range(rnd.randint(0, 6))}
             text = _prose(rnd, rnd.randint(0, 5))
             want = score_reference(text, docs)
-            self.assertEqual(memscan.score_against(text, docs), want, repr((text, docs)))
-            index = memscan.ClaimIndex.from_docs(docs)
-            self.assertEqual(memscan.score_against(text, index), want, repr((text, docs)))
+            self.assertEqual(claims.score_against(text, docs), want, repr((text, docs)))
+            index = claims.ClaimIndex.from_docs(docs)
+            self.assertEqual(claims.score_against(text, index), want, repr((text, docs)))
             # a hidden file and one stood as a write leaves it, against the dict edited the same way
             if docs:
                 gone, edited = rnd.choice(sorted(docs)), rnd.choice(sorted(docs))
                 swap = {edited: _prose(rnd, 2)}
                 ref = {k: v for k, v in docs.items() if k != gone or k == edited}
                 ref.update(swap)
-                self.assertEqual(memscan.score_against(text, index, hide=lambda n: n == gone, extra=swap),
+                self.assertEqual(claims.score_against(text, index, hide=lambda n: n == gone, extra=swap),
                                  score_reference(text, ref), repr((text, docs, gone, swap)))
 
     def test_subtract_archived(self):
         rnd = random.Random(17)
         for _ in range(CASES // 10):
-            arch = [ts for _, ts in memscan.claims(_prose(rnd, rnd.randint(0, 10)))]
+            arch = [ts for _, ts in claims.claims(_prose(rnd, rnd.randint(0, 10)))]
             added = _prose(rnd, rnd.randint(0, 6))
-            self.assertEqual(memscan.subtract_archived(added, arch), subtract_reference(added, arch))
+            self.assertEqual(corpus.subtract_archived(added, arch), subtract_reference(added, arch))
 
     def test_write_matches(self):
         rnd = random.Random(11)

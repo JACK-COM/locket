@@ -8,15 +8,13 @@ import os
 import sys
 import textwrap
 
-import _embed
-import _settings
-import configure
 from commands import Verb
 
 
 def _ollama_check(model):
     """(ok, message) for whether ollama serves `model` as an embedding model. Unreachable
     ollama is ok with a warning: the file may be written ahead of the server."""
+    import _embed
     import urllib.error
     import urllib.request
     req = urllib.request.Request(f"{_embed.OLLAMA}/api/show", data=json.dumps({"model": model}).encode(),
@@ -41,6 +39,7 @@ def _ollama_check(model):
 def _index_state():
     """[(store, path, state)] for every store with markdown, state being "current", "absent"
     or "built with <tag>". Reads each index's tag only: no embedder is probed or started."""
+    import _embed
     import corpora
     import corpus
     import memfind
@@ -60,6 +59,9 @@ def _index_state():
 
 
 def show():
+    import _embed
+    import _settings
+    import configure
     data, findings = _settings.load()
     path = _settings.path()
     print(f"settings file: {path}" + ("" if path.exists() else "  (absent: every setting is its default)"))
@@ -102,6 +104,9 @@ def _loopback(url):
 
 
 def _set_embed(args):
+    import _embed
+    import _settings
+    import configure
     keys = ("model", "ollama_host", "venv", "autostart")
     clearing = {k for k in keys if getattr(args, k) == "default"}
     changes = {k: getattr(args, k) for k in keys if getattr(args, k) not in (None, "default")}
@@ -187,6 +192,8 @@ def _change(args, changes, clearing, data, findings, outcome):
     code to stop with left in `outcome["rc"]`. Runs under the lock unless a dry run. Only
     an unreadable file blocks, since writing over it loses every piece's settings; --reset
     writes anyway, after `update` copies the old file to config.json.bak."""
+    import _settings
+    import configure
     if _settings.unreadable(findings) and not args.reset:
         print(f"{findings[0]}\nfix it, or pass --reset to start the file over (the old one is kept "
               "as config.json.bak)", file=sys.stderr)
@@ -205,6 +212,7 @@ def _wrap(text):
 
 
 def parser():
+    import _embed
     fmt = dict(formatter_class=argparse.RawDescriptionHelpFormatter)
     p = argparse.ArgumentParser(
         prog="locket configure", **fmt,
@@ -295,6 +303,8 @@ def parser():
 
 
 def main(argv):
+    import _settings
+    import configure
     args = parser().parse_args(argv)
     if args.section == "schema":
         print(json.dumps(_settings.schema(), indent=2))
@@ -312,6 +322,7 @@ def main(argv):
 
 
 def _guide(own):
+    import configure
     parser().print_help()
     print("\n" + configure.__doc__.split("\n\n", 1)[1].rstrip())
     return 0

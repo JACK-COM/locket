@@ -20,6 +20,8 @@ import bashguard  # noqa: E402
 import memscan  # noqa: E402
 import shellwrites  # noqa: E402
 import pywrites  # noqa: E402
+import gate  # noqa: E402
+import shellscan  # noqa: E402
 
 BASH = shutil.which("bash")
 CASES = 250
@@ -74,9 +76,9 @@ def readers(lines, marks):
     """{reader name: the marker indexes it reads as code}."""
     cmd = "\n".join(lines)
     at = offsets(lines)
-    code = memscan._shell_code(cmd)
-    kept = set(memscan._strip_heredocs(cmd).split("\n"))
-    text = set(memscan.command_text(cmd).split("\n"))
+    code = shellscan.shell_code(cmd)
+    kept = set(shellscan.strip_heredocs(cmd).split("\n"))
+    text = set(shellscan.command_text(cmd).split("\n"))
     py_lines = [ln.replace("cat", "python3") for ln in lines]
     py_at = offsets(py_lines)
     spans = [(s, e) for _src, s, e, _u in pywrites.programs("\n".join(py_lines))]
@@ -104,7 +106,7 @@ class TrustVerbHidden(unittest.TestCase):
     """bashguard's name refusal reads `command_text`; no line before the verb may hide it."""
 
     def seen(self, command):
-        return bool(bashguard._TRUST_VERB.search(re.sub(r"""['"\\]""", "", memscan.command_text(command))))
+        return bool(bashguard._TRUST_VERB.search(re.sub(r"""['"\\]""", "", shellscan.command_text(command))))
 
     def test_verb_after_each_shape_is_seen(self):
         for before in ("cat <<<x", "cat <<< x", "cat <<A-B\nx\nA-B", 'echo "a <<b"', "# <<b",
@@ -128,13 +130,13 @@ class Bodies(unittest.TestCase):
     def test_quotes_inside_a_substituted_heredoc(self):
         # the body's own quote must not open a string that runs past the delimiter
         cmd = 'git commit -m "$(cat <<\'EOF\'\nsays "hi\nEOF\n)"\ncd /elsewhere\n'
-        self.assertIn("cd /elsewhere", memscan._shell_code(cmd))
+        self.assertIn("cd /elsewhere", shellscan.shell_code(cmd))
 
 
 class Comments(unittest.TestCase):
     def test_an_escaped_hash_starts_no_comment(self):
         for cmd in ("echo a\\ #b; echo L1", "echo a\\\n#b; echo L1", "echo ${x:- #}; echo L1"):
-            self.assertIn("echo L1", memscan._shell_code(cmd), cmd)
+            self.assertIn("echo L1", shellscan.shell_code(cmd), cmd)
 
     def test_a_cd_after_an_escaped_hash_moves(self):
         self.assertEqual(shellwrites.cd_targets("echo a\\ #b; cd /x\n", "/y"), ["/x"])
@@ -157,12 +159,12 @@ class Segments(unittest.TestCase):
     def test_memfind_named_in_a_string_does_not_run_it(self):
         for cmd in ('git commit -m "(memfind.py q)"', 'echo "a; memfind.py q"', "# x; memfind.py q",
                     "cat <<A\nmemfind.py q\nA\necho done", 'echo "x\ny; memfind.py q"'):
-            self.assertFalse(memscan.runs_memfind(cmd), cmd)
+            self.assertFalse(gate.runs_memfind(cmd), cmd)
 
     def test_memfind_after_a_real_separator_runs(self):
         for cmd in ("cd x && python3 memfind.py q", 'echo "a;b"; memfind.py q', "cat <<A\nx\nA\nmemfind.py q",
                     "(memfind.py q)", "x=1 memfind.py q | head"):
-            self.assertTrue(memscan.runs_memfind(cmd), cmd)
+            self.assertTrue(gate.runs_memfind(cmd), cmd)
 
 
 if __name__ == "__main__":

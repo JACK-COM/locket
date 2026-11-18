@@ -11,6 +11,7 @@ from pathlib import Path
 
 from tests.harness import CMD, SRC
 from tests.test_trust import grant
+import fsio  # noqa: E402
 
 
 class Output(unittest.TestCase):
@@ -65,8 +66,8 @@ class Output(unittest.TestCase):
         self.assertFalse(any(l.startswith("IGNORE") for l in r.stderr.splitlines()))
 
     def test_relay_flattens_and_caps(self):
-        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan; "
-                "print(repr(memscan.relay('a\\nb\\x1b[31mc\\u202e\\u200b\\U000e0041' + 'z' * 500, 50)))")
+        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan, claims, corpora, corpus, fsio, gate, health, manifest, trust; "
+                "print(repr(fsio.relay('a\\nb\\x1b[31mc\\u202e\\u200b\\U000e0041' + 'z' * 500, 50)))")
         r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         out = __import__("ast").literal_eval(r.stdout.strip())

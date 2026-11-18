@@ -10,13 +10,16 @@ import unittest
 from pathlib import Path
 
 from tests.harness import CMD, SRC
+import corpora  # noqa: E402
+import corpus  # noqa: E402
+import trust  # noqa: E402
 BAD_RULINGS = "Ruling,Category,Area,Date\nshort,nope,x,not-a-date\n"
 
 
 def grant(env, d):
     """Register `d` as a person's `locket trust` would: through the source under test,
     so the row carries whatever pin that source writes."""
-    code = f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan; memscan.register({str(d)!r})"
+    code = f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan, corpora, corpus, trust; trust.register({str(d)!r})"
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
 
@@ -281,14 +284,14 @@ class RedTeamCases(Scratch):
         self.registered_via_cli()
         self.run_locket("init", str(self.clone), "--name", "renamed")
         self.assertIn("renamed", (self.clone / "locket.json").read_text())
-        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan; from pathlib import Path; "
-                f"print(memscan.trusted(Path({str(self.clone)!r})))")
+        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan, corpora, corpus, trust; from pathlib import Path; "
+                f"print(trust.trusted(Path({str(self.clone)!r})))")
         r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True, text=True)
         self.assertEqual(r.stdout.strip(), "True", "Locket's own edit moves the pin: " + r.stderr)
 
     def registered_via_cli(self):
-        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan; "
-                f"memscan.register({str(self.clone)!r})")
+        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan, corpora, corpus, trust; "
+                f"trust.register({str(self.clone)!r})")
         r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
 
@@ -334,8 +337,8 @@ class RedTeamCases(Scratch):
     def test_absolute_member_is_ignored(self):
         (self.clone / "locket.json").write_text(json.dumps({"members": ["/"]}))
         self.trust(self.clone)
-        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan; from pathlib import Path; "
-                f"print(memscan.settings(Path({str(self.clone)!r}))['members'])")
+        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan, corpora, corpus, trust; from pathlib import Path; "
+                f"print(corpora.settings(Path({str(self.clone)!r}))['members'])")
         r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True, text=True)
         self.assertEqual(r.stdout.strip(), "set()", r.stderr)
 
@@ -364,7 +367,7 @@ class RoundTwo(Scratch):
     """The second blind round and its audit, one case each."""
 
     def probe(self, expr):
-        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan, trigger; "
+        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan, trigger, corpora, corpus, trust; "
                 f"from pathlib import Path; print({expr})")
         r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -427,11 +430,11 @@ class RoundTwo(Scratch):
         (self.clone / "link").symlink_to(outside)
         (self.clone / "locket.json").write_text(json.dumps({"members": ["link/sub"]}))
         self.trust(self.clone)
-        self.assertEqual(self.probe(f"[str(p) for p in memscan.md_files(Path({str(self.clone)!r}))]"), "[]")
+        self.assertEqual(self.probe(f"[str(p) for p in corpus.md_files(Path({str(self.clone)!r}))]"), "[]")
 
     def test_an_unpinned_row_is_not_trusted(self):
         self.registry.write_text(json.dumps({"corpora": [str(self.clone)]}))     # written by hand
-        self.assertEqual(self.probe(f"memscan.trusted(Path({str(self.clone)!r}))"), "False")
+        self.assertEqual(self.probe(f"trust.trusted(Path({str(self.clone)!r}))"), "False")
 
     def test_init_refuses_the_home_directory(self):
         r = self.run_locket("init", str(self.home))
@@ -449,7 +452,7 @@ class RoundTwo(Scratch):
 
 class TrustIsByIdentity(Scratch):
     def probe(self, expr):
-        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan; "
+        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan, corpora, corpus, trust; "
                 f"from pathlib import Path; print({expr})")
         r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -460,7 +463,7 @@ class TrustIsByIdentity(Scratch):
         if not Path(upper).exists():
             self.skipTest("case-sensitive filesystem")
         self.trust(self.clone)
-        self.assertEqual(self.probe(f"memscan.trusted(Path({upper!r}))"), "True")
+        self.assertEqual(self.probe(f"trust.trusted(Path({upper!r}))"), "True")
 
     def test_untrusted_nested_manifest_is_no_store(self):
         outer = self.home / "outer"
@@ -468,25 +471,25 @@ class TrustIsByIdentity(Scratch):
         (outer / "locket.json").write_text("{}\n")
         (outer / "inner" / "locket.json").write_text("{}\n")
         self.trust(outer)
-        self.assertEqual(self.probe(f"memscan.corpus_for(Path({str(outer / 'inner' / 'a.md')!r}))"), "None")
-        self.assertEqual(self.probe(f"memscan.corpus_for(Path({str(outer / 'a.md')!r}))"), str(outer))
+        self.assertEqual(self.probe(f"corpora.corpus_for(Path({str(outer / 'inner' / 'a.md')!r}))"), "None")
+        self.assertEqual(self.probe(f"corpora.corpus_for(Path({str(outer / 'a.md')!r}))"), str(outer))
 
     def test_legacy_sources_file_is_inert_when_untrusted(self):
         secret = self.home / "secret.csv"
         secret.write_text("text\nA row from outside the folder that nobody trusted it to read\n")
         (self.clone / "reference-sources.json").write_text(json.dumps([{"path": str(secret), "text": "text"}]))
-        self.assertEqual(self.probe(f"memscan.csv_sources(Path({str(self.clone)!r}))"), "[]")
+        self.assertEqual(self.probe(f"corpus.csv_sources(Path({str(self.clone)!r}))"), "[]")
 
     def test_project_memory_is_trusted_by_convention(self):
         mem = self.home / ".claude" / "projects" / "-x" / "memory"
         mem.mkdir(parents=True)
-        self.assertEqual(self.probe(f"memscan.trusted(Path({str(mem)!r}))"), "True")
+        self.assertEqual(self.probe(f"trust.trusted(Path({str(mem)!r}))"), "True")
 
     def test_untrusted_store_is_found_from_a_session_record(self):
         import re
         proj = self.home / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.clone))
         proj.mkdir(parents=True)
-        found = self.probe("[str(p) for p in memscan.untrusted_stores()]")
+        found = self.probe("[str(p) for p in trust.untrusted_stores()]")
         self.assertIn(str(self.clone), found)
 
 

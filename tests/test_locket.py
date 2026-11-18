@@ -15,6 +15,9 @@ import cli  # noqa: E402
 from adapters import codex, desktop, hermes  # noqa: E402
 from adapters import claude_code  # noqa: E402
 import memscan  # noqa: E402
+import corpora  # noqa: E402
+import health  # noqa: E402
+import manifest  # noqa: E402
 
 def _uninstall():
     """`uninstall --yes` in throwaway homes, in a child process because Locket's paths are
@@ -117,7 +120,7 @@ def _suite():
         ref = full / "REF.csv"
         ref.write_text(rh + '"A row the probe copies.",product,pricing,2026-09-26\n'
                        + '"A ruling quoted\nover two lines.",product,pricing,2026-09-27\n')
-        (full / memscan.MANIFEST).write_text(json.dumps(
+        (full / manifest.MANIFEST).write_text(json.dumps(
             {"sources": [{"path": "REF.csv", "text": "Ruling", "label": "Area"}]}))
         (full / "RULINGS.csv").write_text(rh)
         sizes = probes.declared_sizes({"empty": empty, "full": full, "again": full}, ["empty", "full", "again"])
@@ -142,9 +145,9 @@ def _suite():
         assert probes.csv_hook_latency("true", target, 5)[2] == "it holds no row to model the probe on"
         ref.write_text(rh + '"Short row.",product\n')
         assert "field count" in probes.csv_hook_latency("true", target, 5)[2], "a ragged last row was probed"
-        for f in (ref, full / "RULINGS.csv", full / memscan.MANIFEST):
+        for f in (ref, full / "RULINGS.csv", full / manifest.MANIFEST):
             f.unlink()
-        memscan.settings.cache_clear()
+        corpora.settings.cache_clear()
         assert probes.hook_latency("true", {"empty": empty}, 5) == (None, None), "an empty store is timed"
         fast, _o = probes.hook_latency("true", {"empty": empty, "full": full}, 5)
         assert fast and fast[0] == "full" and fast[1] < 5, fast
@@ -163,16 +166,16 @@ def _suite():
         quiet, _o = probes.hook_latency(f'[ "$LOCKET_GREPASSIST_LOG" = {shlex.quote(os.devnull)} ] || sleep 3',
                               {"full": full}, 1, "grepassist")
         assert quiet[1] < 1, "the grepassist probe writes to the real log"
-        swallow = (f"{py} -c " + shlex.quote(f"import sys; sys.path.insert(0, {str(lk.HERE)!r}); import memscan; "
-                                             "memscan.health_error('hook', 'lexical', ValueError())"))
+        swallow = (f"{py} -c " + shlex.quote(f"import sys; sys.path.insert(0, {str(lk.HERE)!r}); import memscan, claims, corpora, corpus, fsio, gate, health, manifest, trust; "
+                                             "health.health_error('hook', 'lexical', ValueError())"))
         _w, opened = probes.hook_latency(swallow, {"full": full}, 5)
         assert opened and opened[0] == "full" and "ValueError in lexical" in opened[1], \
             f"a hook that fails open quickly passed doctor's latency check: {opened}"
         crash = f"{py} -c " + shlex.quote("raise SystemExit(1)")
         _w, opened = probes.hook_latency(crash, {"full": full}, 5)
         assert opened and "crashed" in opened[1], f"a crashing hook passed: {opened}"
-        hang = (f"{py} -c " + shlex.quote(f"import sys, time; sys.path.insert(0, {str(lk.HERE)!r}); import memscan\n"
-                                          "with memscan.HookRun('hook'): time.sleep(5)"))
+        hang = (f"{py} -c " + shlex.quote(f"import sys, time; sys.path.insert(0, {str(lk.HERE)!r}); import memscan, claims, corpora, corpus, fsio, gate, health, manifest, trust\n"
+                                          "with health.HookRun('hook'): time.sleep(5)"))
         worst, opened = probes.hook_latency(hang, {"full": full}, 1)
         assert worst == ("full", 1.0) and opened is None, \
             f"a probe killed at its timeout read as failing open: {worst} {opened}"

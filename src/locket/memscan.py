@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""memscan: duplication, drift and link checks over a flat memory corpus.
+"""memscan: the entry point host configs call by path for the write-time hooks
+(`memscan.py hook`, `bashguard`, `grepassist`), and any other verb through the CLI. What
+follows is the design behind the structure checks.
 
 The unit is the CLAIM, not the file. Document-level similarity cannot see one
 clause restated inside four files that are otherwise about different subjects,
@@ -39,80 +41,10 @@ import sys
 
 import help_text
 from commands import hooks
-from scaffold import (  # noqa: F401  (re-exported)
-    LEDGER_FILES, cmd_init, cmd_schema, migrate, scaffold_ledgers,
-)
-from bashguard import (  # noqa: F401  (re-exported)
-    SCRATCH_MARKERS, TRUST_REFUSAL, bash_write_decision,
-    ledger_bash_decision, oversized_decision, shell_store_config,
-)
-from adapters import emit, gate_status, host_of, normalise, read_payload  # noqa: F401  (re-exported)
-from adapters.codex import parse_patch  # noqa: F401  (re-exported)
-from adapters.hermes import ONCE_NOTE, refuse_once  # noqa: F401  (re-exported)
-import bashguard
-import grepassist
-from grepassist import grep_assist, grep_words, prose_like  # noqa: F401  (re-exported)
-from shellwrites import (  # noqa: F401  (re-exported)
-    BASH_WRITE, BASH_WRITE_STARTS, bash_write_targets, write_matches,
-)
-from cites import (  # noqa: F401  (re-exported)
-    CITE, citations, code_index, code_roots, enclosing_scope, project_dir_for,
-    resolve_citation,
-)
-
-# The layers below this module, re-exported under the names its remaining code, the
-# front and ~/.claude/hooks already use. Code inside a layer calls `<module>.<name>`,
-# so a test patches a name where it lives (`fixture_env` patches trust's).
-from fsio import (  # noqa: F401  (re-exported)
-    MAX_FILE_BYTES, MAX_SCAN, MAX_STORE_BYTES, MAX_STORE_FILES, PATH_MAX, SafeOut,
-    inode, regular, replace_atomic, same, open_safe, read_or_empty, read_safe,
-    relay, sqlite_rows,
-)
-from health import (  # noqa: F401  (re-exported)
-    HEALTH_MARKER_CAP, HEALTH_STALE_OTHER, HEALTH_STALE_POSIX, HEALTH_TEMP_AGE, HookRun,
-    _fold_dead_markers, _marker_name, utc, health_ack, health_dir, health_error,
-    health_report,
-)
-from manifest import (  # noqa: F401  (re-exported)
-    HOLDING_SPACES, INDEX_FILES, LEDGER_SCHEMAS, LEDGER_SURFACES, LEGACY_MANIFEST,
-    MANIFEST, MANIFEST_SCHEMA, OLD_MANIFEST, SCHEMA_KEYS, inside, manifest_data,
-    has_manifest, manifest_file, validate_manifest,
-)
-from trust import (  # noqa: F401  (re-exported)
-    TRUST_CACHE, granted, read_manifest, trusted_ids, changed_since_trust,
-    config_digest, forget, grant_trust, person_confirms, pin_unpinned, register,
-    registry, registry_pins, registry_stale, trusted, untrusted_stores,
-    write_store_file,
-)
-from corpora import (  # noqa: F401  (re-exported)
-    _clear_settings, store_label, phys_root_of, raw_corpora, _root_of, walked_by,
-    all_corpora, corpus_for, corpus_for_cwd, corpus_here, corpus_key, excluded_file,
-    parent_of, roots_of, search_root, settings, top_of,
-)
-from claims import (  # noqa: F401  (re-exported)
-    CLAIMS_VERSION, ENTRY_TOKENS, FIRE_FLOOR, IDX_LINE, LINK, MIN_TOKENS, PAIR_FLOOR,
-    ClaimIndex, _ENDS, _LINE_MEANINGFUL, _NO_JOIN_FROM, claims, cross_file_pairs, pointer_only,
-    score_against, similar, strip, tokens, unclaimed, unwrap,
-)
-from shellscan import (  # noqa: F401  (re-exported)
-    command_text, shell_code as _shell_code, strip_heredocs as _strip_heredocs,
-)
-from corpus import (  # noqa: F401  (re-exported)
-    _archive_md, own_md, _walk_files, archived_claims, claim_index, corpus, csv_rows, csv_sources,
-    has_content, md_files, resolve, skipped_files, subtract_archived,
-)
-from ledger import (  # noqa: F401  (re-exported)
-    LEAD_BLOCKING, LEAD_WARNING, csv_rows_of, ledger_header, check_ledger_text,
-    CSV_REPORT_BYTES, declared_csvs, large_csvs,
-    ledger_decision, ledger_message, ledger_schema_for, ledger_schemas,
-    source_row_decision,
-)
-from gate import (  # noqa: F401  (re-exported)
-    CONFIG_REFUSAL, HISTORY_CLAUSE, ISO_DATE, REGISTRY_REFUSAL,
-    runs_memfind, added_text, dated_series_pair, evaluate_write, hook_decision,
-    is_registry, memfind_asked, memfind_gate, semantic_neighbours,
-    session_asked, session_ledger, store_config,
-)
+# The names outside callers import from memscan (~/.claude/hooks, older deploys); every
+# other name lives in its own module and is read from there.
+from corpora import corpus_for_cwd, corpus_key, roots_of, settings  # noqa: F401  (re-exported)
+from gate import HISTORY_CLAUSE, ISO_DATE  # noqa: F401  (re-exported)
 
 
 def main(argv):

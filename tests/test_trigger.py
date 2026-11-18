@@ -12,6 +12,7 @@ import memscan  # noqa: E402
 import paths  # noqa: E402
 import trigger as tg  # noqa: E402
 from adapters import hermes  # noqa: E402
+import manifest  # noqa: E402
 
 def _suite():
     """Offline, in a throwaway home: firing, silencing, blocking, the cap, the quiet
@@ -24,7 +25,7 @@ def _suite():
         (host / "memory/owner.md").write_text("The fact lives here.\n")
         (host / "RULINGS.csv").write_text("Ruling,Area\nNever do the thing.,practice\n")
         proj.mkdir()
-        (proj / memscan.MANIFEST).write_text('{"triggers": "rules.json"}\n')
+        (proj / manifest.MANIFEST).write_text('{"triggers": "rules.json"}\n')
         transcript = Path(t) / "t.jsonl"
         transcript.write_text('{"skill": "loaded"}\n')
         (host / tg.TRIGGERS).write_text(json.dumps({
@@ -128,7 +129,7 @@ def _suite():
                       "tool_input": {"command": "git reset --hard"}, "cwd": str(other)}
             rc, out = hook_out(advise)
             sent = json.loads(out)
-            assert rc == 2 and sent["action"] == "block" and sent["message"].startswith(memscan.ONCE_NOTE) \
+            assert rc == 2 and sent["action"] == "block" and sent["message"].startswith(hermes.ONCE_NOTE) \
                 and "[git-reset]" in sent["message"], "an advisory row did not refuse the Hermes call once"
             other_call = dict(advise, tool_input={"command": "git reset --hard HEAD"})
             assert hook_out(other_call)[0] == 2 and hook_out(other_call)[0] == 2, \
@@ -143,7 +144,7 @@ def _suite():
                 "a different call passed on another call's record"
             assert hook_out(advise) == (0, ""), "the host's state.db showing the question did not lift it"
             rc, out = hook_out(dict(advise, tool_input={"command": "rm -rf /"}))
-            assert rc == 2 and memscan.ONCE_NOTE not in json.loads(out)["message"], \
+            assert rc == 2 and hermes.ONCE_NOTE not in json.loads(out)["message"], \
                 "a block row was worded as refuse-once"
         finally:
             paths.PATHS = saved

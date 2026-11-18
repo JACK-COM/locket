@@ -12,6 +12,7 @@ from pathlib import Path
 
 from tests.harness import SRC
 from tests.test_trust import grant
+import corpus  # noqa: E402
 
 CLAIM = "The harbour gauge at the north pier is read at dawn and at dusk by the night watchman.\n"
 
@@ -40,7 +41,7 @@ class Reads(unittest.TestCase):
         self._t.cleanup()
 
     def probe(self, body):
-        code = (f"import sys, json; sys.path.insert(0, {str(SRC)!r}); import memscan\n"
+        code = (f"import sys, json; sys.path.insert(0, {str(SRC)!r}); import memscan, claims, corpora, corpus, fsio, gate, health, manifest, trust\n"
                 f"from pathlib import Path\nroot = Path({str(self.store)!r})\n{body}")
         r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True,
                            text=True, timeout=60)
@@ -48,7 +49,7 @@ class Reads(unittest.TestCase):
         return r.stdout
 
     def read_keys(self):
-        return json.loads(self.probe("print(json.dumps(sorted(memscan.corpus(root, csv=False))))"))
+        return json.loads(self.probe("print(json.dumps(sorted(corpus.corpus(root, csv=False))))"))
 
     def test_symlinked_file_is_not_read(self):
         (self.store / "link.md").symlink_to(self.outside / "secret.md")

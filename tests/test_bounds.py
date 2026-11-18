@@ -16,26 +16,26 @@ LIMIT = 3.0     # seconds, for slow shared runners; every shape took 3 s or more
 
 SHAPES = {
     "fold, a name doubled 22 times": (
-        "bash_write_targets",
+        "shellwrites.bash_write_targets",
         "\"python3 - <<'EOF'\\nx0='a'\\n\" + ''.join(f'x{i}=x{i-1}+x{i-1}\\n' for i in range(1, 23))"
         " + \"open(x22+'.md','w')\\nEOF\""),
-    "sed -i repeated in one clause": ("bash_write_targets", "'sed -i ' * 600 + 'a'"),
-    "perl -pi repeated in one clause": ("bash_write_targets", "'perl -pi ' * 500 + 'a'"),
-    "tee before one 32 KB word": ("bash_write_targets", "'tee ' * 8000 + 'a' * 32000 + ' x.md'"),
-    "a deep chain of cd": ("bash_write_targets", "'cd x; ' * 5000 + 'cp a.md b.md; ' * 1500"),
-    "30,000 unclosed parens": ("bash_write_targets", "'((' * 15000 + ' x > a.md'"),
-    "10,000 heredoc openers on one line": ("bash_write_targets", "'cat <<a ' * 10000 + '\\n' + 'a\\n' * 10000"),
-    "15,000 nested quoted substitutions": ("bash_write_targets", "'cd x; ' + '\"$(' * 15000 + ')\"' * 15000 + ' > a.md'"),
-    "20,000 redirects before a csv": ("ledger_bash_decision", "'>' * 20000 + ' a.csv'"),
-    "25,000 unpunctuated lines": ("unwrap", "('w ' * 8 + '\\n') * 25000"),
-    "a long indented line then 5,000 wraps": ("unwrap", "' ' * 100000 + 'x\\n' + 'w\\n' * 5000"),
+    "sed -i repeated in one clause": ("shellwrites.bash_write_targets", "'sed -i ' * 600 + 'a'"),
+    "perl -pi repeated in one clause": ("shellwrites.bash_write_targets", "'perl -pi ' * 500 + 'a'"),
+    "tee before one 32 KB word": ("shellwrites.bash_write_targets", "'tee ' * 8000 + 'a' * 32000 + ' x.md'"),
+    "a deep chain of cd": ("shellwrites.bash_write_targets", "'cd x; ' * 5000 + 'cp a.md b.md; ' * 1500"),
+    "30,000 unclosed parens": ("shellwrites.bash_write_targets", "'((' * 15000 + ' x > a.md'"),
+    "10,000 heredoc openers on one line": ("shellwrites.bash_write_targets", "'cat <<a ' * 10000 + '\\n' + 'a\\n' * 10000"),
+    "15,000 nested quoted substitutions": ("shellwrites.bash_write_targets", "'cd x; ' + '\"$(' * 15000 + ')\"' * 15000 + ' > a.md'"),
+    "20,000 redirects before a csv": ("bashguard.ledger_bash_decision", "'>' * 20000 + ' a.csv'"),
+    "25,000 unpunctuated lines": ("claims.unwrap", "('w ' * 8 + '\\n') * 25000"),
+    "a long indented line then 5,000 wraps": ("claims.unwrap", "' ' * 100000 + 'x\\n' + 'w\\n' * 5000"),
 }
 
 
 class Bounds(unittest.TestCase):
     def time_call(self, func, expr):
-        code = (f"import sys, time; sys.path.insert(0, {str(SRC)!r}); import memscan\n"
-                f"arg = {expr}\nf = getattr(memscan, {func!r})\n"
+        code = (f"import sys, time; sys.path.insert(0, {str(SRC)!r}); import importlib\n"
+                f"arg = {expr}\nmod, name = {func!r}.rsplit('.', 1)\nf = getattr(importlib.import_module(mod), name)\n"
                 "args = (arg,) if f.__name__ == 'unwrap' else (arg, '/tmp')\n"
                 "t0 = time.monotonic(); f(*args); print(time.monotonic() - t0)")
         r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
