@@ -37,7 +37,6 @@ from collections import defaultdict
 from pathlib import Path
 
 import hosts
-import memscan
 import paths
 
 FIELDS = ("date", "source", "project", "model", "sessions", "responses",

@@ -1,0 +1,149 @@
+"""File and stream I/O that a store's content cannot subvert: bounded reads that refuse
+links, FIFOs and hard links, atomic replacement, and output stripped of control and
+invisible characters.
+"""
+import os
+import stat
+import tempfile
+from pathlib import Path
+
+
+def _inode(p):
+    """(st_dev, st_ino) of a path, or None. Identity for trust: `Path` equality
+    calls `/users` and `/Users` two directories on a case-insensitive disk."""
+    try:
+        st = os.stat(p)
+    except (OSError, ValueError):
+        return None
+    return st.st_dev, st.st_ino
+
+
+_INVISIBLE = frozenset(("Cc", "Cf", "Co", "Cs", "Cn", "Zl", "Zp"))
+
+
+def relay(text, limit=200, lines=False):
+    """Text from a store, made safe to put in front of an agent or on a terminal:
+    every control, format, private-use, unassigned and line-separator character
+    becomes a space (a newline is how a planted label poses as a fresh instruction;
+    an escape sequence rewrites a terminal; bidi overrides, zero-width marks and tag
+    characters hide text from the person reading it), runs collapse, and the result
+    is cut to `limit` characters."""
+    import unicodedata
+    if lines:                               # a row the user wrote across lines keeps them
+        return "\n".join(relay(ln, limit) for ln in str(text)[:limit * 4].split("\n"))[:limit]
+    flat = "".join(" " if unicodedata.category(c) in _INVISIBLE else c for c in str(text)[:limit * 4])
+    flat = " ".join(flat.split())
+    return flat if len(flat) <= limit else flat[:limit - 1] + "\u2026"
+
+
+class SafeOut:
+    """A text stream that passes every line through `relay(lines=True)`'s character
+    rule: whatever a mode prints (a title, a file name, a history line from a store)
+    reaches a terminal or an agent with no control, bidi or invisible character."""
+
+    def __init__(self, stream):
+        self._s = stream
+
+    def write(self, text):
+        import unicodedata
+        keep = "\n\t"
+        return self._s.write("".join(c if c in keep or unicodedata.category(c) not in _INVISIBLE else " "
+                                     for c in str(text)))
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+
+def _same(a, b):
+    """Whether two paths name one directory: by inode where both exist, else by
+    resolved path. Spelling is not identity on a case-insensitive disk."""
+    ia, ib = _inode(a), _inode(b)
+    if ia is not None and ib is not None:
+        return ia == ib
+    pa, pb = Path(a).expanduser().resolve(), Path(b).expanduser().resolve()
+    if pa == pb:
+        return True
+    # not yet on disk: the same name under one directory, case aside, is taken as one
+    # file, since on a case-insensitive disk it is, and a gate errs toward refusing
+    return (pa.name.casefold() == pb.name.casefold() and pa.parent != pa
+            and _same(pa.parent, pb.parent))
+
+
+MAX_FILE_BYTES = 8 * 1024 * 1024      # past the 5 MB a declared CSV is reported at
+
+
+MAX_SCAN = 64 * 1024                  # model-written text a pattern is run over, at most
+
+
+PATH_MAX = 4096                       # Linux's; longer names no file on any host we serve
+
+
+MAX_STORE_FILES = 4000
+
+
+MAX_STORE_BYTES = 64 * 1024 * 1024
+
+
+def _regular(p):
+    """A plain file, by `lstat`: no symlink, no FIFO, no device, one hard link. A
+    store is read only through files it holds itself, so a link planted in a cloned
+    repository cannot make the walk read a key or a config from elsewhere on disk."""
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+
+
+def open_safe(path, binary=False, newline=None, max_bytes=MAX_FILE_BYTES):
+    """`open` for a file a store controls, checked on the descriptor that is read:
+    refused unless it is a regular file of one link under `max_bytes` (None for no
+    cap), so a swap between the walk's check and this read gains nothing, and a FIFO
+    never blocks it. `newline=""` for a CSV; the default translates CRLF as
+    `read_text` did. Raises OSError on refusal."""
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        st = os.fstat(fd)
+        if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+                or (max_bytes is not None and st.st_size > max_bytes)):
+            raise OSError(f"{path}: not a plain file" + (f" under {max_bytes} bytes" if max_bytes else ""))
+        return (os.fdopen(fd, "rb") if binary
+                else os.fdopen(fd, "r", newline=newline, errors="ignore", encoding="utf-8"))
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def read_safe(path):
+    """A corpus file's text by `open_safe`; raises OSError on refusal."""
+    with open_safe(path) as f:
+        return f.read()
+
+
+def read_or_empty(path):
+    """`read_safe`, or "" for a file that is gone, unreadable or refused."""
+    try:
+        return read_safe(path)
+    except OSError:
+        return ""
+
+
+def _replace_atomic(path, data, prefix, mode=None):
+    """Write `data` (str or bytes) beside `path` and rename it over, so a reader never sees
+    a partial file. The temp is removed when the write fails; a writer killed mid-way can
+    still leave one, which each surface's own sweep removes."""
+    fd, tmp = tempfile.mkstemp(dir=str(Path(path).parent), prefix=prefix)
+    try:
+        with os.fdopen(fd, "wb" if isinstance(data, bytes) else "w") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise

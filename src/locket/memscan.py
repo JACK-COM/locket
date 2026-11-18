@@ -44,7 +44,6 @@ import re
 import shlex
 import stat
 import sys
-import tempfile
 import time
 from collections import Counter, defaultdict
 from functools import lru_cache
@@ -52,6 +51,11 @@ from pathlib import Path, PurePosixPath
 
 import hosts
 import paths
+from fsio import (  # noqa: F401  (re-exported)
+    MAX_FILE_BYTES, MAX_SCAN, MAX_STORE_BYTES, MAX_STORE_FILES, PATH_MAX, SafeOut,
+    _inode, _regular, _replace_atomic, _same, open_safe, read_or_empty, read_safe,
+    relay,
+)
 # A per-corpus manifest, optional. Its presence makes ANY directory a corpus for
 # the write-time gate and for a literal path, so a memory store on a host this
 # file has never heard of is covered by writing one file into it; its absence
@@ -147,16 +151,6 @@ def config_digest(d):
     return h.hexdigest()
 
 
-def _inode(p):
-    """(st_dev, st_ino) of a path, or None. Identity for trust: `Path` equality
-    calls `/users` and `/Users` two directories on a case-insensitive disk."""
-    try:
-        st = os.stat(p)
-    except (OSError, ValueError):
-        return None
-    return st.st_dev, st.st_ino
-
-
 _TRUST_CACHE = {}
 
 
@@ -217,57 +211,6 @@ def changed_since_trust(d):
 def registry_stale():
     """Registered paths whose manifest is gone. Listed, never enumerated."""
     return [p for p in registry() if not has_manifest(p)]
-
-
-_INVISIBLE = frozenset(("Cc", "Cf", "Co", "Cs", "Cn", "Zl", "Zp"))
-
-
-def relay(text, limit=200, lines=False):
-    """Text from a store, made safe to put in front of an agent or on a terminal:
-    every control, format, private-use, unassigned and line-separator character
-    becomes a space (a newline is how a planted label poses as a fresh instruction;
-    an escape sequence rewrites a terminal; bidi overrides, zero-width marks and tag
-    characters hide text from the person reading it), runs collapse, and the result
-    is cut to `limit` characters."""
-    import unicodedata
-    if lines:                               # a row the user wrote across lines keeps them
-        return "\n".join(relay(ln, limit) for ln in str(text)[:limit * 4].split("\n"))[:limit]
-    flat = "".join(" " if unicodedata.category(c) in _INVISIBLE else c for c in str(text)[:limit * 4])
-    flat = " ".join(flat.split())
-    return flat if len(flat) <= limit else flat[:limit - 1] + "\u2026"
-
-
-class SafeOut:
-    """A text stream that passes every line through `relay(lines=True)`'s character
-    rule: whatever a mode prints (a title, a file name, a history line from a store)
-    reaches a terminal or an agent with no control, bidi or invisible character."""
-
-    def __init__(self, stream):
-        self._s = stream
-
-    def write(self, text):
-        import unicodedata
-        keep = "\n\t"
-        return self._s.write("".join(c if c in keep or unicodedata.category(c) not in _INVISIBLE else " "
-                                     for c in str(text)))
-
-    def __getattr__(self, name):
-        return getattr(self._s, name)
-
-
-def _same(a, b):
-    """Whether two paths name one directory: by inode where both exist, else by
-    resolved path. Spelling is not identity on a case-insensitive disk."""
-    ia, ib = _inode(a), _inode(b)
-    if ia is not None and ib is not None:
-        return ia == ib
-    pa, pb = Path(a).expanduser().resolve(), Path(b).expanduser().resolve()
-    if pa == pb:
-        return True
-    # not yet on disk: the same name under one directory, case aside, is taken as one
-    # file, since on a case-insensitive disk it is, and a gate errs toward refusing
-    return (pa.name.casefold() == pb.name.casefold() and pa.parent != pa
-            and _same(pa.parent, pb.parent))
 
 
 def write_store_file(path, text):
@@ -1330,57 +1273,6 @@ def has_content(root, csv=True):
     return any(any(nonempty(p) and not excluded_file(r, p) for p in _walk_files(r))
                or (csv and any(nonempty(Path(pth)) for pth, _t, _l in csv_sources(r)))
                for r in roots_of(root))
-
-
-MAX_FILE_BYTES = 8 * 1024 * 1024      # past the 5 MB a declared CSV is reported at
-MAX_SCAN = 64 * 1024                  # model-written text a pattern is run over, at most
-PATH_MAX = 4096                       # Linux's; longer names no file on any host we serve
-MAX_STORE_FILES = 4000
-MAX_STORE_BYTES = 64 * 1024 * 1024
-
-
-def _regular(p):
-    """A plain file, by `lstat`: no symlink, no FIFO, no device, one hard link. A
-    store is read only through files it holds itself, so a link planted in a cloned
-    repository cannot make the walk read a key or a config from elsewhere on disk."""
-    try:
-        st = os.lstat(p)
-    except OSError:
-        return False
-    return stat.S_ISREG(st.st_mode) and st.st_nlink == 1
-
-
-def open_safe(path, binary=False, newline=None, max_bytes=MAX_FILE_BYTES):
-    """`open` for a file a store controls, checked on the descriptor that is read:
-    refused unless it is a regular file of one link under `max_bytes` (None for no
-    cap), so a swap between the walk's check and this read gains nothing, and a FIFO
-    never blocks it. `newline=""` for a CSV; the default translates CRLF as
-    `read_text` did. Raises OSError on refusal."""
-    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-    try:
-        st = os.fstat(fd)
-        if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
-                or (max_bytes is not None and st.st_size > max_bytes)):
-            raise OSError(f"{path}: not a plain file" + (f" under {max_bytes} bytes" if max_bytes else ""))
-        return (os.fdopen(fd, "rb") if binary
-                else os.fdopen(fd, "r", newline=newline, errors="ignore", encoding="utf-8"))
-    except BaseException:
-        os.close(fd)
-        raise
-
-
-def read_safe(path):
-    """A corpus file's text by `open_safe`; raises OSError on refusal."""
-    with open_safe(path) as f:
-        return f.read()
-
-
-def read_or_empty(path):
-    """`read_safe`, or "" for a file that is gone, unreadable or refused."""
-    try:
-        return read_safe(path)
-    except OSError:
-        return ""
 
 
 def skipped_files(root):
@@ -5066,27 +4958,6 @@ def _pid_alive(pid):
 
 def _utc(t=None):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() if t is None else t))
-
-
-def _replace_atomic(path, data, prefix, mode=None):
-    """Write `data` (str or bytes) beside `path` and rename it over, so a reader never sees
-    a partial file. The temp is removed when the write fails; a writer killed mid-way can
-    still leave one, which each surface's own sweep removes."""
-    fd, tmp = tempfile.mkstemp(dir=str(Path(path).parent), prefix=prefix)
-    try:
-        with os.fdopen(fd, "wb" if isinstance(data, bytes) else "w") as out:
-            out.write(data)
-            out.flush()
-            os.fsync(out.fileno())
-        if mode is not None:
-            os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 class _HealthLock:
