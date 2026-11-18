@@ -1868,10 +1868,23 @@ def _main(argv):
             moved = f"warning: {configure._legacy_path()} not moved ({e}); Locket still reads it"
         if moved:
             print(moved)
-        # 0.12: the index lives in ~/.locket/cache, so a cache inside a store is dead weight
-        for c in _caches():
-            print(f"index: {c} is no longer read; the index now lives in "
-                  f"{memscan.REGISTRY.parent / 'cache'}. Delete it:  rm -r {shlex.quote(str(c))}")
+        # 0.12: the index lives in ~/.locket/cache, so a cache inside a store is dead weight;
+        # every one is offered for deletion at once, and named in one command otherwise
+        stale = [c for c in _caches() if c.is_dir() and not c.is_symlink()]
+        if stale:
+            print(f"index: {len(stale)} caches from before 0.12 are no longer read; the index now lives in "
+                  f"{memscan.REGISTRY.parent / 'cache'}")
+            if memscan.person_confirms(f"Delete these {len(stale)} old caches?", [str(c) for c in stale],
+                                       "delete them"):
+                for c in stale:
+                    shutil.rmtree(c, ignore_errors=True)
+                print(f"index: deleted {len(stale)} old caches")
+            else:
+                print("index: kept them; to delete them all:  rm -r " + " ".join(shlex.quote(str(c)) for c in stale))
+        unbuilt = [n for n, r in memscan.all_corpora().items()
+                   if memscan.has_content(r, csv=False) and not _memfind().cache_paths(r)[0].is_file()]
+        if unbuilt:
+            print(f"index: {len(unbuilt)} stores have no index in the new home yet; build them once:  locket index all")
         # 0.12: trust is pinned to a store's configuration; pin the rows that predate it
         pinned = memscan.pin_unpinned()
         if pinned is None:

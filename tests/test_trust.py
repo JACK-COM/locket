@@ -175,6 +175,29 @@ class TrustNeedsAPerson(Scratch):
         self.assertTrue(sent, out)
         self.assertTrue(self.registered(), out)
 
+    def old_caches(self):
+        self.trust(self.clone)
+        caches = []
+        for d in (self.clone, self.clone / "notes"):
+            (d / ".memfind").mkdir(parents=True)
+            (d / ".memfind" / "index.json").write_text("{}")
+            caches.append(d / ".memfind")
+        return caches
+
+    def test_migrate_names_old_caches_in_one_command(self):
+        caches = self.old_caches()
+        r = self.run_locket("migrate")
+        line = next(l for l in r.stdout.splitlines() if l.startswith("index: kept them"))
+        for c in caches:
+            self.assertIn(str(c), line)
+            self.assertTrue(c.exists(), "nothing is deleted without a person")
+
+    def test_migrate_deletes_old_caches_once_a_person_agrees(self):
+        caches = self.old_caches()
+        sent, out = self.as_person("migrate")
+        self.assertTrue(sent, out)
+        self.assertFalse(any(c.exists() for c in caches), out)
+
     def test_untrust_without_a_terminal_is_refused(self):
         self.trust(self.clone)
         r = self.run_locket("untrust", str(self.clone))
