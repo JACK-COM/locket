@@ -26,7 +26,7 @@ ONCE_MAX = 2            # refusals of one call before it passes whatever state.d
 
 
 def detects(payload):
-    return str(payload.get("hook_event_name") or "") in ("pre_tool_call", "post_tool_call")
+    return str(payload.get("hook_event_name") or "") in ("pre_tool_call", "post_tool_call", "pre_llm_call")
 
 
 def native(payload, tool, ti):
@@ -171,6 +171,101 @@ def status():
     return ("2e gate on Hermes: " + ("armed (reads state.db by session_id)" if armed else
                                      "UNARMED, state.db not found, so every write passes the question silently")
             + "; a nudge refuses the call once and the same call repeated passes")
+
+
+def home():
+    return hosts.hermes()
+
+
+def trigger_event(payload):
+    """The payload in the shape the trigger hook reads: `pre_llm_call` carries the user's
+    message under `extra` and is read as a prompt; a tool call is normalised as every
+    Locket hook normalises it, keeping Hermes's own tool name."""
+    event = payload.get("hook_event_name")
+    if event == "pre_llm_call":
+        extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+        msg = extra.get("user_message")
+        if isinstance(msg, list):           # multimodal: the text parts
+            msg = " ".join(p["text"] for p in msg if isinstance(p, dict) and isinstance(p.get("text"), str))
+        return dict(payload, hook_event_name="UserPromptSubmit", _host=NAME,
+                    prompt=msg if isinstance(msg, str) else "")
+    if event == "pre_tool_call":
+        import adapters
+        return dict(adapters.normalise(payload), _host_tool=payload.get("tool_name"))
+    return payload
+
+
+def session_has(db, session_id, pattern):
+    """True when a message or tool call this session stored in state.db carries
+    `pattern`; False ("not yet") on any failure."""
+    if not session_id or not pattern or not Path(db).is_file():
+        return False
+    try:
+        rx = re.compile(pattern)
+    except (re.error, TypeError):
+        return False
+    rows = fsio.sqlite_rows(db, "select content, tool_calls from messages where session_id=?", (session_id,))
+    if rows is None:
+        return False
+    return any(isinstance(v, str) and rx.search(v) for r in rows for v in r)
+
+
+def seen(payload, home, pattern):
+    """Whether the session carries `pattern`, from the state.db Hermes keeps it in."""
+    return session_has(Path(home) / "state.db", payload.get("session_id"), pattern)
+
+
+def memfind_asked_db(db_path, session_id):
+    """Whether this session ran memfind, from state.db, whose `messages` table holds one
+    row per assistant turn with `tool_calls` as JSON. Fails open on a missing or locked
+    database and on any shape it does not recognise, as the transcript reader does: a
+    wrong no here cannot be cleared by asking."""
+    import gate
+    if not session_id or not Path(db_path).is_file():
+        return True
+    rows = fsio.sqlite_rows(db_path, "select tool_calls from messages where session_id=? "
+                                     "and (tool_calls like ? or tool_calls like ?)",
+                            (session_id, "%memfind%", "%locket%"))
+    if rows is None:                         # locked, missing table, schema drift
+        return True
+    for (raw,) in rows:
+        try:
+            calls = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, ValueError):
+            continue
+        for call in calls if isinstance(calls, list) else []:
+            fn = (call or {}).get("function") or {}
+            if fn.get("name") not in ("terminal", "Bash"):
+                continue
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            cmd = (args or {}).get("command")
+            if isinstance(cmd, str) and gate.runs_memfind(cmd):
+                return True
+    return False
+
+
+def asked(payload):
+    """The 2e answer, read from state.db by session_id."""
+    return memfind_asked_db(home() / "state.db", payload.get("session_id"))
+
+
+def trigger_reply(payload, message, block, home):
+    """A prompt's rows as stdout JSON context; a tool call answered through
+    `adapters.emit`, which refuses it once for a row that does not block."""
+    if payload["hook_event_name"] == "UserPromptSubmit":
+        # Hermes moves a context over 10,000 characters to a file; keep the rows inline.
+        print(json.dumps({"context": message[:9000]}))
+        return 0
+    try:
+        import adapters
+        return adapters.emit(payload, message, block, "trigger", Path(home or hosts.hermes()) / "state.db")
+    except Exception:
+        return 0
 
 
 # The (event, verb) entries Hermes's config.yaml needs. `deliver` is retired and does nothing.

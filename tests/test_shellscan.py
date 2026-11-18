@@ -157,12 +157,12 @@ class Segments(unittest.TestCase):
     def test_memfind_named_in_a_string_does_not_run_it(self):
         for cmd in ('git commit -m "(memfind.py q)"', 'echo "a; memfind.py q"', "# x; memfind.py q",
                     "cat <<A\nmemfind.py q\nA\necho done", 'echo "x\ny; memfind.py q"'):
-            self.assertFalse(memscan._runs_memfind(cmd), cmd)
+            self.assertFalse(memscan.runs_memfind(cmd), cmd)
 
     def test_memfind_after_a_real_separator_runs(self):
         for cmd in ("cd x && python3 memfind.py q", 'echo "a;b"; memfind.py q', "cat <<A\nx\nA\nmemfind.py q",
                     "(memfind.py q)", "x=1 memfind.py q | head"):
-            self.assertTrue(memscan._runs_memfind(cmd), cmd)
+            self.assertTrue(memscan.runs_memfind(cmd), cmd)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ import memscan as ms  # noqa: E402
 import cites  # noqa: E402
 import grepassist  # noqa: E402
 import help_text  # noqa: E402
+from adapters import hermes  # noqa: E402
 import hosts  # noqa: E402
 import ledger  # noqa: E402
 import paths  # noqa: E402
@@ -685,7 +686,7 @@ def _selftest_inner():
                 'python3 -X faulthandler memfind.py "q"',
                 'PYTHONPATH=. python3 memfind.py "q"',
                 'memfind.py "q" | head -20'):
-        assert ms._runs_memfind(cmd), cmd
+        assert ms.runs_memfind(cmd), cmd
     for cmd in ('grep -n memfind.py scripts/*.py',
                 'locket index council',
                 'locket audit',
@@ -700,7 +701,7 @@ def _selftest_inner():
                 '\'~/.claude/scripts/memfind.py "q"\',',
                 'python3 - <<\'PY\'\npython3 scripts/memfind.py "q" x\nPY',
                 'python3 -c "import re; print(\'memfind.py\')"'):
-        assert not ms._runs_memfind(cmd), cmd
+        assert not ms.runs_memfind(cmd), cmd
 
     (d / "mentioned.jsonl").write_bytes(
         b'{"message":{"content":[{"type":"tool_use","name":"Bash","input":'
@@ -1756,10 +1757,10 @@ def _selftest_inner():
     con.execute("insert into messages values ('named','assistant',?)",
                 (call("grep -n memfind.py memscan.py"),))
     con.commit(); con.close()
-    assert ms.memfind_asked_db(db, "asked"), "a terminal call that RUNS memfind discharges"
-    assert not ms.memfind_asked_db(db, "named"), "one that only names it does not"
-    assert not ms.memfind_asked_db(db, "silent"), "a session with no such call has not asked"
-    assert ms.memfind_asked_db(d / "missing.db", "asked"), "no database fails open"
+    assert hermes.memfind_asked_db(db, "asked"), "a terminal call that RUNS memfind discharges"
+    assert not hermes.memfind_asked_db(db, "named"), "one that only names it does not"
+    assert not hermes.memfind_asked_db(db, "silent"), "a session with no such call has not asked"
+    assert hermes.memfind_asked_db(d / "missing.db", "asked"), "no database fails open"
 
     # --- Codex: Claude Code's payload, a patch for every edit, a rollout transcript ---
     rollout = str(d / "rollout-2026-09-25T18-00-40-x.jsonl")

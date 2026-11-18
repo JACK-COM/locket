@@ -168,53 +168,19 @@ def _transcript_has(path, pattern):
         return False
 
 
-def _session_has(db, session_id, pattern):
-    """`_transcript_has` for Hermes, whose session lives in state.db: True when a stored
-    message or tool call of this session carries `pattern`, "not yet" on any failure."""
-    if not session_id or not pattern or not Path(db).is_file():
-        return False
-    try:
-        rx = re.compile(pattern)
-    except (re.error, TypeError):
-        return False
-    rows = fsio.sqlite_rows(db, "select content, tool_calls from messages where session_id=?",
-                               (session_id,))
-    if rows is None:
-        return False
-    return any(isinstance(v, str) and rx.search(v) for r in rows for v in r)
-
-
 def _seen(payload, host, pattern):
-    """Whether this session already carries `pattern`, from whichever record the host keeps."""
+    """Whether this session already carries `pattern`: its transcript where the host hands
+    one, else whichever record the sending host keeps."""
     if payload.get("transcript_path"):
         return _transcript_has(payload["transcript_path"], pattern)
-    if payload.get("_host") == "hermes":
-        return _session_has(Path(host) / "state.db", payload.get("session_id"), pattern)
-    return False
+    return adapters.sender(payload).seen(payload, host, pattern)
 
 
 def _host_payload(payload):
-    """A Hermes or Codex payload in the shape `fire` reads; Claude Code's unchanged. A
-    tool event is normalised as every Locket hook normalises it, keeping the host's own
-    tool name; Hermes's `pre_llm_call` carries the user's message under `extra` and is
-    read as a prompt."""
+    """Any host's payload in the shape `fire` reads, by the host that sent it."""
     if "_host" in payload:
         return payload
-    event = payload.get("hook_event_name")
-    if adapters.host_of(payload) == "codex":
-        if event == "PreToolUse":
-            return dict(adapters.normalise(payload), _host_tool=payload.get("tool_name"))
-        return dict(payload, _host="codex")
-    if event == "pre_llm_call":
-        extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
-        msg = extra.get("user_message")
-        if isinstance(msg, list):           # multimodal: the text parts
-            msg = " ".join(p["text"] for p in msg if isinstance(p, dict) and isinstance(p.get("text"), str))
-        return dict(payload, hook_event_name="UserPromptSubmit", _host="hermes",
-                    prompt=msg if isinstance(msg, str) else "")
-    if event == "pre_tool_call":
-        return dict(adapters.normalise(payload), _host_tool=payload.get("tool_name"))
-    return payload
+    return adapters.BY_NAME[adapters.host_of(payload)].trigger_event(payload)
 
 
 def matches(row, tools, cwd, tool_input, seen=lambda pattern: False):
@@ -285,7 +251,7 @@ def fire(payload, host=None):
     """(message, block) for a hook payload from either host; message is "" when nothing fired."""
     payload = _host_payload(payload)
     if host is None:
-        host = {"hermes": hosts.hermes(), "codex": hosts.codex()}.get(payload.get("_host"), hosts.claude())
+        host = adapters.sender(payload).home()
     cwd = payload.get("cwd") or os.getcwd()
     event = payload.get("hook_event_name") or "PreToolUse"
     if event == "UserPromptSubmit":
@@ -348,24 +314,7 @@ def hook(stdin=None, host=None):
         return 0
     if not message:
         return 0
-    if payload.get("_host") == "hermes":
-        if payload["hook_event_name"] == "UserPromptSubmit":
-            # Hermes moves a context over 10,000 characters to a file; keep the rows inline.
-            print(json.dumps({"context": message[:9000]}))
-            return 0
-        try:
-            return adapters.emit(payload, message, block, "trigger",
-                                Path(host or hosts.hermes()) / "state.db")
-        except Exception:
-            return 0
-    if block and payload.get("_host") == "codex" and payload.get("hook_event_name") == "PreToolUse":
-        return adapters.emit(payload, message, True, "trigger")     # Codex refuses a tool by deny JSON
-    if block:
-        print(message, file=sys.stderr)
-        return 2
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": payload.get("hook_event_name") or "PreToolUse", "additionalContext": message}}))
-    return 0
+    return adapters.sender(payload).trigger_reply(payload, message, block, host)
 
 
 def findings(root):
@@ -416,7 +365,8 @@ def check(argv):
         roots = [root]
     else:
         roots = stores_for(os.getcwd())
-        for other in (hosts.hermes(), hosts.codex()):
+        for h in adapters.HOSTS:           # every other host's own store, after this one's
+            other = h.home()
             if other.is_dir() and other not in roots:
                 roots.insert(1, other)
     problems, files = [], 0

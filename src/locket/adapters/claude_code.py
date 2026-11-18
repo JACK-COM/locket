@@ -42,6 +42,35 @@ def status():
             "hook); nudges reach the model on the write")
 
 
+def home():
+    return hosts.claude()
+
+
+def trigger_event(payload):
+    """The payload in the shape the trigger hook reads: already so."""
+    return payload
+
+
+def seen(payload, home, pattern):
+    """Whether the session carries `pattern` past its transcript, which is read first."""
+    return False
+
+
+def asked(payload):
+    """The 2e answer with no transcript to read: yes, failing open."""
+    return True
+
+
+def trigger_reply(payload, message, block, home):
+    """The question on stderr with exit 2 for a block; context on stdout otherwise."""
+    if block:
+        print(message, file=sys.stderr)
+        return 2
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": payload.get("hook_event_name") or "PreToolUse", "additionalContext": message}}))
+    return 0
+
+
 # Claude Code's PreToolUse entries, the three `locket install --hooks` merges.
 PRE_TOOL = (("Write|Edit", "hook", 10), ("Bash", "bashguard", 5), ("Grep|Bash", "grepassist", 10))
 

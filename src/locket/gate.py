@@ -20,7 +20,6 @@ import corpora
 import corpus
 import fsio
 import health
-import hosts
 import ledger
 import manifest
 import paths
@@ -299,7 +298,7 @@ def hook_decision(name, tool_input, text, prior, docs, archived=None,
 ENV_ASSIGN = re.compile(r"[A-Za-z_]\w*=\S*")
 
 
-def _runs_memfind(command):
+def runs_memfind(command):
     """True where `command` EXECUTES memfind.py rather than merely naming it.
 
     Position is the discriminator, not presence. `grep memfind.py`, `cat
@@ -353,7 +352,7 @@ def memfind_asked(transcript):
     A session reasoning about the tool mentions its filename constantly, and
     treating a mention as an invocation silences the gate on exactly the sessions
     doing the most memory work. So a candidate line is parsed and its Bash
-    command inspected by `_runs_memfind`; the cheap byte test only decides which
+    command inspected by `runs_memfind`; the cheap byte test only decides which
     lines are worth parsing.
 
     ⚠ A tool RESULT is excluded, and this file is why: the test fixtures in tests/test_memscan.py
@@ -396,7 +395,7 @@ def memfind_asked(transcript):
                     if not isinstance(block, dict) or block.get("name") != "Bash":
                         continue
                     cmd = (block.get("input") or {}).get("command")
-                    if isinstance(cmd, str) and _runs_memfind(cmd):
+                    if isinstance(cmd, str) and runs_memfind(cmd):
                         return True
     except OSError:
         return True
@@ -418,7 +417,7 @@ def _rollout_runs_memfind(item):
     if isinstance(cmd, list):               # ["bash", "-lc", "<script>"] runs the script
         cmd = (str(cmd[-1]) if len(cmd) >= 3 and cmd[-2] in ("-c", "-lc")
                else shlex.join(str(c) for c in cmd))
-    return isinstance(cmd, str) and _runs_memfind(cmd)
+    return isinstance(cmd, str) and runs_memfind(cmd)
 
 
 def semantic_neighbours(root, text, top=3, timeout=4):
@@ -502,57 +501,22 @@ def memfind_gate(payload, name, tool_input, text, prior, root, novel=None, auton
     return "\n".join(out)
 
 
-def memfind_asked_db(db_path, session_id):
-    """`memfind_asked` for a host that keeps sessions in SQLite rather than a
-    transcript file: Hermes's `~/.hermes/state.db`, whose `messages` table holds
-    one row per assistant turn with `tool_calls` as JSON. Fails open on a missing
-    or locked database and on any shape it does not recognise, for the same
-    reason the transcript reader does: a wrong no here cannot be cleared by asking.
-    """
-    if not session_id or not Path(db_path).is_file():
-        return True
-    rows = fsio.sqlite_rows(db_path, "select tool_calls from messages where session_id=? "
-                                "and (tool_calls like ? or tool_calls like ?)",
-                       (session_id, "%memfind%", "%locket%"))
-    if rows is None:                         # locked, missing table, schema drift
-        return True
-    for (raw,) in rows:
-        try:
-            calls = json.loads(raw) if isinstance(raw, str) else raw
-        except (json.JSONDecodeError, ValueError):
-            continue
-        for call in calls if isinstance(calls, list) else []:
-            fn = (call or {}).get("function") or {}
-            if fn.get("name") not in ("terminal", "Bash"):
-                continue
-            args = fn.get("arguments")
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-            cmd = (args or {}).get("command")
-            if isinstance(cmd, str) and _runs_memfind(cmd):
-                return True
-    return False
-
-
 def session_asked(payload):
     """Has THIS session run memfind, whichever host produced the payload.
 
-    Claude Code hands the hook a `transcript_path`; Hermes hands a `session_id`
-    and keeps the transcript in `state.db`. With neither source the answer is
+    A host that hands the hook a `transcript_path` (Claude Code, Codex) is read
+    from it; otherwise the sending adapter's `asked` answers (Hermes reads its
+    `state.db` by `session_id`). With neither source the answer is
     yes, which is fail-open by design and the reason `locket status` reports
     whether the gate is armed on this host: a gate that cannot see the session
     must not block it, and must not pretend it looked.
     """
     if payload.get("transcript_path"):
         return memfind_asked(payload.get("transcript_path"))
-    if payload.get("session_id") and payload.get("_host") == "hermes":
-        return memfind_asked_db(hosts.hermes() / "state.db", payload.get("session_id"))
     if payload.get("_host") == "mcp":       # the server lives the session and keeps count
         return bool(payload.get("_asked"))
-    return True
+    import adapters                         # above this layer; loaded by every hook already
+    return adapters.sender(payload).asked(payload)
 
 
 def absolute_path(path, cwd):

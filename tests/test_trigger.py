@@ -11,6 +11,7 @@ import hosts  # noqa: E402
 import memscan  # noqa: E402
 import paths  # noqa: E402
 import trigger as tg  # noqa: E402
+from adapters import hermes  # noqa: E402
 
 def _suite():
     """Offline, in a throwaway home: firing, silencing, blocking, the cap, the quiet
@@ -200,7 +201,7 @@ class PatternTypes(unittest.TestCase):
             con.execute("create table messages(session_id, content, tool_calls)")
             con.commit(); con.close()
             for bad in (5, ["x"]):
-                self.assertFalse(tg._session_has(db, "s", bad))
+                self.assertFalse(hermes.session_has(db, "s", bad))
                 self.assertFalse(tg._transcript_has(tr, bad))
 
 

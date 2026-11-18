@@ -107,6 +107,31 @@ def status():
             "reach the model on the write, once /hooks has trusted them")
 
 
+def home():
+    return hosts.codex()
+
+
+def trigger_event(payload):
+    """A tool event normalised as every Locket hook normalises it, keeping Codex's own
+    tool name; a prompt event marked as Codex's."""
+    if payload.get("hook_event_name") == "PreToolUse":
+        import adapters
+        return dict(adapters.normalise(payload), _host_tool=payload.get("tool_name"))
+    return dict(payload, _host=NAME)
+
+
+seen = claude_code.seen
+asked = claude_code.asked
+
+
+def trigger_reply(payload, message, block, home):
+    """A blocked tool call is refused by deny JSON; everything else as Claude Code."""
+    if block and payload.get("hook_event_name") == "PreToolUse":
+        import adapters
+        return adapters.emit(payload, message, True, "trigger")
+    return claude_code.trigger_reply(payload, message, block, home)
+
+
 def merge_hooks(data):
     return claude_code.merge_hooks(data, usage=False)
 

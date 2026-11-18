@@ -3,7 +3,11 @@
 The hook face, for every hook host in HOSTS: NAME, `detects(payload)`, `native(payload,
 tool, tool_input)` (its payload into Claude Code's tool names and fields), `deliver(payload,
 msg, blocking, source, db)` (the exit code) and `status()` (one line, or None where the
-host is not installed).
+host is not installed); `home()` (its own store), `asked(payload)` (the 2e answer when the
+payload carries no transcript), and for the trigger hook `trigger_event(payload)` (its
+payload in the shape `trigger.fire` reads), `seen(payload, home, pattern)` (whether the
+session carries a pattern past its transcript) and `trigger_reply(payload, message, block,
+home)` (the exit code).
 
 The install face, for every target in TARGETS (the hook hosts and Desktop): FLAG (the
 `locket install` flag, or None where the host's config is edited by hand), `register()`,
@@ -61,13 +65,18 @@ def normalise(payload):
     return dict(payload, tool_input=ti, tool_name=tool, _host=host.NAME)
 
 
+def sender(payload):
+    """The host module a normalised payload came from; Claude Code's when unmarked."""
+    return BY_NAME.get(payload.get("_host"), claude_code)
+
+
 def emit(payload, msg, blocking, source="memscan", db=None):
     """Deliver a hook decision the way THIS host can hear it; returns the exit code.
     An empty message is no decision. `source` names the mode, so a host that records
     refusals keeps one record per mode; `db` is the host's state to read, for a test."""
     if not msg:
         return 0
-    return BY_NAME.get(payload.get("_host"), claude_code).deliver(payload, msg, blocking, source, db)
+    return sender(payload).deliver(payload, msg, blocking, source, db)
 
 
 def gate_status():

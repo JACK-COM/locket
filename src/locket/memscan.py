@@ -109,8 +109,8 @@ from ledger import (  # noqa: F401  (re-exported)
 )
 from gate import (  # noqa: F401  (re-exported)
     CONFIG_REFUSAL, HISTORY_CLAUSE, ISO_DATE, REGISTRY_REFUSAL,
-    _runs_memfind, added_text, dated_series_pair, evaluate_write, hook_decision,
-    is_registry, memfind_asked, memfind_asked_db, memfind_gate, semantic_neighbours,
+    runs_memfind, added_text, dated_series_pair, evaluate_write, hook_decision,
+    is_registry, memfind_asked, memfind_gate, semantic_neighbours,
     session_asked, session_ledger, store_config,
 )
 
