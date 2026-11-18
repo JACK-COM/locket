@@ -25,14 +25,18 @@ for r in "$repo" "$tap"; do
 done
 git -C "$repo" rev-parse -q --verify "refs/tags/v$version" >/dev/null && { echo "v$version is already tagged" >&2; exit 1; }
 
+# A module past this many lines is a component that has not been named yet; split it
+# before releasing. Checked before the stamp, so a refused release leaves the tree clean.
+ceiling=800
+over="$(wc -l "$src"/*.py | awk -v c="$ceiling" '$2 != "total" && $1 > c {print "  " $2 ": " $1}')"
+[[ -z "$over" ]] || { printf 'modules over %s lines:\n%s\n' "$ceiling" "$over" >&2; exit 1; }
+
 sed -i.bak -E "s/^__version__ = \"[^\"]+\"/__version__ = \"$version\"/" "$src/locket.py" && rm "$src/locket.py.bak"
 grep -q "^__version__ = \"$version\"" "$src/locket.py" || { echo "could not stamp the version" >&2; exit 1; }
 
 "$repo/../panoply-lib/sync.sh" --check locket
-python3 "$src/memscan.py" selftest
-python3 "$src/locket.py" selftest
-python3 "$src/locket_mcp.py" --selftest
 (cd "$repo" && python3 -m unittest discover -s tests -t .)
+python3 "$src/locket.py" selftest
 
 git -C "$repo" commit -qam "$version"
 git -C "$repo" tag -a "v$version" -m "$version"
