@@ -1234,7 +1234,7 @@ def cmd_doctor():
         shown = "; ".join(f"{p} ({why})" for p, why in skipped[:4]) + (
             f"; and {len(skipped) - 4} more" if len(skipped) > 4 else "")
         row("warn", "skipped", f"{len(skipped)} store files are never read: {shown}",
-            "replace a link with the file itself, or split a file past the cap")
+            "replace a link or hard link with the file itself; a markdown file past the cap is not read")
     try:
         loose = memscan.untrusted_stores()
     except Exception as e:                  # a failed scan is reported, never read as "none found"

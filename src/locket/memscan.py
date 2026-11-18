@@ -1440,27 +1440,38 @@ def read_or_empty(path):
 
 
 def skipped_files(root):
-    """Files the walk passes over in one store, as (path, why): a symlink, a hard link,
-    something not a file, or one past MAX_FILE_BYTES. For `doctor`, so a skip is
+    """Files Locket would read in one store but passes over, as (path, why): markdown
+    the walk meets, and the CSVs the manifest declares, each a symlink, a hard link,
+    not a file, or (markdown only) past MAX_FILE_BYTES. For `doctor`, so a skip is
     reported once rather than reading as a store that holds nothing there."""
     out = []
-    for d, names in _corpus_dirs(root):
-        for n in names:
-            if not (fnmatch.fnmatch(n, "*.md") or fnmatch.fnmatch(n, "*.csv")):
-                continue
-            p = d / n
-            try:
-                st = os.lstat(p)
-            except OSError:
-                continue
-            if stat.S_ISLNK(st.st_mode):
-                out.append((p, "a symlink"))
-            elif not stat.S_ISREG(st.st_mode):
-                out.append((p, "not a plain file"))
-            elif st.st_nlink != 1:
-                out.append((p, "a hard link"))
-            elif st.st_size > MAX_FILE_BYTES:
-                out.append((p, f"over {MAX_FILE_BYTES // (1024 * 1024)} MB"))
+    declared = [(e[0], True) for e in _own_csv_sources_unchecked(root)]
+    walked = [(d / n, False) for d, names in _corpus_dirs(root) for n in names if fnmatch.fnmatch(n, "*.md")]
+    for p, is_csv in walked + declared:
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            out.append((p, "a symlink"))
+        elif not stat.S_ISREG(st.st_mode):
+            out.append((p, "not a plain file"))
+        elif st.st_nlink != 1:
+            out.append((p, "a hard link"))
+        elif st.st_size > MAX_FILE_BYTES and not is_csv:
+            out.append((p, f"over {MAX_FILE_BYTES // (1024 * 1024)} MB"))
+    return out
+
+
+def _own_csv_sources_unchecked(root):
+    """The declared CSV paths, links included, so `skipped_files` can name the ones
+    `_own_csv_sources` drops."""
+    entries = _read_manifest(root).get("sources")
+    out = []
+    for e in entries if isinstance(entries, list) else []:
+        if isinstance(e, dict) and isinstance(e.get("path"), str):
+            pth = Path(e["path"]).expanduser()
+            out.append((pth if pth.is_absolute() else Path(root) / pth,))
     return out
 
 
@@ -1559,7 +1570,7 @@ def csv_rows(root):
     out = []
     for pth, textcol, labelcol in csv_sources(root):
         try:
-            with open_safe(pth, newline="") as fh:
+            with open_safe(pth, newline="", max_bytes=None) as fh:   # declared CSVs are never capped
                 for r in _csv.DictReader(fh):
                     t = (r.get(textcol) or "").strip()
                     if not t:
