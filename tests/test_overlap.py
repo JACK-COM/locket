@@ -111,5 +111,25 @@ class Graduated(StoreCase):
             "a clean run still says what it was scored against"
 
 
+class IndexPairs(StoreCase):
+    def test_an_index_restating_its_own_target_is_not_listed(self):
+        """An index line restating the file it links to is the index doing its job; one
+        restating a file it does not link to is a finding."""
+        store = self.tmp / "s"
+        (store / "results").mkdir(parents=True)
+        (store / manifest.MANIFEST).write_text(json.dumps({"index_files": ["INDEX.md"]}))
+        linked = "Edge reveal measured three hundred maps per row from the centre chunk"
+        other = "Every study keeps its tables and limits in its own results file here"
+        (store / "INDEX.md").write_text(f"- [{linked}](results/edge.md)\n\n{other}.\n")
+        (store / "results" / "edge.md").write_text(f"{linked}.\n")
+        (store / "README.md").write_text(f"{other}.\n")
+        corpora.clear_settings()
+        r = overlap.cmd_audit(store)
+        self.assertEqual(r.count, 1, r.text)
+        self.assertIn("README.md", r.text)
+        self.assertNotIn("results/edge.md", r.text.split("\n", 1)[1])
+        self.assertIn("1 as an index line restating the file it links to", r.text)
+
+
 if __name__ == "__main__":
     unittest.main()

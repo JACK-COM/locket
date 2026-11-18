@@ -2,6 +2,7 @@
 (across), inside one file (dupes), between a holding space and a durable file
 (graduated), and the files an incoming text already restates (against).
 """
+import os
 import re
 import sys
 from collections import Counter, defaultdict
@@ -160,15 +161,36 @@ def cmd_across(floor=claims.PAIR_FLOOR):
     return Report(out, len(cross))
 
 
+# A relative markdown link, `](sub/file.md)` or `](file.md#part)`: the target an index line names.
+_MD_LINK = re.compile(r"\]\((?![a-z]+:)([^)\s#]+\.md)(?:#[^)]*)?\)")
+
+
+def index_links(root):
+    """{(index key, target key)} for every relative markdown link in the store's index
+    files, the target resolved beside the index that names it."""
+    index_files = corpora.settings(root)["index_files"]
+    rs = corpora.roots_of(root)
+    out = set()
+    for p in corpus.md_files(root):
+        if p.name in index_files:
+            key = corpora.corpus_key(root, p, rs)
+            for target in _MD_LINK.findall(fsio.read_or_empty(p)):
+                out.add((key, corpora.corpus_key(root, Path(os.path.normpath(p.parent / target)), rs)))
+    return out
+
+
 def cmd_audit(root, floor=claims.PAIR_FLOOR):
     out = []
     docs, pairs, kept, dropped = _audit_pairs(root, floor)
-    index_files = corpora.settings(root)["index_files"]
-    idx_pairs = [p for p in kept if Path(p[1]).name in index_files or Path(p[2]).name in index_files]
+    # An index restating a file it links to is the index doing its job; restating any
+    # other file, it is a finding like any other pair.
+    links = index_links(root)
+    own = [p for p in kept if (p[1], p[2]) in links or (p[2], p[1]) in links]
+    kept = [p for p in kept if not ((p[1], p[2]) in links or (p[2], p[1]) in links)]
     under = sum(1 for body in docs.values() for _ in claims.unclaimed(body))
     out.append(f"{len(docs)} files; {len(pairs)} raw cross-file claim pairs at jaccard {floor}; "
-               f"{dropped} filtered as pointer/boilerplate; {len(kept)} to read "
-               f"({len(idx_pairs)} index-restates-its-target); {under} sentences under the "
+               f"{dropped} filtered as pointer/boilerplate, {len(own)} as an index line restating "
+               f"the file it links to; {len(kept)} to read; {under} sentences under the "
                f"{claims.MIN_TOKENS}-token floor formed no claim and are in nothing above\n")
     for jac, fa, fb, sa, sb in kept:
         out.append(f"[{jac:.2f}] {fa}\n       {fb}\n   A: {fsio.relay(sa)}\n   B: {fsio.relay(sb)}\n")
