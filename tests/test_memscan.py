@@ -14,6 +14,7 @@ from unittest import mock
 from tests.harness import SRC, fixture_env
 
 import memscan as ms  # noqa: E402
+import grepassist  # noqa: E402
 import hosts  # noqa: E402
 import paths  # noqa: E402
 
@@ -938,15 +939,15 @@ def _selftest_inner():
     try:
         paths.PATHS = real_paths.replace(grepassist_log=logdir / "ro" / "ga.csv")
         (logdir / "ro").mkdir(); (logdir / "ro").chmod(0o500)
-        assert ms._grepassist_log("Bash", "declined", "x", "p") == 0, "an unwritable log must not raise"
+        assert grepassist.log("Bash", "declined", "x", "p") == 0, "an unwritable log must not raise"
         (logdir / "ro").chmod(0o700)
         paths.PATHS = real_paths.replace(grepassist_log=logdir / "ga.csv")
         paths.PATHS.grepassist_log.write_text("".join(f"2026-01-01T00:00:00Z,Bash,declined,x,row {i}\n" for i in range(4000)))
-        ms._trim_log(paths.PATHS.grepassist_log, 1000)
+        grepassist.trim_log(paths.PATHS.grepassist_log, 1000)
         kept = paths.PATHS.grepassist_log.read_text().splitlines()
         assert kept and kept[-1].endswith("row 3999") and len(kept) < 4000 and all(r.count(",") == 4 for r in kept), \
             "a trim must keep whole newest rows"
-        assert ms._grepassist_log("Bash", "declined", "x", "=cmd") == 0 and \
+        assert grepassist.log("Bash", "declined", "x", "=cmd") == 0 and \
             paths.PATHS.grepassist_log.read_text().splitlines()[-1].endswith(",'=cmd"), "a formula-led pattern must be quoted"
         assert paths.PATHS.grepassist_log.stat().st_mode & 0o777 in (0o600, 0o644), paths.PATHS.grepassist_log.stat().st_mode
         fresh = logdir / "hook.csv"
