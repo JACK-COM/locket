@@ -17,6 +17,7 @@ from pathlib import Path
 import tests.harness  # noqa: F401  (puts the source under test on sys.path)
 
 import memscan  # noqa: E402
+import pywrites  # noqa: E402
 
 BASH = shutil.which("bash")
 CASES = 250
@@ -76,12 +77,12 @@ def readers(lines, marks):
     text = set(memscan.command_text(cmd).split("\n"))
     py_lines = [ln.replace("cat", "python3") for ln in lines]
     py_at = offsets(py_lines)
-    spans = [(s, e) for _src, s, e, _u in memscan._python_programs("\n".join(py_lines))]
+    spans = [(s, e) for _src, s, e, _u in pywrites.programs("\n".join(py_lines))]
     return {
         "_shell_code": {k for k in marks if code[at[k]:at[k] + len(lines[k])] == lines[k]},
         "_strip_heredocs": {k for k in marks if lines[k] in kept},
         "command_text": {k for k in marks if lines[k] in text},
-        "_python_programs": {k for k in marks if not any(s <= py_at[k] < e for s, e in spans)},
+        "pywrites.programs": {k for k in marks if not any(s <= py_at[k] < e for s, e in spans)},
     }
 
 
@@ -118,7 +119,7 @@ class TrustVerbHidden(unittest.TestCase):
 class Bodies(unittest.TestCase):
     def test_python_dash_body_is_tab_stripped(self):
         cmd = "python3 - <<-EOF\n\timport os\n\tos.remove('x')\n\tEOF\n"
-        [(src, _s, _e, unreadable)] = memscan._python_programs(cmd)
+        [(src, _s, _e, unreadable)] = pywrites.programs(cmd)
         self.assertEqual(src, "import os\nos.remove('x')")
         self.assertTrue(unreadable is False)
 
