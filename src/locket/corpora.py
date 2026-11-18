@@ -24,11 +24,11 @@ def raw_corpora() -> dict[str, Path]:
     manifest, else its basename, else its full path where either collides. A
     project store is keyed by its manifest's `name` too, else its slug, which
     `resolve` still accepts; `init` writes the name and never registers one."""
-    out = {k: v for k, v in paths.PATHS.host_stores.items() if v.is_dir()}
+    out = {k: v for k, v in hosts.homes().items() if v.is_dir()}
     reg = [p for p in trust.registry() if manifest.has_manifest(p)]
     # a project's name yields to a host key and to a registered store's name, which
     # a `belongs_to` elsewhere may already point at
-    taken = set(paths.PATHS.host_stores) | {trust.read_manifest(p).get("name") for p in reg}
+    taken = set(hosts.homes()) | {trust.read_manifest(p).get("name") for p in reg}
     for d in sorted((hosts.claude() / "projects").glob("*/memory")):
         name = trust.read_manifest(d).get("name")
         ok = isinstance(name, str) and name and name not in taken and name not in out
@@ -181,7 +181,7 @@ def corpus_for(path: fsio.StrPath) -> Optional[Path]:
     Derived from the path rather than matched against a named list, so EVERY
     project's auto-memory is covered, including one that does not exist yet.
     Four shapes qualify: a directory holding a `locket.json` manifest (any host,
-    any location), the host stores in `Paths.host_stores`, and Claude Code's
+    any location), the host stores in `hosts.TABLE`, and Claude Code's
     `~/.claude/projects/<slug>/memory`. A non-markdown path and anything under
     the corpus's excluded directories return None.
     """
@@ -221,7 +221,7 @@ def phys_root_of(d: Path) -> Optional[Path]:
     `~/.claude/projects/<slug>/memory`. Membership, exclusion and the walk are
     the physical store's; the corpus it belongs to is `top_of` it."""
     projects = hosts.claude() / "projects"
-    stores = set(paths.PATHS.host_stores.values())
+    stores = set(hosts.homes().values())
     if len(str(d)) > fsio.PATH_MAX:              # no file lives there; walking it cost a stat per part
         return None
     for parent in (d, *d.parents):

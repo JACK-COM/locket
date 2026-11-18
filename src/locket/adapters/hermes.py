@@ -7,6 +7,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import fsio
 import hosts
@@ -15,6 +16,12 @@ import ledger
 import paths
 
 NAME = "hermes"
+DISPLAY = "Hermes"
+BASE = False
+TRIGGER_EXIT = 2            # Hermes has no context channel: a matched row refuses the call once
+INSTALL = "takes its hooks from its own config.yaml, by hand"
+INSTALL_EXAMPLE = ""
+ROW = hosts.row(__name__)
 
 # Hermes tool name -> the Claude Code tool the hook modes are written against.
 TOOLS = {"write_file": "Write", "patch": "Edit", "terminal": "Bash",
@@ -57,7 +64,7 @@ def native(payload, tool, ti):
         if isinstance(txt, str):
             added.append(txt)
     target = ti.get("target") or "memory"   # top-level in both shapes
-    ti = {"file_path": str(hosts.hermes() / "memories" / ("USER.md" if target == "user" else "MEMORY.md"))}
+    ti = {"file_path": str(home() / "memories" / ("USER.md" if target == "user" else "MEMORY.md"))}
     if old:                              # replace: an Edit with its anchor
         ti.update(old_string="\n".join(old), new_string="\n".join(added))
     else:                                # add: an append, so the hook sees
@@ -108,7 +115,7 @@ def shown(session_id, message, since, db=None):
     carries the start of `message`: True, False, or None when state.db cannot say.
     Hermes stores a blocked call's message as that call's result, JSON-encoded,
     before the next tool round runs."""
-    db = hosts.hermes() / "state.db" if db is None else Path(db)
+    db = home() / "state.db" if db is None else Path(db)
     if not session_id or not db.is_file():
         return None
     head = message[:300]            # stored JSON-encoded, so it is read back through json
@@ -165,16 +172,37 @@ def refuse_once(payload, msg, source, db=None):
 
 
 def status():
-    if not hosts.hermes().is_dir():
+    if not home().is_dir():
         return None
-    armed = (hosts.hermes() / "state.db").is_file()
+    armed = (home() / "state.db").is_file()
     return ("2e gate on Hermes: " + ("armed (reads state.db by session_id)" if armed else
                                      "UNARMED, state.db not found, so every write passes the question silently")
             + "; a nudge refuses the call once and the same call repeated passes")
 
 
+def probe_write(store, name, text):
+    """The write a doctor probe sends as Hermes does."""
+    return {"hook_event_name": "pre_tool_call", "tool_name": "write_file", "session_id": "",
+            "tool_input": {"path": str(store / name), "content": text}}
+
+
+def probe_call(cwd, command):
+    """The shell call a doctor trigger probe sends as Hermes does."""
+    return {"hook_event_name": "pre_tool_call", "tool_name": "terminal", "cwd": cwd, "session_id": "",
+            "tool_input": {"command": command}}
+
+
+def session_cwds():
+    """Working directories Hermes has opened a session in, from its state.db."""
+    db = home() / "state.db"
+    if not db.is_file():
+        return set()
+    return {r[0] for r in fsio.sqlite_rows(
+        db, "SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL AND cwd != ''") or ()}
+
+
 def home():
-    return hosts.hermes()
+    return hosts.home(ROW.name)
 
 
 def trigger_event(payload):
@@ -263,7 +291,7 @@ def trigger_reply(payload, message, block, home):
         return 0
     try:
         import adapters
-        return adapters.emit(payload, message, block, "trigger", Path(home or hosts.hermes()) / "state.db")
+        return adapters.emit(payload, message, block, "trigger", Path(home or hosts.home(ROW.name)) / "state.db")
     except Exception:
         return 0
 
@@ -316,7 +344,7 @@ def register():
 
 def removal():
     """Nothing Locket edits; the YAML lines that run it, named for a person to remove."""
-    cfg = hosts.hermes() / "config.yaml"
+    cfg = home() / "config.yaml"
     lines = locket_lines(cfg) if cfg.is_file() else []
     return install.Removal([], None, [f"Hermes hook line {hl}  (YAML; remove the entry by hand)" for hl in lines])
 
@@ -325,7 +353,7 @@ def checks(m, row):
     """Doctor's rows for Hermes: the five config.yaml entries, and its trigger rows firing."""
     import probes
     import trigger
-    hermes_cfg = hosts.hermes() / "config.yaml"
+    hermes_cfg = home() / "config.yaml"
     if hermes_cfg.is_file():
         events = config_hooks(hermes_cfg.read_text(errors="replace"))
         missing = [f"{v} on {e}" for e, v in HOOKS
@@ -339,16 +367,22 @@ def checks(m, row):
         else:
             row("ok", "hermes hooks", "all five registered")
         cmd = next((c for c in events.get("pre_tool_call", []) if install.is_locket_hook(c, "trigger")), None)
-        hermes_rows = trigger.rows_file(hosts.hermes())
-        problems = trigger.findings(hosts.hermes())
+        hermes_rows = trigger.rows_file(home())
+        problems = trigger.findings(home())
         if problems:
             row("fail", "hermes triggers", f"{len(problems)} problem(s) in {hermes_rows}: {problems[0]}",
                 "locket trigger check hermes")
         elif hermes_rows.is_file() and cmd:
-            probe = probes.probe_trigger(cmd, hermes=True)
+            probe = probes.probe_trigger(cmd, sys.modules[__name__])
             if probe is True:
                 row("ok", "hermes triggers", f"{hermes_rows} lints clean; the hook refuses a call on a known row")
             else:
                 row("fail", "hermes triggers", "registered, but the hook " +
                     ("stayed silent on a known row" if probe is False else f"failed: {probe}"),
                     f"run it by hand: {cmd}")
+
+
+if TYPE_CHECKING:                           # the faces this module has, checked by mypy
+    from adapters import HookHost, Target, hermes as _self
+    _hookhost: HookHost = _self
+    _target: Target = _self

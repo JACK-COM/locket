@@ -179,7 +179,7 @@ def _suite():
         worst, opened = probes.hook_latency(hang, {"full": full}, 1)
         assert worst == ("full", 1.0) and opened is None, \
             f"a probe killed at its timeout read as failing open: {worst} {opened}"
-    assert probes.probe_hook(live, codex=True) is True, \
+    assert probes.probe_hook(live, codex) is True, \
         "doctor's Codex probe does not fire through a patch into this memscan.py"
     merged = codex.merge_hooks({})
     assert "usage (SessionEnd)" not in merged and {"hook", "bashguard", "grepassist"} <= set(merged), merged
@@ -221,13 +221,13 @@ def _suite():
         finally:
             os.environ["PATH"] = real_path
     live_trigger = f"{shlex.quote(sys.executable)} {shlex.quote(str(lk.HERE / 'locket.py'))} trigger"
-    assert probes.probe_trigger(live_trigger) is True, "doctor's trigger probe does not fire through this locket.py"
-    assert probes.probe_trigger("true") is False, "doctor's trigger probe reads a silent command as firing"
-    assert probes.probe_trigger(live_trigger, hermes=True) is True, \
+    assert probes.probe_trigger(live_trigger, claude_code) is True, "doctor's trigger probe does not fire through this locket.py"
+    assert probes.probe_trigger("true", claude_code) is False, "doctor's trigger probe reads a silent command as firing"
+    assert probes.probe_trigger(live_trigger, hermes) is True, \
         "doctor's trigger probe does not fire through this locket.py on Hermes"
-    assert probes.probe_trigger("echo '[doctor-probe] probe'", hermes=True) is not True, \
+    assert probes.probe_trigger("echo '[doctor-probe] probe'", hermes) is not True, \
         "doctor's Hermes trigger probe reads a call that was not refused as firing"
-    assert probes.probe_trigger("exit 2", hermes=True) is False, \
+    assert probes.probe_trigger("exit 2", hermes) is False, \
         "doctor's Hermes trigger probe reads a bare refusal as firing"
     yaml = ('model: x\nhooks:\n  pre_tool_call:\n    - command: "/opt/homebrew/bin/locket hook"\n'
             '      matcher:\n        nested: x\n    - command: /opt/homebrew/bin/locket trigger\n'
@@ -288,7 +288,6 @@ class LocketFrontEnd(unittest.TestCase):
         self.assertEqual([v.name for v in cli.VERBS if v.run is None], [], "a verb with nothing to run")
         listed = {v.name for v in cli.VERBS if not v.hidden}
         self.assertEqual(set(cli.parser()[1].choices), listed)
-        self.assertEqual(set(install.HOOK_VERBS), set(hooks.ENTRIES))
         # the trigger hook is a listed verb whose `hook` counts its own runs
         self.assertTrue(set(health.HEALTH_VERBS) <= set(hooks.ENTRIES) | {"trigger"})
         mcp_names = [v.mcp.name or f"locket_{v.name}" for v in cli.VERBS if v.mcp]

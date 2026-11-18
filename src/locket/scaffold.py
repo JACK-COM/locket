@@ -121,7 +121,7 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
     for f in manifest.validate_manifest(d):
         print(f"manifest: {f}", file=sys.stderr)
     if parent is not None:
-        if d in set(paths.PATHS.host_stores.values()):
+        if d in set(hosts.homes().values()):
             print(f"{d} is a host store and cannot belong to another corpus", file=sys.stderr)
             return 1
         raw = corpora.raw_corpora()
@@ -205,7 +205,7 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
             return 1
     by_convention = inside == d and not m.is_file()
     if m.is_file():
-        by_convention = d in set(paths.PATHS.host_stores.values()) or (
+        by_convention = d in set(hosts.homes().values()) or (
             d.name == "memory" and d.parent.parent == hosts.claude() / "projects")
         man = manifest.manifest_data(d)
         if name is not None and man.get("name") != name:

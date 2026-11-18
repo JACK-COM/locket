@@ -64,7 +64,8 @@ def unpinned_trust():
 def untrusted_manifests():
     """0.12: a manifest acts only once a person trusts it; name the ones that stopped."""
     try:
-        loose = trust.untrusted_stores()
+        import adapters
+        loose = trust.untrusted_stores(adapters.session_cwds())
     except Exception as e:
         loose = []
         print(f"trust: the scan for untrusted stores failed ({type(e).__name__}: {e}); run  locket doctor")

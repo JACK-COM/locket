@@ -107,7 +107,7 @@ def _claude_dir(flag=None):
 def _hermes_db(flag=None):
     if flag or os.environ.get("LOCKET_USAGE_HERMES"):
         return Path(flag or os.environ["LOCKET_USAGE_HERMES"]).expanduser()
-    return Path(os.environ.get("HERMES_HOME") or hosts.hermes()).expanduser() / "state.db"
+    return Path(os.environ.get("HERMES_HOME") or hosts.home("hermes")).expanduser() / "state.db"
 
 
 def _project(cwd):

@@ -42,35 +42,15 @@ SKIP_DIRS = {".venv", "venv", "node_modules", "__pycache__", "dist", "build",
 def project_dir_for(corpus_root):
     """The working directory a project corpus was created from, or None.
 
-    `corpus_for_cwd` slugifies a path by replacing every non-alphanumeric
-    character with a dash, so the slug cannot simply be split: directory names
-    contain dashes, dots and underscores themselves, and all three arrive as the
-    same character. Walk the filesystem instead and re-slugify each real entry,
-    taking the longest match at every level. That is exact where string
-    splitting only guesses.
+    The slug cannot simply be split, since dashes, dots and underscores all arrive
+    as `-`; `trust.unslug` matches it against the disk one component at a time.
     """
     try:
         rel = Path(corpus_root).resolve().relative_to((hosts.claude() / "projects").resolve())
     except (ValueError, OSError):
         return None
-    rest, cur = rel.parts[0].lstrip("-"), Path("/")
-    while rest:
-        best = None
-        try:
-            entries = os.listdir(cur)
-        except OSError:
-            return None
-        for e in entries:
-            s = re.sub(r"[^A-Za-z0-9]", "-", e)
-            if rest != s and not rest.startswith(s + "-"):
-                continue
-            if (cur / e).is_dir() and (best is None or len(s) > len(best[1])):
-                best = (e, s)
-        if best is None:
-            return None
-        # one dash is the separator; a second belongs to a name that starts with `.` or `_`
-        cur, rest = cur / best[0], rest[len(best[1]) + 1:]
-    return cur
+    hit = trust.unslug(rel.parts[0])
+    return Path(hit) if hit else None
 
 
 # Excluded when walking `~/.claude` itself. Scoped to that root rather than
@@ -122,7 +102,7 @@ def _own_code_roots(corpus_root):
     proj = project_dir_for(corpus_root)
     if proj:
         roots.append((proj, frozenset()))
-    for home in (hosts.claude(), hosts.hermes()):
+    for home in (hosts.home(h.name) for h in hosts.TABLE if h.code):
         if home.is_dir():
             roots.append((home, CLAUDE_SKIP))
     return roots

@@ -19,6 +19,7 @@ import claims
 import corpora
 import corpus
 import fsio
+import hosts
 import health
 import ledger
 import manifest
@@ -546,7 +547,7 @@ def store_config(path):
     names = {n.lower() for n in CONFIG_NAMES}
     for q in (p, Path(os.path.realpath(p))):  # by name on a case-insensitive disk, and through a link
         d = q.parent
-        if q.name.lower() in names and (trust.trusted(d) or d in set(paths.PATHS.host_stores.values())):
+        if q.name.lower() in names and (trust.trusted(d) or d in set(hosts.homes().values())):
             return d, q.name
     phys = corpora.phys_root_of(d)
     if phys is not None:

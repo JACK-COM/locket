@@ -37,7 +37,8 @@ def fixture_env():
     import trust
     with tempfile.TemporaryDirectory(prefix="locket-test-") as t:
         # every host home a scratch directory, so no suite reads a live store's layout
-        homes = {name: Path(t) / "hosts" / name for name in paths.PATHS.host_stores}
+        import hosts
+        homes = {h.name: Path(t) / "hosts" / h.name for h in hosts.TABLE if h.home}
         p = paths.Paths.under(Path(t) / "locket", host_stores=homes)
         tmp = Path(tempfile.gettempdir()).resolve()
         real_trusted = trust.trusted

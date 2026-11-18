@@ -497,7 +497,7 @@ class TrustIsByIdentity(Scratch):
         import re
         proj = self.home / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.clone))
         proj.mkdir(parents=True)
-        found = self.probe("[str(p) for p in trust.untrusted_stores()]")
+        found = self.probe("[str(p) for p in trust.untrusted_stores(__import__('adapters').session_cwds())]")
         self.assertIn(str(self.clone), found)
 
 

@@ -34,8 +34,8 @@ def resolve(name: str) -> Optional[Path]:
     resolved parents, so a relative path handed on unresolved reported the
     write-time hook as NOT PROTECTED over a directory it guards.
     """
-    if name in paths.PATHS.host_stores:
-        return corpora.top_of(paths.PATHS.host_stores[name])
+    if name in hosts.homes():
+        return corpora.top_of(hosts.homes()[name])
     p = Path(name).expanduser()
     if p.is_dir():
         return corpora.top_of(p.resolve())

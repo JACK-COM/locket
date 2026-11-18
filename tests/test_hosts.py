@@ -5,22 +5,34 @@ from pathlib import Path
 
 import tests.harness  # noqa: F401  (puts the source under test on sys.path)
 
+import adapters  # noqa: E402
 import hosts  # noqa: E402
 import paths  # noqa: E402
 import trust  # noqa: E402
 import corpora  # noqa: E402
 
 
+class Table(unittest.TestCase):
+    def test_every_row_has_its_module_and_every_module_its_row(self):
+        """A host is one row in hosts.TABLE and one module under adapters/; each finds
+        the other, and the host every payload falls back to is asked last."""
+        self.assertEqual([m.__name__ for m in adapters.TARGETS], [f"adapters.{h.adapter}" for h in hosts.TABLE])
+        for m in adapters.HOSTS:
+            self.assertIs(hosts.row(m.__name__), m.ROW)
+        self.assertEqual([m.BASE for m in adapters.HOSTS], [False] * (len(adapters.HOSTS) - 1) + [True])
+        self.assertEqual(set(hosts.HOST_MEMBERS), {h.name for h in hosts.TABLE if h.home})
+
+
 class MissingHost(unittest.TestCase):
     def test_absent_hosts_match_nothing(self):
         with tempfile.TemporaryDirectory() as t, paths.use(paths.Paths.under(Path(t) / "locket")):
-            for home in (hosts.claude(), hosts.hermes(), hosts.codex()):
+            for home in (hosts.home(h.name) for h in hosts.TABLE if h.home):
                 self.assertFalse(home.exists(), home)
             mem = Path(t) / "projects" / "-x" / "memory"
             mem.mkdir(parents=True)
             self.assertFalse(trust.granted(mem), "a store under no host's projects/ was trusted")
             self.assertEqual(corpora.raw_corpora(), {})
-            self.assertEqual(trust.session_dirs(), set())
+            self.assertEqual(adapters.session_cwds(), set())
 
     def test_a_home_through_a_link_is_the_host(self):
         """A host home named through a symlink keeps its members and exclusions."""

@@ -27,7 +27,6 @@ BIN = Path(os.environ.get("LOCKET_BIN", str(Path.home() / ".local" / "bin")))
 PACKAGED = os.environ.get("LOCKET_PACKAGED") == "1"
 LINKS = ("locket", "memscan", "memfind")      # the last two are older spellings this replaces
 SCRIPTS = ("memscan.py", "memfind.py", "locket.py", "locket_mcp.py", "trigger.py", "usage.py", "configure.py")
-HOOK_VERBS = ("hook", "bashguard", "grepassist", "deliver")   # PreToolUse entry points, JSON on stdin
 # The hook commands run through locket.py rather than memscan.py: the trigger, and the
 # usage recorder a SessionEnd hook runs.
 USAGE_HOOK = "usage hook"
@@ -96,7 +95,8 @@ def merge_json(path, merge):
 
 def is_locket_hook(cmd, verb=None):
     """A hook command that runs Locket: memscan.py by path, or the `locket` command."""
-    verbs = [verb] if verb else (*HOOK_VERBS, *LOCKET_VERBS)
+    from commands import hooks          # the hidden verbs memscan dispatches; imported here, since they import us
+    verbs = [verb] if verb else (*hooks.ENTRIES, *LOCKET_VERBS)
     cmd = cmd.replace("'", "").replace('"', "").rstrip()   # a quoted path, as hook_command writes one
     return any(f"memscan.py {v}" in cmd or cmd.endswith((f"locket {v}", f"locket.py {v}")) for v in verbs)
 

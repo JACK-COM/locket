@@ -12,6 +12,7 @@ from pathlib import Path
 
 import corpus
 import health
+import hosts
 import install
 import ledger
 import manifest
@@ -56,11 +57,11 @@ def smoke():
     return None
 
 
-def probe_hook(cmd, codex=False):
+def probe_hook(cmd, host=None):
     """Run a registered `hook` command on a write that must fire: a new file in a
-    throwaway store repeating a paragraph the store already holds. True when it
-    answered, False when it was silent, a string when it failed to run. For Codex
-    the write arrives as the patch Codex sends, so the probe crosses the parser."""
+    throwaway store repeating a paragraph the store already holds, sent in `host`'s own
+    payload (Claude Code's by default). True when it answered, False when it was silent,
+    a string when it failed to run."""
     import tempfile
     base = paths.PATHS.state
     base.mkdir(parents=True, exist_ok=True)
@@ -68,12 +69,9 @@ def probe_hook(cmd, codex=False):
     try:
         (store / manifest.MANIFEST).write_text("{}\n")
         (store / "harbour.md").write_text(_PROBE + "\n")
-        payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Write",
-                              "tool_input": {"file_path": str(store / "zz-probe.md"), "content": _PROBE}}
-                             if not codex else
-                             {"hook_event_name": "PreToolUse", "tool_name": "apply_patch", "turn_id": "doctor",
-                              "cwd": str(store), "tool_input": {"command": "*** Begin Patch\n*** Add File: "
-                              "zz-probe.md\n+" + _PROBE + "\n*** End Patch"}})
+        if host is None:
+            from adapters import claude_code as host
+        payload = json.dumps(host.probe_write(store, "zz-probe.md", _PROBE))
         # supervised, so a firing hook nudges on stdout and exits 0; exit 2 would
         # also be what python prints for a script path that is gone
         # the probe store is trusted through a registry of its own, so the probe never
@@ -147,7 +145,7 @@ def hook_latency(cmd, stores, limit, verb="hook"):
     body = ("Locket doctor latency probe " + os.urandom(6).hex() + ": a novel paragraph that "
             "names no fact any store holds, long enough to pass the net-new floor of the "
             "write gate and reach its meaning-ranked question. ") * 2
-    host_roots = {Path(p) for p in paths.PATHS.host_stores.values()}
+    host_roots = {Path(p) for p in hosts.homes().values()}
     worst = opened = None
     # A probe killed at its timeout must not count as a live run the host abandoned, so each
     # probe keeps its own health record; an error in it is a hook that failed open quickly.
@@ -282,25 +280,23 @@ def csv_hook_latency(cmd, target, limit):
     return secs, problem, None
 
 
-def probe_trigger(cmd, hermes=False):
-    """Run a registered `trigger` command against a throwaway home whose host store holds
+def probe_trigger(cmd, host):
+    """Run a registered `trigger` command against a throwaway home whose `host` store holds
     one row the payload matches. True when the row's question came back, False when the
-    command was silent, a string when it failed to run. On Hermes the row refuses the call
-    once, so the answer is exit 2 with the question in the block message."""
+    command was silent, a string when it failed to run; a host without a context channel
+    answers with its TRIGGER_EXIT and the question in the block message."""
     import subprocess, tempfile
     with tempfile.TemporaryDirectory() as t:
-        home = Path(t) / (".hermes" if hermes else ".claude")
+        home = Path(t) / host.ROW.home
         home.mkdir()
         (home / "triggers.json").write_text(json.dumps({"rows": [
             {"id": "doctor-probe", "tools": "Bash", "content": "locket-doctor-probe", "question": "probe"}]}))
-        payload = json.dumps({"hook_event_name": "pre_tool_call" if hermes else "PreToolUse",
-                              "tool_name": "terminal" if hermes else "Bash", "cwd": t, "session_id": "",
-                              "tool_input": {"command": "echo locket-doctor-probe"}})
+        payload = json.dumps(host.probe_call(t, "echo locket-doctor-probe"))
         try:        # TMPDIR too: the refusal record must not outlive the probe
             r = subprocess.run(cmd, shell=True, input=payload, capture_output=True, text=True, timeout=30,
                                env={**os.environ, "HOME": t, "TMPDIR": t})
         except subprocess.TimeoutExpired:
             return "timed out after 30s"
-        if r.returncode != (2 if hermes else 0):
+        if r.returncode != host.TRIGGER_EXIT:
             return (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1]
         return "[doctor-probe] probe" in r.stdout

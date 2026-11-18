@@ -1,7 +1,7 @@
-"""Where Locket keeps its own state, and where the hosts it serves live.
+"""Where Locket keeps its own state.
 
-Every file Locket owns outside a store, and the host stores it knows on sight, are
-fields of one `Paths`. `PATHS` is this process's, read from the environment at import,
+Every file Locket owns outside a store is a field of one `Paths`; where the hosts it
+serves live is `hosts.TABLE`, which a `Paths` overrides for a test. `PATHS` is this process's, read from the environment at import,
 so a hook or probe spawned with a different environment builds its own. Code reads
 `paths.PATHS.<field>` at call time, never a copy taken at import; a test builds a
 `Paths` of its own and installs it with `use(...)` for the length of a `with`.
@@ -29,8 +29,9 @@ class Paths:
     # shared temp dir lets another user make the path first, as a readable
     # directory or a symlink elsewhere.
     pending_dir: Path
-    # Each host's core directory, a store found without a manifest.
-    host_stores: dict[str, Path] = dataclasses.field(default_factory=dict)
+    # Each host's home by store name, where a test or probe sets them; None reads
+    # `hosts.TABLE` (`hosts.homes()` is the one reader).
+    host_stores: Optional[dict[str, Path]] = None
 
     @property
     def state(self) -> Path:
@@ -68,15 +69,12 @@ class Paths:
             health_dir=Path(env.get("LOCKET_HEALTH_DIR") or state / "hook-health").expanduser(),
             grepassist_log=Path(env.get("LOCKET_GREPASSIST_LOG") or state / "grepassist.csv").expanduser(),
             pending_dir=Path(tempfile.gettempdir()) / f"memscan-pending-{uid}",
-            # Each host's home: Claude Code's, Hermes Agent's, and Codex's, which CODEX_HOME moves.
-            host_stores={"council": HOME / ".claude", "hermes": HOME / ".hermes",
-                         "codex": Path(env.get("CODEX_HOME") or HOME / ".codex")},
         )
 
     def replace(self, **changes: Any) -> "Paths":
         """A copy with `changes`; the host-store table is copied too, so editing the
         copy's never reaches this one."""
-        changes.setdefault("host_stores", dict(self.host_stores))
+        changes.setdefault("host_stores", None if self.host_stores is None else dict(self.host_stores))
         return dataclasses.replace(self, **changes)
 
 

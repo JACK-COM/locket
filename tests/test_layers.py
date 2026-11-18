@@ -31,6 +31,27 @@ class Layers(unittest.TestCase):
                     found.append(f"{f.relative_to(SRC)}:{fn.lineno} binds {name}")
         self.assertEqual(found, [], "a local shadows a module the same function reads")
 
+    def test_no_local_shadows_a_function_it_calls(self):
+        """A function whose argument or local takes the name of a function its own module
+        defines, and calls that name, calls the local: `home or home()` with a `home`
+        argument raises, and a hook's catch-all turns the raise into silence."""
+        found = []
+        for f in sorted(Path(SRC).rglob("*.py")):
+            if f.name.startswith("_") and f.name != "__init__.py":
+                continue
+            tree = ast.parse(f.read_text())
+            defs = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+            for fn in ast.walk(tree):
+                if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                a = fn.args
+                bound = {x.arg for x in a.args + a.kwonlyargs + a.posonlyargs}
+                bound |= {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+                called = {n.func.id for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+                for name in sorted(bound & called & defs):
+                    found.append(f"{f.relative_to(SRC)}:{fn.lineno} binds {name}")
+        self.assertEqual(found, [], "a local shadows a function of its own module that it calls")
+
     def test_every_parser_prints_plain_help(self):
         """From Python 3.14 argparse colours help on a terminal, and SafeOut strips each
         colour code's ESC, leaving `[1;34m` on screen; every parser passes

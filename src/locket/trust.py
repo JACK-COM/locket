@@ -10,7 +10,7 @@ import re
 import shlex
 import sys
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 import fsio
 import hosts
@@ -94,9 +94,9 @@ def trusted_ids() -> tuple:
         key: tuple = (str(paths.PATHS.registry), st.st_mtime_ns, st.st_size)
     except OSError:
         key = (str(paths.PATHS.registry), None, None)
-    key += tuple(str(p) for p in paths.PATHS.host_stores.values())
+    key += tuple(str(p) for p in hosts.homes().values())
     if key not in _TRUST_CACHE:
-        host_ids = {fsio.inode(p) for p in paths.PATHS.host_stores.values()}
+        host_ids = {fsio.inode(p) for p in hosts.homes().values()}
         host_ids.discard(None)
         pins = registry_pins()
         rows = {}
@@ -210,7 +210,7 @@ def register(root: fsio.StrPath) -> bool:
     return old is None
 
 
-def _first_cwd(path: Path, limit: int = 60) -> Optional[str]:
+def first_cwd(path: Path, limit: int = 60) -> Optional[str]:
     """The first `"cwd"` value in a session's JSON lines, or None."""
     try:
         with open(path, errors="ignore") as f:
@@ -225,7 +225,7 @@ def _first_cwd(path: Path, limit: int = 60) -> Optional[str]:
     return None
 
 
-def _unslug(slug: str, budget: int = 2000) -> Optional[str]:
+def unslug(slug: str, budget: int = 2000) -> Optional[str]:
     """The existing directory Claude Code slugified into `slug`, or None. The slug
     replaces every non-alphanumeric character with `-`, so `a-b` may be `a/b`,
     `a-b`, `a.b` or `a_b`; matched against the disk one component at a time."""
@@ -257,45 +257,12 @@ def _unslug(slug: str, budget: int = 2000) -> Optional[str]:
     return walk("/", slug[1:]) if slug.startswith("-") else None
 
 
-def session_dirs() -> set[str]:
-    """Every working directory a host's session record names: Claude Code's
-    project transcripts, Codex rollouts, Hermes `state.db`. The detection surface
-    for an untrusted store; a directory no host has opened is not on it."""
-    out: set[str] = set()
-
-    def mtime(f: Path) -> float:
-        try:
-            return f.stat().st_mtime
-        except OSError:                     # a transcript rotated away mid-scan
-            return 0.0
-
-    for proj in (hosts.claude() / "projects").glob("*"):
-        hit = _unslug(proj.name)
-        if hit:
-            out.add(hit)
-        logs = sorted(proj.glob("*.jsonl"), key=mtime, reverse=True)
-        for f in logs[:3]:
-            cwd = _first_cwd(f)
-            if cwd:
-                out.add(cwd)
-                break
-    rollouts = sorted((hosts.codex() / "sessions").glob("*/*/*/*.jsonl"), reverse=True)
-    for f in rollouts[:500]:
-        cwd = _first_cwd(f, limit=1)
-        if cwd:
-            out.add(cwd)
-    db = hosts.hermes() / "state.db"
-    if db.is_file():
-        out.update(r[0] for r in fsio.sqlite_rows(
-            db, "SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL AND cwd != ''") or ())
-    return out
-
-
-def untrusted_stores() -> list[Path]:
-    """Directories holding a manifest that is not trusted, found on the session
-    record's working directories and their parents up to the home directory."""
+def untrusted_stores(session_dirs: Iterable[str]) -> list[Path]:
+    """Directories holding a manifest that is not trusted, found on the working
+    directories hosts have opened sessions in (`adapters.session_cwds()`) and their
+    parents up to the home directory. A directory no host has opened is not on it."""
     found, seen = set(), set()
-    for cwd in session_dirs():
+    for cwd in session_dirs:
         d = Path(cwd)
         for p in (d, *d.parents):
             if p in seen:

@@ -88,15 +88,15 @@ def _bin():
     return install.BIN
 
 
+# Every client `install` can register, by its own flag.
+_FLAGGED = [m for m in adapters.TARGETS if m.FLAG]
+
+
 VERBS = (
-    Verb("install", "[--hooks] [--codex] [--desktop]",
-         "put `locket` on PATH (%s); --hooks merges the write-time hooks into Claude Code's "
-         "settings.json, --codex into Codex's hooks.json, --desktop registers the MCP server "
-         "with Claude Desktop" % _bin(),
-         "locket install                        the command only\n"
-         "locket install --hooks                plus the Claude Code hooks, keeping a copy of settings.json\n"
-         "locket install --codex                plus the Codex hooks; trust them with /hooks in Codex\n"
-         "locket install --desktop              plus the Claude Desktop server; restart the app after",
+    Verb("install", " ".join(f"[{m.FLAG}]" for m in _FLAGGED),
+         "put `locket` on PATH (%s); " % _bin() + ", ".join(f"{m.FLAG} {m.INSTALL}" for m in _FLAGGED),
+         "\n".join([f"{'locket install':<38}the command only"]
+                   + [f"{f'locket install {m.FLAG}':<38}{m.INSTALL_EXAMPLE}" for m in _FLAGGED]),
          run=_install, guide=_install_guide),
     Verb("uninstall", "[--yes] [--purge] [--dry-run]",
          "remove the command, ~/.locket, every cache, and the shared venv when no other piece uses it; "

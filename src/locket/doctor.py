@@ -127,7 +127,7 @@ def check_trust(m, row):
         row("warn", "skipped", f"{len(skipped)} store files are never read: {shown}",
             "replace a link or hard link with the file itself; a markdown file past the cap is not read")
     try:
-        loose = trust.untrusted_stores()
+        loose = trust.untrusted_stores(adapters.session_cwds())
     except Exception as e:                  # a failed scan is reported, never read as "none found"
         loose = None
         row("warn", "trust", f"the scan for untrusted stores failed ({type(e).__name__}: {e})")
@@ -137,7 +137,7 @@ def check_trust(m, row):
             "its trigger rows, ledger schemas and sources are ignored",
             f"locket trust {shlex.quote(str(d))}  (at a terminal, if you made it), or delete its {manifest.MANIFEST}")
     if loose is not None:
-        row("ok", "trust", "scope: directories Claude Code, Codex or Hermes have opened a session in, "
+        row("ok", "trust", f"scope: directories {adapters.named(m for m in adapters.TARGETS if m in adapters.HOSTS)} have opened a session in, "
             "and their parents" + ("" if loose else "; no untrusted store found"))
     for gone in (p for p in trust.registry_stale() if p not in conventional):
         q = shlex.quote(str(gone))

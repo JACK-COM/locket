@@ -1,17 +1,19 @@
-"""The hosts Locket serves, each one module with two faces: `HookHost`, for a host whose
-hooks Locket runs in, and `Target`, for a host `locket install`, `uninstall` and `doctor`
-reach. A new host is one module, added to HOSTS and TARGETS; `make typecheck` fails while
-it lacks any part of either face.
+"""The clients Locket serves, each one module here with two faces: `HookHost`, for a host
+whose hooks Locket runs in, and `Target`, for a client `locket install`, `uninstall` and
+`doctor` reach. A new host is its module here and its row in `hosts.TABLE`, which names
+the module; TARGETS and HOSTS are read off the table. Each module states which faces it
+has under TYPE_CHECKING at its foot, so `make typecheck` fails while it lacks any part.
 """
 from __future__ import annotations
+import importlib
 
 import json
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Protocol
+from typing import TYPE_CHECKING, Optional, Protocol, cast
 
 import gate
-from adapters import claude_code, codex, desktop, hermes
+import hosts
 
 if TYPE_CHECKING:
     import doctor
@@ -27,12 +29,19 @@ class HookHost(Protocol):
     pattern past its transcript, and `trigger_reply` the exit code."""
     @property
     def NAME(self) -> str: ...
+    @property
+    def BASE(self) -> bool: ...
+    @property
+    def TRIGGER_EXIT(self) -> int: ...
     def detects(self, payload: dict) -> bool: ...
     def native(self, payload: dict, tool: Optional[str], ti: dict) -> tuple[Optional[str], dict]: ...
     def deliver(self, payload: dict, msg: str, blocking: bool, source: str, db: Optional[Path]) -> int: ...
     def status(self) -> Optional[str]: ...
     def home(self) -> Path: ...
     def asked(self, payload: dict) -> bool: ...
+    def session_cwds(self) -> set[str]: ...
+    def probe_write(self, store: Path, name: str, text: str) -> dict: ...
+    def probe_call(self, cwd: str, command: str) -> dict: ...
     def trigger_event(self, payload: dict) -> dict: ...
     def seen(self, payload: dict, home: Optional[Path], pattern: str) -> bool: ...
     def trigger_reply(self, payload: dict, message: str, block: bool, home: Optional[Path]) -> int: ...
@@ -44,18 +53,41 @@ class Target(Protocol):
     its config; `checks` adds its doctor rows. It imports probes and trigger inside its
     functions, so a hook never loads them."""
     @property
+    def DISPLAY(self) -> str: ...
+    @property
     def FLAG(self) -> Optional[str]: ...
+    @property
+    def INSTALL(self) -> str: ...
+    @property
+    def INSTALL_EXAMPLE(self) -> str: ...
     def register(self) -> int: ...
     def removal(self) -> install.Removal: ...
     def checks(self, m: doctor.Machine, row: doctor.Row) -> None: ...
 
 
-# Walked in order and the first host that detects a payload owns it; Claude Code,
-# whose shape the others are read into, detects everything and so comes last.
-HOSTS: tuple[HookHost, ...] = (hermes, codex, claude_code)
+# Every client, in hosts.TABLE order: install, uninstall and doctor walk these. The
+# cast stands where the static check cannot see; each module checks itself (above).
+TARGETS: tuple[Target, ...] = tuple(cast(Target, importlib.import_module(f"adapters.{h.adapter}"))
+                                    for h in hosts.TABLE)
+# The ones with hooks, walked in order, the first that detects a payload owning it. The
+# BASE host's shape is what the others are read into: it detects everything, so it comes last.
+HOSTS: tuple[HookHost, ...] = tuple(sorted((cast(HookHost, m) for m in TARGETS if hasattr(m, "detects")),
+                                           key=lambda m: m.BASE))
 BY_NAME = {h.NAME: h for h in HOSTS}
-# Every hook host, and Desktop, which runs no hooks and takes the MCP server.
-TARGETS: tuple[Target, ...] = (claude_code, codex, hermes, desktop)
+BASE_HOST = HOSTS[-1]                       # for a payload no host marked
+
+
+def session_cwds():
+    """Every working directory any hook host has opened a session in."""
+    return set().union(*(h.session_cwds() for h in HOSTS))
+
+
+def named(mods):
+    """`A, B or C` from the modules' DISPLAY names."""
+    names = [m.DISPLAY for m in mods]
+    if not names:
+        return "no host"
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " or " + names[-1]
 
 
 def host_of(payload):
@@ -94,7 +126,7 @@ def normalise(payload):
 
 def sender(payload):
     """The host module a normalised payload came from; Claude Code's when unmarked."""
-    return BY_NAME.get(payload.get("_host"), claude_code)
+    return BY_NAME.get(payload.get("_host"), BASE_HOST)
 
 
 def emit(payload, msg, blocking, source="memscan", db=None):
@@ -109,5 +141,5 @@ def emit(payload, msg, blocking, source="memscan", db=None):
 def gate_status():
     """One line per installed host on whether the 2e question gate can see a session
     there, and whether a non-blocking nudge has a way to reach the model."""
-    lines = [s for s in (h.status() for h in reversed(HOSTS)) if s]
+    lines = [s for s in (cast(HookHost, h).status() for h in TARGETS if h in HOSTS) if s]
     return "\n".join(lines) if lines else "no known host home found; CLI modes only"

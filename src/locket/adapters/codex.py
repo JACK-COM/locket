@@ -4,16 +4,24 @@ import json
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import corpora
 import gate
 import hosts
 import install
+import trust
 from adapters import claude_code
 
 NAME = "codex"
+DISPLAY = "Codex"
+BASE = False
+TRIGGER_EXIT = 0
+INSTALL = "merges the write-time hooks into Codex's hooks.json"
+INSTALL_EXAMPLE = "plus the Codex hooks; trust them with /hooks in Codex"
+ROW = hosts.row(__name__)
 
 # A Codex patch, as the native `apply_patch` tool's `command` or as the body of an
 # `apply_patch` heredoc when the model has no native tool (every model Codex has no
@@ -103,14 +111,36 @@ def deliver(payload, msg, blocking, source, db):
 
 
 def status():
-    if not hosts.codex().is_dir():
+    if not home().is_dir():
         return None
     return ("2e gate on Codex: armed (reads the rollout transcript Codex hands the hook); nudges "
             "reach the model on the write, once /hooks has trusted them")
 
 
+def probe_write(store, name, text):
+    """The write a doctor probe sends as Codex does: a patch adding the file, so the probe
+    crosses the patch parser."""
+    return {"hook_event_name": "PreToolUse", "tool_name": "apply_patch", "turn_id": "doctor",
+            "cwd": str(store), "tool_input": {"command": f"*** Begin Patch\n*** Add File: {name}\n+{text}\n*** End Patch"}}
+
+
+def probe_call(cwd, command):
+    """Codex sends Claude Code's shell payload."""
+    return claude_code.probe_call(cwd, command)
+
+
+def session_cwds():
+    """Working directories Codex has opened a session in, from its newest 500 rollouts."""
+    out = set()
+    for f in sorted((home() / "sessions").glob("*/*/*/*.jsonl"), reverse=True)[:500]:
+        cwd = trust.first_cwd(f, limit=1)
+        if cwd:
+            out.add(cwd)
+    return out
+
+
 def home():
-    return hosts.codex()
+    return hosts.home(ROW.name)
 
 
 def trigger_event(payload):
@@ -160,7 +190,7 @@ def trust_status(timeout=20, version=""):
     try:
         p = subprocess.Popen([exe, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
-                             env={**os.environ, "CODEX_HOME": str(hosts.codex())},
+                             env={**os.environ, "CODEX_HOME": str(home())},
                              start_new_session=True)    # an npm launcher's native child dies with it
     except OSError:
         return None
@@ -188,7 +218,7 @@ def trust_status(timeout=20, version=""):
         for m in ({"id": 1, "method": "initialize", "params": {"clientInfo": {
                        "name": "locket-doctor", "title": None, "version": version}, "capabilities": None}},
                   {"method": "initialized"},
-                  {"id": 2, "method": "hooks/list", "params": {"cwds": [str(hosts.codex())]}}):
+                  {"id": 2, "method": "hooks/list", "params": {"cwds": [str(home())]}}):
             stdin.write(json.dumps(m) + "\n"); stdin.flush()
             if m.get("id") == 1 and reply_to(1) is None:
                 return None
@@ -230,7 +260,7 @@ FLAG = "--codex"
 
 
 def config_file():
-    return hosts.codex() / "hooks.json"
+    return home() / "hooks.json"
 
 
 def register():
@@ -239,7 +269,7 @@ def register():
     rc = install.merge_json(config_file(), merge_hooks)
     print("Codex runs a hook only once it is trusted: start `codex`, run /hooks, and trust "
           "each Locket entry. A later change to an entry asks again; an upgrade does not")
-    profiles = sorted(f.name for f in hosts.codex().glob("*.config.toml"))
+    profiles = sorted(f.name for f in home().glob("*.config.toml"))
     if profiles:
         print(f"Codex profile config found ({', '.join(profiles)}): trust given in /hooks under --profile "
               "(as `ollama launch codex` runs it) is written there and lapses on restart; copy its "
@@ -254,8 +284,8 @@ def removal():
 def checks(m, row):
     """Doctor's rows for Codex: its hooks registered, firing on a patch, and trusted by Codex itself."""
     import probes
-    codex_cfg = hosts.codex() / "hooks.json"
-    if hosts.codex().is_dir():
+    codex_cfg = home() / "hooks.json"
+    if home().is_dir():
         hooks = claude_code.registered_hooks(codex_cfg) if codex_cfg.is_file() else {}
         missing = [v for _, v, _t in claude_code.PRE_TOOL if v not in hooks] if hooks is not None else []
         if hooks is None:
@@ -263,13 +293,13 @@ def checks(m, row):
         elif missing:
             row("warn", "codex hooks", f"not registered: {', '.join(missing)}", "locket install --codex")
         else:
-            probe = probes.probe_hook(hooks["hook"], codex=True)
+            probe = probes.probe_hook(hooks["hook"], sys.modules[__name__])
             if probe is True:
                 # the probe runs the command directly, so it proves the hook, not Codex's dispatch;
                 # whether Codex will dispatch it is trust, which only Codex's own hooks/list may say
                 granted = trust_status(version=m.version)
                 lapsed = [k for k, s in (granted or {}).items() if s != "trusted"]
-                gap = profile_trust_gap(hosts.codex(), lapsed) if lapsed else {}
+                gap = profile_trust_gap(home(), lapsed) if lapsed else {}
                 if not granted:               # {} too: a reply naming no Locket entry proves nothing
                     row("warn", "codex hooks", "registered, and the write hook fires on a known fork in a patch; "
                         "Codex could not report trust, and skips a hook until it is trusted",
@@ -291,3 +321,9 @@ def checks(m, row):
                     ("stayed silent on a known fork" if probe is False else f"failed: {probe}"),
                     f"run it by hand: {hooks['hook']}")
     claude_code.check_entries(row, "codex", codex_cfg, "--codex")
+
+
+if TYPE_CHECKING:                           # the faces this module has, checked by mypy
+    from adapters import HookHost, Target, codex as _self
+    _hookhost: HookHost = _self
+    _target: Target = _self

@@ -7,12 +7,20 @@ import shlex
 import shutil
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import hosts
 import install
 import paths
+import trust
 
 NAME = "claude-code"
+DISPLAY = "Claude Code"
+BASE = True                 # every other host's payload is read into this one's shape
+TRIGGER_EXIT = 0            # a matched trigger row is context on stdout
+INSTALL = "merges the write-time hooks into Claude Code's settings.json"
+INSTALL_EXAMPLE = "plus the Claude Code hooks, keeping a copy of settings.json"
+ROW = hosts.row(__name__)
 
 
 def detects(payload):
@@ -42,8 +50,43 @@ def status():
             "hook); nudges reach the model on the write")
 
 
+def probe_write(store, name, text):
+    """The Write a doctor probe sends: a new file in the probe store."""
+    return {"hook_event_name": "PreToolUse", "tool_name": "Write",
+            "tool_input": {"file_path": str(store / name), "content": text}}
+
+
+def probe_call(cwd, command):
+    """The shell call a doctor trigger probe sends."""
+    return {"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": cwd, "session_id": "",
+            "tool_input": {"command": command}}
+
+
+def session_cwds():
+    """Working directories Claude Code has opened a session in: each project's slug, read
+    back against the disk, and the cwd its newest transcript names."""
+    out = set()
+
+    def mtime(f):
+        try:
+            return f.stat().st_mtime
+        except OSError:                     # a transcript rotated away mid-scan
+            return 0.0
+
+    for proj in (home() / "projects").glob("*"):
+        hit = trust.unslug(proj.name)
+        if hit:
+            out.add(hit)
+        for f in sorted(proj.glob("*.jsonl"), key=mtime, reverse=True)[:3]:
+            cwd = trust.first_cwd(f)
+            if cwd:
+                out.add(cwd)
+                break
+    return out
+
+
 def home():
-    return hosts.claude()
+    return hosts.home(ROW.name)
 
 
 def trigger_event(payload):
@@ -393,7 +436,7 @@ def checks(m, row):
         elif problems:
             row("fail", "triggers", f"{len(problems)} problem(s) in {rows_path}: {problems[0]}", "locket trigger check")
         elif events is not None:
-            probe = probes.probe_trigger(trigger_command(events.get("PreToolUse")))
+            probe = probes.probe_trigger(trigger_command(events.get("PreToolUse")), sys.modules[__name__])
             if probe is True:
                 row("ok", "triggers", f"{rows_path} lints clean; the hook is registered and fires on a known row")
             else:
@@ -418,3 +461,9 @@ def checks(m, row):
                 "Claude Code keeps its transcripts is lost unless `locket usage` ran within it", "locket install --hooks")
         else:
             row("ok", "usage", f"recorded as each session ends; {seen}")
+
+
+if TYPE_CHECKING:                           # the faces this module has, checked by mypy
+    from adapters import HookHost, Target, claude_code as _self
+    _hookhost: HookHost = _self
+    _target: Target = _self

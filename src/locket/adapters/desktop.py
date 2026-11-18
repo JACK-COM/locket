@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import install
 
@@ -37,7 +38,10 @@ def ours(entry):
             or any(Path(a).name == "locket_mcp.py" for a in args))
 
 
+DISPLAY = "Claude Desktop"
 FLAG = "--desktop"
+INSTALL = "registers the MCP server with Claude Desktop"
+INSTALL_EXAMPLE = "plus the Claude Desktop server; restart the app after"
 
 
 def register():
@@ -82,3 +86,8 @@ def checks(m, row):
             gone = [str(p) for p in parts if not p.is_file()]
             row("fail", "desktop server", f"names a missing file: {', '.join(gone)}", "locket install --desktop") \
                 if gone else row("ok", "desktop server", "registered; restart Claude Desktop after a change")
+
+
+if TYPE_CHECKING:                           # the faces this module has, checked by mypy
+    from adapters import Target, desktop as _self
+    _target: Target = _self

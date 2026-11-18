@@ -47,7 +47,7 @@ class Hermes(StoreCase):
                            {"action": "add", "target": "memory", "new_text": "c"}]}})
         assert m["tool_input"]["file_path"].endswith("memories/MEMORY.md"), m
         assert m["tool_input"]["new_string"] == "b\nc" and m["tool_input"]["old_string"] == "a\nz", m
-        assert "MEMORY.md" not in corpora.settings(hosts.hermes())["index_files"], \
+        assert "MEMORY.md" not in corpora.settings(hosts.home("hermes"))["index_files"], \
             "Hermes's MEMORY.md is its whole memory and must not inherit the index exemption"
         r = adapters.normalise({"hook_event_name": "pre_tool_call", "tool_name": "write_file",
                        "tool_input": {"path": "MEMORY.md", "content": "c"},
