@@ -1,4 +1,4 @@
-"""memfind's suite: the lexical rung and CSV rows offline, and the ranking where an embedder answers."""
+"""memfind's suite: the lexical rung offline; the ranking and CSV rows where an embedder answers."""
 import json
 import math
 import sys
@@ -171,16 +171,20 @@ class MemfindBehaviour(unittest.TestCase):
             _lexical()
 
     def test_rows(self):
+        self._needs_embedder()
         with fixture_env():
             _rows()
 
     def test_ranked(self):
+        self._needs_embedder()
+        with fixture_env():
+            _ranked()
+
+    def _needs_embedder(self):
         try:
             mf.resolve_backend()
         except RuntimeError as e:
             self.skipTest(f"no embedder here: {e}")
-        with fixture_env():
-            _ranked()
 
 
 if __name__ == "__main__":
