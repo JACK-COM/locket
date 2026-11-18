@@ -355,10 +355,10 @@ class RoundTwo(Scratch):
         return r.stdout.strip()
 
     def test_window_edges_do_not_invent_anchors(self):
-        step = 64 * 1024 - 4096
-        text = "x" * step + "rm -rf /" + "y" * 70000
-        self.assertEqual(self.probe(f"trigger._search(r'^rm -rf', {text!r})"), "False")
-        self.assertEqual(self.probe(f"trigger._search(r'rm -rf', {text!r})"), "True", "the control")
+        # built inside the probe: Linux caps one argument at 128 KB
+        text = "'x' * (64 * 1024 - 4096) + 'rm -rf /' + 'y' * 70000"
+        self.assertEqual(self.probe(f"trigger._search(r'^rm -rf', {text})"), "False")
+        self.assertEqual(self.probe(f"trigger._search(r'rm -rf', {text})"), "True", "the control")
 
     def test_a_fully_read_long_call_is_not_unread(self):
         self.assertEqual(self.probe("trigger._search('zzz', 'a' * 950000)"), "False")
