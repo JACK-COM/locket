@@ -1,4 +1,4 @@
-"""This machine's install: the settings, putting Locket on PATH and the hosts' configs and
+"""This machine's install: putting Locket on PATH and the hosts' configs and
 taking it off again, what it reaches, whether every step works, and the MCP server.
 """
 import platform
@@ -7,18 +7,6 @@ import sys
 import adapters
 import commands
 from commands import Tool, Verb
-
-
-def _configure(rest):
-    import configure
-    return configure.main(rest)
-
-
-def _configure_guide(own):
-    import configure
-    configure.parser().print_help()
-    print("\n" + configure.__doc__.split("\n\n", 1)[1].rstrip())
-    return 0
 
 
 def _install(rest):
@@ -101,14 +89,6 @@ def _bin():
 
 
 VERBS = (
-    Verb("configure", "[embedder [--model NAME] [--ollama-host URL] [--[no-]autostart] [--venv PATH] [--global] [--reset] [--index] [--no-check] [--dry-run] | schema]",
-         "show or change the embedder settings every Locket process reads, Locket's own or (--global) every Panoply piece's, in ~/.panoply/config.json: the model, ollama host, autostart and venv",
-         "locket configure                      each setting, where its value comes from, stores behind\n"
-         "locket configure embedder --model nomic-embed-text --index\n"
-         "                                      switch model and rebuild every index now\n"
-         "locket configure embedder -h          every option, explained\n"
-         "locket help configure                 the file, precedence, and what a model change costs",
-         run=_configure, guide=_configure_guide, own_help=True),
     Verb("install", "[--hooks] [--codex] [--desktop]",
          "put `locket` on PATH (%s); --hooks merges the write-time hooks into Claude Code's "
          "settings.json, --codex into Codex's hooks.json, --desktop registers the MCP server "

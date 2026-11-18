@@ -11,6 +11,7 @@ from tests.harness import fixture_env
 import _embed  # noqa: E402
 import _settings  # noqa: E402
 import configure as cf  # noqa: E402
+from commands import settings  # noqa: E402
 
 def _suite():
     """Offline, against a throwaway settings file: write, read back, precedence across the
@@ -23,7 +24,7 @@ def _suite():
             cf.LEGACY = Path(t) / "locket" / "config.json"
             cfg, load = _settings.path(), lambda: _settings.load()
             assert load() == ({}, []) and cf.apply()["model"] == (_embed.SHIPPED["model"], "default")
-            run = lambda *a: cf._set_embed(cf.parser().parse_args(["embedder", *a]))
+            run = lambda *a: settings._set_embed(settings.parser().parse_args(["embedder", *a]))
             quiet = io.StringIO()
             with contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
                 assert run("--model", "m1", "--no-check", "--no-autostart") == 0

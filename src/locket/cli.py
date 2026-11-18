@@ -10,11 +10,11 @@ from pathlib import Path
 import commands
 import fsio
 import help_text
-from commands import Verb, hooks, hygiene, machine, meaning, overlap, stores
+from commands import Verb, hooks, hygiene, machine, meaning, overlap, settings, stores
 
 # The order `locket -h` lists them in. A new family is one module in `commands/` and one
 # entry here; a new verb is one `Verb` in its family's VERBS.
-FAMILIES = (meaning, overlap, hygiene, hooks, stores, machine)
+FAMILIES = (meaning, overlap, hygiene, hooks, stores, settings, machine)
 SCRIPTS = {"find": "memfind", "scan": "memscan"}      # a family's SEE, and the script it names
 
 
