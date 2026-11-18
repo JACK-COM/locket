@@ -17,6 +17,7 @@ from pathlib import Path
 import tests.harness  # noqa: F401  (puts the source under test on sys.path)
 
 import memscan  # noqa: E402
+import shellwrites  # noqa: E402
 import pywrites  # noqa: E402
 
 BASH = shutil.which("bash")
@@ -135,7 +136,7 @@ class Comments(unittest.TestCase):
             self.assertIn("echo L1", memscan._shell_code(cmd), cmd)
 
     def test_a_cd_after_an_escaped_hash_moves(self):
-        self.assertEqual(memscan._cd_targets("echo a\\ #b; cd /x\n", "/y"), ["/x"])
+        self.assertEqual(shellwrites.cd_targets("echo a\\ #b; cd /x\n", "/y"), ["/x"])
 
 
 class Interpreters(unittest.TestCase):

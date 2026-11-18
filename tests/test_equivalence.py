@@ -8,6 +8,7 @@ from pathlib import Path
 import tests.harness  # noqa: F401  (puts the source under test on sys.path)
 
 import memscan  # noqa: E402
+import shellwrites  # noqa: E402
 import paths  # noqa: E402
 
 CASES = 20000
@@ -28,7 +29,7 @@ def unwrap_reference(txt):
 
 def cd_reference(command, cwd, pos):
     here = cwd
-    for m in memscan._CD.finditer(memscan._shell_code(command)):
+    for m in shellwrites._CD.finditer(memscan._shell_code(command)):
         if pos is not None and m.start() >= pos:
             break
         if m.group(1) == "popd":
@@ -43,7 +44,7 @@ def cd_reference(command, cwd, pos):
         elif d == "-":
             here = None
         else:
-            d = memscan._expand_home(d)
+            d = shellwrites.expand_home(d)
             here = d if d.startswith("/") else (str(Path(here) / d) if here else None)
     return [here] if here else []
 
@@ -129,8 +130,8 @@ class Equivalence(unittest.TestCase):
         rnd = random.Random(11)
         for _ in range(CASES):
             cmd = " ".join(rnd.choice(SHELL) for _ in range(rnd.randint(1, 14)))
-            for pat, start in zip(memscan.BASH_WRITE, memscan.BASH_WRITE_STARTS):
-                got = [(m.start("p"), m.group("p")) for m in memscan.write_matches(pat, start, cmd)]
+            for pat, start in zip(shellwrites.BASH_WRITE, shellwrites.BASH_WRITE_STARTS):
+                got = [(m.start("p"), m.group("p")) for m in shellwrites.write_matches(pat, start, cmd)]
                 want = [(m.start("p"), m.group("p")) for m in pat.finditer(cmd)]
                 self.assertEqual(got, want, f"{pat.pattern!r} on {cmd!r}")
 
@@ -139,7 +140,7 @@ class Equivalence(unittest.TestCase):
         for _ in range(CASES // 4):
             cmd = " ".join(rnd.choice(SHELL) for _ in range(rnd.randint(1, 14)))
             for pos in (None, 0, len(cmd) // 2, len(cmd)):
-                self.assertEqual(memscan._cd_targets(cmd, "/w", pos), cd_reference(cmd, "/w", pos),
+                self.assertEqual(shellwrites.cd_targets(cmd, "/w", pos), cd_reference(cmd, "/w", pos),
                                  f"{cmd!r} at {pos}")
 
 
