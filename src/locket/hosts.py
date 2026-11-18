@@ -8,19 +8,26 @@ from pathlib import Path
 import paths
 
 
+def _home(name):
+    """A host's home, or a path under Locket's state that never exists where a `Paths`
+    was built without that host (`Paths.under`), so a lookup matches nothing and a
+    glob finds nothing; a KeyError inside a hook would let the call through."""
+    return paths.PATHS.host_stores.get(name) or paths.PATHS.state / "no-host" / name
+
+
 def claude():
     """Claude Code's home, the council store."""
-    return paths.PATHS.host_stores["council"]
+    return _home("council")
 
 
 def hermes():
     """Hermes Agent's home."""
-    return paths.PATHS.host_stores["hermes"]
+    return _home("hermes")
 
 
 def codex():
     """Codex's home, which CODEX_HOME moves."""
-    return paths.PATHS.host_stores["codex"]
+    return _home("codex")
 
 
 def name_of(root):

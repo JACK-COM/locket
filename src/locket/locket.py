@@ -905,7 +905,7 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
     body = ("Locket doctor latency probe " + os.urandom(6).hex() + ": a novel paragraph that "
             "names no fact any store holds, long enough to pass the net-new floor of the "
             "write gate and reach its meaning-ranked question. ") * 2
-    hosts = {Path(p) for p in paths.PATHS.host_stores.values()}
+    host_roots = {Path(p) for p in paths.PATHS.host_stores.values()}
     worst = opened = None
     # A probe killed at its timeout must not count as a live run the host abandoned, so each
     # probe keeps its own health record; an error in it is a hook that failed open quickly.
@@ -915,7 +915,7 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
         for i, (name, root) in enumerate(sorted(stores.items())):
             root = Path(root)
             try:
-                if root not in hosts and not memscan.has_content(root):
+                if root not in host_roots and not memscan.has_content(root):
                     continue                # nothing to score: neither markdown nor registered rows
             except OSError:
                 continue

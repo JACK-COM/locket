@@ -188,6 +188,22 @@ def _suite():
     return 0
 
 
+class PatternTypes(unittest.TestCase):
+    def test_a_pattern_that_is_no_string_reads_as_not_yet(self):
+        # A hand-written row's `unless_transcript` is checked for presence only; a raise
+        # here reached the hook's catch-all and failed every row in the store open.
+        import sqlite3, tempfile
+        with tempfile.TemporaryDirectory() as t:
+            db, tr = Path(t) / "state.db", Path(t) / "t.jsonl"
+            tr.write_text("anything\n")
+            con = sqlite3.connect(db)
+            con.execute("create table messages(session_id, content, tool_calls)")
+            con.commit(); con.close()
+            for bad in (5, ["x"]):
+                self.assertFalse(tg._session_has(db, "s", bad))
+                self.assertFalse(tg._transcript_has(tr, bad))
+
+
 class TriggerBehaviour(unittest.TestCase):
     def test_behaviour(self):
         with fixture_env():

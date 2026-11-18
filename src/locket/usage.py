@@ -38,6 +38,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import fsio
+import health
 import hosts
 import paths
 
@@ -220,7 +221,7 @@ def read_hermes(db, notes=None):
 def load(path=None):
     path = path or paths.PATHS.usage_ledger
     try:
-        with open(path, newline="") as fh:
+        with open(path, newline="", encoding="utf-8") as fh:
             rd = csv.DictReader(fh)
             if tuple(rd.fieldnames or ()) != FIELDS:
                 raise SystemExit(f"{path}: columns are not {', '.join(FIELDS)}; move it aside to start a new ledger")
@@ -275,7 +276,14 @@ def record(claude=None, hermes=None, full=False, ledger=None, quiet=False):
     w = csv.DictWriter(buf, FIELDS)
     w.writeheader()
     w.writerows(rows)
-    fsio._replace_atomic(ledger, buf.getvalue(), ".usage-")
+    for stale in ledger.parent.glob(".usage-*"):      # a writer killed before its rename
+        try:
+            if time.time() - stale.stat().st_mtime > health.HEALTH_TEMP_AGE:
+                stale.unlink()
+        except OSError:
+            pass
+    # bytes, so the text layer adds no newline translation to the csv module's \r\n
+    fsio._replace_atomic(ledger, buf.getvalue().encode("utf-8"), ".usage-")
     if not quiet:
         for n in notes:
             print(n, file=sys.stderr)

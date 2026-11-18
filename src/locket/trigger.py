@@ -163,7 +163,7 @@ def _transcript_has(path, pattern):
             fh.seek(max(0, fh.tell() - TRANSCRIPT_TAIL))
             tail = fh.read().decode("utf-8", errors="replace")
         return any(rx.search(line[:memscan.MAX_SCAN]) for line in tail.splitlines())
-    except (OSError, re.error):
+    except (OSError, re.error, TypeError):     # TypeError: a row's pattern that is no string
         return False
 
 
@@ -174,7 +174,7 @@ def _session_has(db, session_id, pattern):
         return False
     try:
         rx = re.compile(pattern)
-    except re.error:
+    except (re.error, TypeError):
         return False
     rows = fsio.sqlite_rows(db, "select content, tool_calls from messages where session_id=?",
                                (session_id,))
