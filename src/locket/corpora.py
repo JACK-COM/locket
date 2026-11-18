@@ -8,7 +8,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import Iterable, Optional, TypedDict
 
 import fsio
 import hosts
@@ -17,7 +17,7 @@ import paths
 import trust
 
 
-def raw_corpora():
+def raw_corpora() -> dict[str, Path]:
     """Every physical store on the machine, joined or not: each host store that
     exists, one per Claude Code project, and every registered directory whose
     manifest is still there. A registered store is keyed by the `name` in its
@@ -42,7 +42,7 @@ def raw_corpora():
     return out
 
 
-def all_corpora():
+def all_corpora() -> dict[str, Path]:
     """Every corpus a name can address: the physical stores, less each one that
     `belongs_to` another. A joined store is reached through its parent's name
     and counted in the parent's files, so it is listed once, as the parent."""
@@ -50,7 +50,7 @@ def all_corpora():
     return {k: v for k, v in raw.items() if parent_of(v, raw) is None}
 
 
-def _by_name(raw, name):
+def _by_name(raw: dict[str, Path], name: str) -> Optional[Path]:
     """The store `raw` keys as `name`, or the project store whose slug it is: a
     `belongs_to` written by slug keeps resolving once that store takes a name."""
     hit = raw.get(name)
@@ -59,7 +59,7 @@ def _by_name(raw, name):
     return hit
 
 
-def parent_of(root, raw=None):
+def parent_of(root: Path, raw: Optional[dict[str, Path]] = None) -> Optional[Path]:
     """The store `root` declares it belongs to, or None. `belongs_to` in the
     manifest names a corpus as `corpora` lists it; a name that resolves to no
     store, to the store itself, to a store it physically contains, to a store
@@ -75,7 +75,8 @@ def parent_of(root, raw=None):
     target = _by_name(raw, name)
     if target is None or target == root or root in target.parents or walked_by(target, root):
         return None
-    seen, cur = {root}, target                  # a cycle means nobody is the top
+    seen = {root}
+    cur: Optional[Path] = target                # a cycle means nobody is the top
     while cur is not None:
         if cur in seen:
             return None
@@ -85,7 +86,7 @@ def parent_of(root, raw=None):
     return target
 
 
-def walked_by(outer, inner):
+def walked_by(outer: Path, inner: Path) -> bool:
     """Whether store `outer`'s own walk reaches directory `inner`: it sits under
     `outer` on disk, inside a member directory and no excluded or dot-directory.
     Only such a nesting would score a file against two stores; one outside the
@@ -100,7 +101,7 @@ def walked_by(outer, inner):
     return not any(q in excluded or q.startswith(".") for q in rel)
 
 
-def top_of(root):
+def top_of(root: Path) -> Path:
     """The corpus a physical store is part of: itself, or the store at the end of
     its `belongs_to` chain. Every resolver returns this, so a write into a joined
     store, the cwd default and a name all land on the one corpus."""
@@ -113,14 +114,14 @@ def top_of(root):
         root = up
 
 
-def children_of(root, raw=None):
+def children_of(root: Path, raw: Optional[dict[str, Path]] = None) -> list[Path]:
     """Physical stores whose `belongs_to` resolves to `root`, sorted."""
     raw = raw if raw is not None else raw_corpora()
     root = Path(root)
     return sorted(r for r in set(raw.values()) if r != root and parent_of(r, raw) == root)
 
 
-def roots_of(root):
+def roots_of(root: Path) -> list[Path]:
     """Every physical directory composing the corpus `root`: itself, then each
     store that belongs to it, recursively. A store is one of these to itself."""
     raw = raw_corpora()
@@ -134,14 +135,14 @@ def roots_of(root):
     return out
 
 
-def store_label(root):
+def store_label(root: Path) -> str:
     """What a joined store's files are prefixed with in every report and index
     key: the manifest's `name`, else the directory's basename."""
     name = trust.read_manifest(root).get("name")
     return name if isinstance(name, str) and name else Path(root).name
 
 
-def corpus_key(root, path, roots=None):
+def corpus_key(root: Path, path: Path, roots: Optional[list[Path]] = None) -> str:
     """The corpus-relative key of a file: its path under `root`, or under a joined
     store as `<label>/<path>`. One key per file across every mode and the index,
     because a joined store's files are not under the root on disk. A loop over a
@@ -161,18 +162,20 @@ def corpus_key(root, path, roots=None):
     return str(path)
 
 
-def corpus_for_cwd(cwd):
+def corpus_for_cwd(cwd: Optional[fsio.StrPath]) -> Optional[Path]:
     """The auto-memory corpus belonging to a working directory, or None.
 
     Claude Code slugifies the absolute path into `~/.claude/projects/<slug>/memory`,
     replacing every non-alphanumeric character with a dash.
     """
+    if cwd is None:
+        return None
     slug = re.sub(r"[^A-Za-z0-9]", "-", str(Path(cwd).resolve()))
     d = hosts.claude() / "projects" / slug / "memory"
     return top_of(d) if d.is_dir() else None
 
 
-def corpus_for(path):
+def corpus_for(path: fsio.StrPath) -> Optional[Path]:
     """The corpus a written path belongs to, or None.
 
     Derived from the path rather than matched against a named list, so EVERY
@@ -200,7 +203,7 @@ def corpus_for(path):
     return top_of(root)                     # the corpus it is scored against
 
 
-def in_members(root, path):
+def in_members(root: Path, path: fsio.StrPath) -> bool:
     """Whether `path` sits at the root or under one of the store's member
     directories. Always true for a store with no `members` (a manifest store,
     a project memory); for a host store, false under `sessions`, `plugins`,
@@ -212,7 +215,7 @@ def in_members(root, path):
     return len(rel) == 1 or rel[0] in mem
 
 
-def phys_root_of(d):
+def phys_root_of(d: Path) -> Optional[Path]:
     """The physical store that directory `d` is or sits inside, or None: a host
     store, a directory holding a manifest, or Claude Code's
     `~/.claude/projects/<slug>/memory`. Membership, exclusion and the walk are
@@ -233,7 +236,7 @@ def phys_root_of(d):
     return None
 
 
-def _root_of(d):
+def _root_of(d: Path) -> Optional[Path]:
     """The corpus root that directory `d` is or sits inside, or None. One walker
     for the gate, the CLI default and the MCP, so they cannot disagree about
     what a corpus is; a store that `belongs_to` another resolves to that one."""
@@ -241,7 +244,7 @@ def _root_of(d):
     return None if phys is None else top_of(phys)
 
 
-def corpus_here(cwd):
+def corpus_here(cwd: fsio.StrPath) -> Optional[Path]:
     """The corpus a working directory belongs to: the one it sits inside, else
     Claude Code's auto-memory for it, else None. The default used to be the
     auto-memory alone, so `--index` run inside a manifest directory looked for
@@ -251,7 +254,7 @@ def corpus_here(cwd):
     return _root_of(cwd) or corpus_for_cwd(cwd)
 
 
-def search_root(words, cwd=None):
+def search_root(words: Iterable[object], cwd: Optional[fsio.StrPath] = None) -> Optional[Path]:
     """The corpus the first of a search's path arguments belongs to, or None.
 
     Each word is read as the shell would expand it (`~`, `$HOME`, a path relative
@@ -281,7 +284,7 @@ def search_root(words, cwd=None):
     return None
 
 
-def _own_walk(root, m=None):
+def _own_walk(root: Optional[Path], m: Optional[dict] = None) -> tuple[Optional[set[str]], set[str]]:
     """-> (members, excluded_dirs): what one store's own walk covers, from its own
     manifest alone. Never unioned across a join, so `parent_of` can ask it of a
     parent without recursing through `settings`, which unions name-sets upward."""
@@ -324,7 +327,7 @@ def settings(root: Optional[Path]) -> Settings:
     return _settings_for(root, (key, trust.config_digest(root) if root is not None and pinned else None))
 
 
-def clear_settings():
+def clear_settings() -> None:
     """Forget every store's settings, after a manifest or the registry changed in this process."""
     _settings_for.cache_clear()
 
@@ -345,7 +348,7 @@ def _settings_for(root: Optional[Path], _trust_key: tuple) -> Settings:
     if hosts.foreign(root):
         m = {"index_files": [], "ledger_surfaces": [], "holding_spaces": [], **m}
 
-    def names(key: str, default) -> set[str]:
+    def names(key: str, default: Iterable[str]) -> set[str]:
         val = m.get(key)
         return {str(x) for x in val} if isinstance(val, list) else set(default)
     ef, cr = m.get("excluded_files"), m.get("code_roots")
@@ -374,7 +377,7 @@ def _settings_for(root: Optional[Path], _trust_key: tuple) -> Settings:
     return out
 
 
-def excluded_file(root, path):
+def excluded_file(root: Path, path: fsio.StrPath) -> bool:
     """Whether the manifest's `excluded_files` names this file. Each pattern is
     tried against the corpus-relative posix path and against the basename, so
     `notes/draft.md`, `*.csv` and `scratch-*` each match what they read as. A
