@@ -386,6 +386,18 @@ class RoundTwo(Scratch):
         r = self.run_locket("bashguard", payload=self.bash("printf 'yes\\n' | script -q /dev/null locket trust ."))
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
+    def test_data_heredocs_that_name_the_guards_pass(self):
+        verb = "locket " + "trust"
+        for cmd in (f"git commit -F - <<'EOF'\nfix: run {verb} and edit locket.json\nEOF",
+                    f"gh release create v1 --notes-file - <<'EOF'\nRun {verb} . and see triggers.json\nEOF"):
+            r = self.run_locket("bashguard", payload=self.bash(cmd))
+            self.assertEqual(r.returncode, 0, cmd + " | " + r.stdout + r.stderr)
+
+    def test_an_interpreter_heredoc_that_writes_config_is_refused(self):
+        cmd = f"python3 - <<'EOF'\nopen('{self.home}/.claude/triggers.json', 'w').write('{{}}')\nEOF"
+        r = self.run_locket("bashguard", payload=self.bash(cmd))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
     def test_a_link_into_host_memory_is_judged_as_host_memory(self):
         link = self.clone / "notes"
         link.symlink_to(self.home / ".claude")

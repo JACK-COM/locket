@@ -4946,6 +4946,31 @@ SHELL_SPLIT = re.compile(r"\|\||&&|[;|&\n()`]")
 HEREDOC = re.compile(r"""<<-?\s*['"]?(\w+)['"]?""")
 
 
+_INTERPRETER = re.compile(r"\b(?:python[0-9.]*|node|deno|bun|bash|sh|zsh|dash|fish|perl|ruby|php|osascript|lua)\b")
+
+
+def command_text(command):
+    """`command` as the guards that refuse by name read it: a heredoc body fed to a
+    program that only stores or prints it (`git commit -F -`, `cat > notes`, `gh ...
+    --notes-file -`) is data and dropped, and one fed to an interpreter is code and
+    kept. Release notes that name the trust verb are not a trust command; a Python
+    heredoc that opens a rows file is a write."""
+    out, lines, i = [], command.split("\n"), 0
+    while i < len(lines):
+        out.append(lines[i])
+        m = HEREDOC.search(lines[i])
+        if m:
+            keep = bool(_INTERPRETER.search(lines[i][:m.start()]))
+            delim = m.group(1)
+            i += 1
+            while i < len(lines) and lines[i].strip() != delim:
+                if keep:
+                    out.append(lines[i])
+                i += 1
+        i += 1
+    return "\n".join(out)
+
+
 def _strip_heredocs(command):
     """`command` with heredoc BODIES removed, openers kept.
 
@@ -7809,7 +7834,7 @@ def _hook_entry(mode):
                 health_error("bashguard", "decision", e)
                 return 0
             return emit(payload, msg, blocking, mode)
-        bare = re.sub(r"""['"\\]""", "", command)
+        bare = re.sub(r"""['"\\]""", "", command_text(command))
         if _TRUST_VERB.search(bare):
             return emit(payload, TRUST_REFUSAL, True, mode)
         cfg = shell_store_config(bare, payload.get("cwd"))
