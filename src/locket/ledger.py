@@ -244,3 +244,61 @@ def source_row_decision(path, tool_input, prior, append=False):
             f"the store already carries:\n" + "\n".join(lines) +
             "\nOne fact, one row: cut the prose copy to a pointer, or fold the row into the one "
             "that owns it (prime-memory-discipline.md §2c). A new fact needs nothing."), False
+
+
+# The size past which `ledgers` and `doctor` report a declared CSV. A report, never
+# a cap: the file keeps every row and stays whole (RULINGS.csv on Area=substrate).
+CSV_REPORT_BYTES = 5 * 1024 * 1024
+
+
+def schema_csvs(root):
+    """[(path, schema, glob)] for every schema-governed CSV the store's walk finds."""
+    seen, files = set(), []
+    # The store's own walker, members and excluded directories honoured, so a
+    # ledger under a member directory (a store's `memory/RULINGS.csv`) is swept;
+    # a root-only glob reported such a store clean while checking nothing.
+    # `excluded_files` hides a file from claims, not from its schema.
+    for r in corpora.roots_of(root):
+        for p in corpus._own_md(r, "*.csv", honor_excluded_files=False):
+            rp = p.resolve()
+            if rp in seen:
+                continue
+            seen.add(rp)
+            # the gate's own resolver, so a file an entry names inside a
+            # built-in's glob is checked once, under the entry, as it is written
+            schema, g = ledger_schema_for(p)
+            if schema is not None:
+                files.append((p, schema, g))
+    return files
+
+
+def declared_csvs(root):
+    """[(path, text column or None)] for every CSV the store declares: each
+    schema-governed ledger and each registered source, once. These are the
+    files the write hook reads on every row written into them."""
+    out, seen = [], set()
+    for p, text, _label in corpus.csv_sources(root):
+        seen.add(p.resolve())
+        out.append((p, text))
+    for p, _schema, _glob in schema_csvs(root):
+        if p.resolve() not in seen:
+            seen.add(p.resolve())
+            out.append((p, None))
+    return out
+
+
+def large_csvs(root, limit=None):
+    """[(path, bytes)] for each declared CSV past CSV_REPORT_BYTES, largest first.
+    A declared CSV keeps every row in one file and is never split, because a split
+    hides rows from every reader that names the table (RULINGS.csv on
+    Area=substrate); this is its breach reading, a monitor rather than a cap."""
+    limit = CSV_REPORT_BYTES if limit is None else limit
+    out = []
+    for p, _t in declared_csvs(root):
+        try:
+            n = p.stat().st_size
+        except OSError:
+            continue
+        if n > limit:
+            out.append((p, n))
+    return sorted(out, key=lambda x: -x[1])

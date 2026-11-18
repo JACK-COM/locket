@@ -16,6 +16,7 @@ from tests.harness import SRC, fixture_env
 import memscan as ms  # noqa: E402
 import grepassist  # noqa: E402
 import hosts  # noqa: E402
+import ledger  # noqa: E402
 import paths  # noqa: E402
 
 
@@ -1614,7 +1615,7 @@ def _selftest_inner():
     # the size reading: a declared CSV past the limit is a finding, never split or capped
     assert ms.large_csvs(led) == [], "a small ledger reported past 5 MB"
     assert [p.name for p, _n in ms.large_csvs(led, limit=1)] == [hist.name], ms.large_csvs(led, limit=1)
-    saved, ms.CSV_REPORT_BYTES = ms.CSV_REPORT_BYTES, 1
+    saved, ledger.CSV_REPORT_BYTES = ledger.CSV_REPORT_BYTES, 1
     try:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -1622,7 +1623,7 @@ def _selftest_inner():
         assert "declared CSV(s) past the" in buf.getvalue() and "never split it" in buf.getvalue(), buf.getvalue()
         assert n >= 1, "a ledger past the size reading counted as clean"
     finally:
-        ms.CSV_REPORT_BYTES = saved
+        ledger.CSV_REPORT_BYTES = saved
     # the sweep walks the store: a ledger under a subdirectory is checked, one
     # under an excluded directory is not
     (led / ms.MANIFEST).write_text("{}\n"); ms.settings.cache_clear()

@@ -48,6 +48,7 @@ from pathlib import Path
 import hosts
 import paths
 import grepassist
+import ledger
 from grepassist import grep_assist, grep_words, prose_like  # noqa: F401  (re-exported)
 import shellwrites
 from shellwrites import (  # noqa: F401  (re-exported)
@@ -102,6 +103,7 @@ from corpus import (  # noqa: F401  (re-exported)
 )
 from ledger import (  # noqa: F401  (re-exported)
     LEAD_BLOCKING, LEAD_WARNING, _csv_rows_of, _ledger_header, check_ledger_text,
+    CSV_REPORT_BYTES, declared_csvs, large_csvs,
     ledger_decision, ledger_message, ledger_schema_for, ledger_schemas,
     source_row_decision,
 )
@@ -1298,10 +1300,6 @@ The module docstring carries the design rationale."""
 # This is a deliberate carve-out from any session directive preferring Bash for
 # file edits. It applies to memory corpora only; everywhere else Bash is fine.
 
-# The size past which `ledgers` and `doctor` report a declared CSV. A report, never
-# a cap: the file keeps every row and stays whole (RULINGS.csv on Area=substrate).
-CSV_REPORT_BYTES = 5 * 1024 * 1024
-
 
 def manifest_help():
     """The MANIFEST section of `usage()` alone, for `locket help manifest`: a
@@ -1398,65 +1396,12 @@ def ledger_bash_decision(command, cwd):
     return None, False
 
 
-def _schema_csvs(root):
-    """[(path, schema, glob)] for every schema-governed CSV the store's walk finds."""
-    seen, files = set(), []
-    # The store's own walker, members and excluded directories honoured, so a
-    # ledger under a member directory (a store's `memory/RULINGS.csv`) is swept;
-    # a root-only glob reported such a store clean while checking nothing.
-    # `excluded_files` hides a file from claims, not from its schema.
-    for r in roots_of(root):
-        for p in _own_md(r, "*.csv", honor_excluded_files=False):
-            rp = p.resolve()
-            if rp in seen:
-                continue
-            seen.add(rp)
-            # the gate's own resolver, so a file an entry names inside a
-            # built-in's glob is checked once, under the entry, as it is written
-            schema, g = ledger_schema_for(p)
-            if schema is not None:
-                files.append((p, schema, g))
-    return files
-
-
-def declared_csvs(root):
-    """[(path, text column or None)] for every CSV the store declares: each
-    schema-governed ledger and each registered source, once. These are the
-    files the write hook reads on every row written into them."""
-    out, seen = [], set()
-    for p, text, _label in csv_sources(root):
-        seen.add(p.resolve())
-        out.append((p, text))
-    for p, _schema, _glob in _schema_csvs(root):
-        if p.resolve() not in seen:
-            seen.add(p.resolve())
-            out.append((p, None))
-    return out
-
-
-def large_csvs(root, limit=None):
-    """[(path, bytes)] for each declared CSV past CSV_REPORT_BYTES, largest first.
-    A declared CSV keeps every row in one file and is never split, because a split
-    hides rows from every reader that names the table (RULINGS.csv on
-    Area=substrate); this is its breach reading, a monitor rather than a cap."""
-    limit = CSV_REPORT_BYTES if limit is None else limit
-    out = []
-    for p, _t in declared_csvs(root):
-        try:
-            n = p.stat().st_size
-        except OSError:
-            continue
-        if n > limit:
-            out.append((p, n))
-    return sorted(out, key=lambda x: -x[1])
-
-
 def cmd_ledgers(root):
     """Every schema-governed CSV in the corpus, each row checked, then every
     declared CSV past the size reading. A clean run prints its scope, so a zero
     says what it was scored against."""
     schemas = ledger_schemas(root)
-    files = _schema_csvs(root)
+    files = ledger.schema_csvs(root)
     big = large_csvs(root)
     if not files and not big:
         print(f"no schema-governed ledger in {root} (schemas: {', '.join(schemas)})")
@@ -1477,10 +1422,10 @@ def cmd_ledgers(root):
         bad += len(findings)
     for p, n in big:
         print(f"{corpus_key(root, p)}  size {n / 1048576:.1f} MB, past the "
-              f"{CSV_REPORT_BYTES / 1048576:g} MB reading: run `locket doctor` for the write "
+              f"{ledger.CSV_REPORT_BYTES / 1048576:g} MB reading: run `locket doctor` for the write "
               f"hook's latency on it, and choose a remedy against what it shows; never split it")
     if big:
-        print(f"{len(big)} declared CSV(s) past the {CSV_REPORT_BYTES / 1048576:g} MB reading")
+        print(f"{len(big)} declared CSV(s) past the {ledger.CSV_REPORT_BYTES / 1048576:g} MB reading")
     bad += len(big)
     print(f"{len(files)} ledger(s) checked, {bad} finding(s)")
     return bad
