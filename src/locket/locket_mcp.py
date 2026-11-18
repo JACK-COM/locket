@@ -17,7 +17,7 @@ once per app launch and shares it across every conversation, so "asked" there
 means asked in ANY conversation since the last restart; MCP hands the server no
 conversation identity, so this is disclosed rather than fixed.
 
-Stdlib only, like everything else here. Framing is newline-delimited JSON on
+The standard library plus numpy, which memfind's ranking needs. Framing is newline-delimited JSON on
 stdin/stdout, written through the binary buffers so Windows never turns a `\\n`
 into `\\r\\n` and breaks the frame.
 

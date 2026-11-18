@@ -31,8 +31,9 @@ Modes:
 The corpus argument takes a registered name (`notes`), any substring of a project
 slug (`myapp`), or a literal path. With no argument it takes THIS project's corpus.
 
-Stdlib only, by design: this runs inside a PreToolUse hook on every memory
-write, so it pays interpreter startup and nothing else.
+Standard library only at import, by design: this runs inside a PreToolUse hook on
+every memory write, so it pays interpreter startup and nothing else. memfind, and
+numpy with it, loads only when a check asks for a ranking by meaning.
 """
 import ast
 import hashlib

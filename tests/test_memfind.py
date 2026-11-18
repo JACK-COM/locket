@@ -40,10 +40,10 @@ def _ranked():
     (root / memscan.MANIFEST).write_text(json.dumps({"index_files": ["INDEX.md"]}))
     memscan.settings.cache_clear()
     items, flat, dim = mf.load_index(root, quiet=True)
-    assert len(flat) == len(items) * dim, "vector file does not match item count"
+    assert flat.shape == (len(items), dim), "vector file does not match item count"
     assert sum(1 for f, _ in items if f == "fleet.md") == 40, "table rows must index one claim each"
     for i in (0, len(items) // 2, len(items) - 1):        # stored normalised
-        n = math.sqrt(sum(flat[i * dim + k] ** 2 for k in range(dim)))
+        n = math.sqrt(sum(float(x) ** 2 for x in flat[i]))
         assert abs(n - 1.0) < 1e-3, f"vector {i} not normalised: {n}"
     r = mf.rank(items[0][1], root, top=1, quiet=True)         # a claim finds itself
     assert r[0][0] > 0.95, f"self-similarity too low: {r[0][0]:.3f}"
@@ -134,7 +134,7 @@ def _rows():
         rows = [i for i in items if mf._is_row(i[0])]
         assert len(rows) == 2, f"expected 2 row items, got {len(rows)}"
         assert all(l == "R.csv#ops" for l, _ in rows), f"bad row labels: {rows}"
-        assert len(flat) == len(items) * dim, "vector file does not match item count"
+        assert flat.shape == (len(items), dim), "vector file does not match item count"
 
         r = mf.rank("chock the mains before the tug comes off", d, top=3, quiet=True)
         assert mf._is_row(r[0][1]), f"a row should outrank the markdown here: {r[0][1]}"
@@ -155,7 +155,7 @@ def _rows():
         assert len([i for i in items2 if mf._is_row(i[0])]) == 3, "appended row not indexed"
         old_vec = [i for i, x in enumerate(items) if x[1].startswith("Never taxi")][0]
         new_vec = [i for i, x in enumerate(items2) if x[1].startswith("Never taxi")][0]
-        assert flat[old_vec * dim:(old_vec + 1) * dim] == flat2[new_vec * dim2:(new_vec + 1) * dim2], \
+        assert (flat[old_vec] == flat2[new_vec]).all(), \
             "an unchanged row was re-embedded instead of reused"
     finally:
         meta_p, vec_p = mf.cache_paths(d)

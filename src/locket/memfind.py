@@ -39,9 +39,10 @@ which a markdown-only index cannot see at all.
 Falls back with a clear message when ollama is not running; it is never a
 dependency of anything that must succeed.
 """
-import sys, os, json, math, array, time
-from operator import mul
+import sys, os, json, math, time
 from pathlib import Path
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import claims
@@ -141,7 +142,7 @@ def cache_paths(root):
     return d / "index.json", d / "index.vec"
 
 
-def _write_cache(root, flat, meta):
+def _write_cache(root, vecs, meta):
     """Both cache files, each by atomic rename into a 0700 directory that is no
     symlink. The JSON carries the vector file's byte length and goes second, so a
     write cut between the two is a mismatch `_read_vectors` refuses: the vectors end
@@ -150,25 +151,13 @@ def _write_cache(root, flat, meta):
     corpus.ready_cache_dir(root)
     token = os.urandom(TOKEN_BYTES)
     meta_p, vec_p = cache_paths(root)
-    fsio._replace_atomic(vec_p, flat.tobytes() + token, ".index.vec.")
+    fsio._replace_atomic(vec_p, np.ascontiguousarray(vecs, dtype=np.float32).tobytes() + token, ".index.vec.")
     fsio._replace_atomic(meta_p, json.dumps({**meta, "token": token.hex()}), ".index.json.")
 
 
-def _normalise(vecs):
-    flat = array.array("f")
-    for v in vecs:
-        n = math.sqrt(sum(x * x for x in v)) or 1.0     # store L2-normalised:
-        flat.extend([x / n for x in v])                 # cosine becomes a dot product
-    return flat
-
-
-def _unit(v):
-    n = math.sqrt(sum(x * x for x in v)) or 1.0
-    return array.array("f", [x / n for x in v])
-
-
 def build_index(root, quiet=False):
-    """Rebuild only the files that changed. Returns (items, flat, dim).
+    """Rebuild only the files that changed. Returns (items, vectors, dim), the
+    vectors one float32 row per item, stored unit length.
 
     Per-file reuse is load-bearing, not an optimisation: a full rebuild costs
     ~50s and a cycle writes to this corpus every three hours, so without reuse
@@ -186,7 +175,7 @@ def build_index(root, quiet=False):
 
     meta_p, vec_p = cache_paths(root)
     active = tag(resolve_backend()[0])
-    old_items, old_flat, old_dim, old_fp = [], None, None, {}
+    old_items, old_vecs, old_dim, old_fp = [], None, None, {}
     if meta_p.exists() and vec_p.exists():
         try:
             m = _read_meta(meta_p)
@@ -194,9 +183,9 @@ def build_index(root, quiet=False):
                 old_items = [tuple(i) for i in m["items"]]
                 old_dim = m["dim"]
                 old_fp = m.get("fingerprint", {})
-                old_flat = _read_vectors(vec_p, len(old_items), old_dim, m.get("token"))
+                old_vecs = _read_vectors(vec_p, len(old_items), old_dim, m.get("token"))
         except (KeyError, ValueError, TypeError, OSError):
-            old_items, old_flat = [], None            # unreadable cache: start over
+            old_items, old_vecs = [], None            # unreadable cache: start over
 
     # Two reuse structures, because the two sources change differently. A markdown
     # file's sentences move together, so it reuses a contiguous SLICE. A CSV row is
@@ -221,31 +210,31 @@ def build_index(root, quiet=False):
 
     fp = corpus_fingerprint(root)
     t = time.time()
-    items, flat, dim = [], array.array("f"), old_dim
+    items, parts, dim = [], [], old_dim
     reused = fresh_files = 0
     for name, sents in per_file.items():
         if not sents:
             continue
-        unchanged = (old_flat is not None and name in old_slice
+        unchanged = (old_vecs is not None and name in old_slice
                      and old_fp.get(name) == fp.get(name)
                      and old_fp.get("__claims__") == fp["__claims__"]
                      and old_slice[name][1] == len(sents))
         if unchanged:
             start, count = old_slice[name]
-            flat.extend(old_flat[start * old_dim:(start + count) * old_dim])
+            parts.append(old_vecs[start:start + count])
             reused += count
         else:
             vs = embed(sents, quiet=quiet)
             dim = len(vs[0])
             if old_dim and dim != old_dim:              # model changed under us
                 return _full_rebuild(root, per_file, fp, quiet)
-            flat.extend(_normalise(vs))
+            parts.append(_embed.normalise(vs))
             fresh_files += 1
         items.extend((name, s) for s in sents)
 
     rows = csv_rows(root)
     if rows:
-        need = [t for _, t in rows if not (old_flat is not None and t in old_row)]
+        need = [t for _, t in rows if not (old_vecs is not None and t in old_row)]
         fresh = {}
         if need:
             uniq = list(dict.fromkeys(need))
@@ -253,17 +242,18 @@ def build_index(root, quiet=False):
             dim = dim or len(vs[0])
             if len(vs[0]) != dim:                       # model changed under us
                 return _full_rebuild(root, per_file, fp, quiet)
-            fresh = {t: _unit(v) for t, v in zip(uniq, vs)}
+            fresh = dict(zip(uniq, _embed.normalise(vs)))
         for label, text in rows:
             if text in fresh:
-                flat.extend(fresh[text])
+                parts.append(fresh[text][None])
             else:
                 pos = old_row[text]
-                flat.extend(old_flat[pos * old_dim:(pos + 1) * old_dim])
+                parts.append(old_vecs[pos:pos + 1])
                 reused += 1
             items.append((label, text))
 
-    _write_cache(root, flat, {
+    vecs = np.vstack(parts).astype(np.float32, copy=False)
+    _write_cache(root, vecs, {
         "root": str(root), "model": active, "dim": dim,
         "built": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "fingerprint": fp, "items": items,
@@ -281,19 +271,19 @@ def build_index(root, quiet=False):
         if capped:
             print(f"  {len(capped)} claim(s) over {_embed.EMBED_CHARS} characters, embedded on their "
                   f"first {_embed.EMBED_CHARS}: " + ", ".join(sorted({n for n, _ in capped})), file=sys.stderr)
-    return items, flat, dim
+    return items, vecs, dim
 
 
 def _full_rebuild(root, per_file, fp, quiet):
     items = [(n, s) for n, ss in per_file.items() for s in ss] + csv_rows(root)
     vs = embed([s for _, s in items], quiet=quiet)
-    flat, dim = _normalise(vs), len(vs[0])
-    _write_cache(root, flat, {
+    vecs, dim = _embed.normalise(vs), len(vs[0])
+    _write_cache(root, vecs, {
         "root": str(root), "model": tag(resolve_backend()[0]), "dim": dim,
         "built": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "fingerprint": fp, "items": items,
     })
-    return items, flat, dim
+    return items, vecs, dim
 
 
 def load_index(root, quiet=False):
@@ -335,23 +325,22 @@ def _read_vectors(path, n, dim, token):
     short by a kill leaves a file that frombytes reads without complaint, and every
     score after the cut would be off misaligned floats. Read from one descriptor
     opened without following a link, checked regular and sized before a byte is read,
-    and straight into the array, so the vectors are held once, not twice."""
+    and mapped from that same descriptor, so the vectors are paged in, never copied."""
     if not isinstance(dim, int) or dim <= 0 or not isinstance(n, int) or not isinstance(token, str):
         raise ValueError(f"vector cache shape {n} x {dim}")
-    flat = array.array("f")
-    want = n * dim * flat.itemsize + TOKEN_BYTES
+    want = n * dim * 4 + TOKEN_BYTES             # float32
     with fsio.open_safe(path, binary=True, max_bytes=None) as f:
         size = os.fstat(f.fileno()).st_size
         if size != want:
             raise ValueError(f"vector cache is {size} bytes, expected {want}")
-        flat.fromfile(f, n * dim)
+        f.seek(n * dim * 4)
         if f.read(TOKEN_BYTES).hex() != token:
             raise ValueError("vector cache belongs to another build of the index")
-    return flat
+        return _embed.load_vectors(f, n, dim)
 
 
 def load_cached(root):
-    """The cache as it stands, stale or not: (items, flat, dim, stale), or None
+    """The cache as it stands, stale or not: (items, vectors, dim, stale), or None
     where no readable cache exists. Use it from a caller on a clock: it cannot
     afford the rebuild `load_index` would run, and a slightly stale neighbour
     list beats silence. Whoever calls this owes the reader the staleness.
@@ -365,9 +354,9 @@ def load_cached(root):
         # (`rank` pins the backend from the tag), so no embedder is probed here.
         if m.get("model") not in (tag("ollama"), tag("onnx")):
             return None
-        flat = _read_vectors(vec, len(m["items"]), m["dim"], m.get("token"))
+        vecs = _read_vectors(vec, len(m["items"]), m["dim"], m.get("token"))
         stale = m.get("fingerprint") != corpus_fingerprint(root)
-        return [tuple(i) for i in m["items"]], flat, m["dim"], stale
+        return [tuple(i) for i in m["items"]], vecs, m["dim"], stale
     except (KeyError, ValueError, TypeError, OSError):
         return None
 
@@ -436,7 +425,7 @@ def rank(statement, root, top=5, per_file=True, quiet=False, idx=None, lexical=T
     global LAST_RANK_MODE
     LAST_RANK_MODE = "semantic"
     try:
-        items, flat, dim = idx or load_index(root, quiet=quiet)
+        items, vecs, dim = idx or load_index(root, quiet=quiet)
         which = "ollama"                     # a caller's idx was read from the cache
         if idx is None:
             which = resolve_backend()[0]
@@ -450,32 +439,22 @@ def rank(statement, root, top=5, per_file=True, quiet=False, idx=None, lexical=T
         LAST_RANK_MODE = "lexical"
         return lexical_rank(statement, root, top=top, per_file=per_file,
                             items=idx[0] if idx else None)
-    qn = math.sqrt(sum(x * x for x in qv)) or 1.0
-    qv = [x / qn for x in qv]
-    best = {}
-    scored = []
-    for i in range(len(items)):
-        off = i * dim
-        # vectors are stored L2-normalised, so the dot product IS the cosine.
-        # sum(map(mul, ...)) over an array slice runs ~2.4x an indexed loop:
-        # 0.52s -> 0.22s over 12.6k claims, and grepassist pays this per search.
-        c = sum(map(mul, qv, flat[off:off + dim]))
-        f = items[i][0]
-        if not per_file:
-            scored.append((c, i))
-            continue
-        # A CSV row is its own unit, so it never groups: the reader wants the ROW.
-        # Grouping 2,918 rulings under one filename would return the single best
-        # row and hide every other match in the file.
-        key = i if _is_row(f) else f
-        if c > best.get(key, (-2, -1))[0]:
-            best[key] = (c, i)
+    scores = _embed.cosines(qv, vecs).tolist()
     if per_file:
+        best = {}
+        for i, c in enumerate(scores):
+            f = items[i][0]
+            # A CSV row is its own unit, so it never groups: the reader wants the ROW.
+            # Grouping 2,918 rulings under one filename would return the single best
+            # row and hide every other match in the file.
+            key = i if _is_row(f) else f
+            if c > best.get(key, (-2, -1))[0]:
+                best[key] = (c, i)
         rows = sorted(best.items(), key=lambda kv: -kv[1][0])[:top]
         # Name from the ITEM, never from the group key: a row's key is its integer
         # position, so returning the key printed a bare index where the label belongs.
         return [(c, items[i][0], items[i][1]) for _, (c, i) in rows]
-    scored.sort(reverse=True)
+    scored = sorted(zip(scores, range(len(scores))), reverse=True)
     return [(c, items[i][0], items[i][1]) for c, i in scored[:top]]
 
 
@@ -503,10 +482,10 @@ def siblings(root, top=30, quiet=False, idx=None):
     subject score with a max near 1.00 is shared boilerplate across different
     subjects, which wants the boilerplate deleted and the files left alone.
 
-    Cost is one dot product per file pair, quadratic in files, a couple of minutes
-    on a few hundred. A maintenance-pass tool, not a per-write one.
+    Cost is one dot product per file pair, run as blocked matrix products by
+    `top_pairs`: quadratic in files still, but seconds on thousands of them.
     """
-    items, flat, dim = idx or load_index(root, quiet=quiet)
+    items, vecs, dim = idx or load_index(root, quiet=quiet)
     # Rows are excluded outright. A CSV row is one claim rather than a file with a
     # subject, so a per-row centroid is the claim itself, and pairing thousands of
     # them is quadratic in rows rather than in files.
@@ -515,56 +494,24 @@ def siblings(root, top=30, quiet=False, idx=None):
         if _is_row(name):
             continue
         per_file.setdefault(name, []).append(i)
-
-    raw = {}
-    for name, idxs in per_file.items():
-        v = [0.0] * dim
-        for i in idxs:
-            off = i * dim
-            for k in range(dim):
-                v[k] += flat[off + k]
-        raw[name] = [x / len(idxs) for x in v]
-
-    mean = [0.0] * dim
-    for v in raw.values():
-        for k in range(dim):
-            mean[k] += v[k]
-    mean = [x / len(raw) for x in mean]
-
-    cent = {}
-    for name, v in raw.items():
-        w = [v[k] - mean[k] for k in range(dim)]
-        n = math.sqrt(sum(x * x for x in w)) or 1.0
-        cent[name] = array.array("f", [x / n for x in w])
+    if not per_file:
+        return []
+    files = list(per_file)
+    raw = np.stack([np.asarray(vecs[per_file[f]], dtype=np.float64).mean(axis=0) for f in files])
+    cent = _embed.normalise(raw - raw.mean(axis=0))
+    at = {f: k for k, f in enumerate(files)}
 
     # An index file restates every fact it points at, so it is a subject-mate of
     # everything it lists. True, and useless as a merge signal. Which files are
     # indexes is the store's own manifest's to say: on a store where MEMORY.md is
     # the whole continuity record, a fixed name list threw out a third of it.
     index_files = corpora.settings(root)["index_files"]
-    names = sorted(f for f in cent if Path(f).name not in index_files)
-    pairs = []
-    for a in range(len(names)):
-        va = cent[names[a]]
-        if not quiet and a and a % 50 == 0:
-            print(f"\r  pairing {a}/{len(names)}", end="", file=sys.stderr)
-        for b in range(a + 1, len(names)):
-            # vectors are stored L2-normalised, so the dot product IS the cosine.
-            # sum(map(mul, ...)) over array slices runs ~6x an indexed loop.
-            pairs.append((sum(map(mul, va, cent[names[b]])), names[a], names[b]))
-    if not quiet:
-        print(file=sys.stderr)
-    pairs.sort(reverse=True)
-
+    names = sorted(f for f in files if Path(f).name not in index_files)
+    pairs = _embed.top_pairs(cent[[at[f] for f in names]], top)
     out = []
-    for c, fa, fb in pairs[:top]:
-        best = -2.0
-        for i in per_file[fa]:
-            va = flat[i * dim:(i + 1) * dim]
-            for j in per_file[fb]:
-                s = sum(map(mul, va, flat[j * dim:(j + 1) * dim]))
-                if s > best:
-                    best = s
+    for c, a, b in pairs:
+        fa, fb = names[a], names[b]
+        best = float((vecs[per_file[fa]] @ vecs[per_file[fb]].T).max())
         out.append((c, best, fa, fb))
     return out
 

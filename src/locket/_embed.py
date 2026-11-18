@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/embed.py (87d38f1+uncommitted) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/embed.py (e3886a8) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """embed: the embedder ladder the Panoply's pieces share.
 
 Ranks text by meaning on whatever this machine can serve, in order: ollama as it
@@ -29,6 +29,8 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+import numpy as np
 
 # The shipped values; apply_config falls back to these, so they live in one place.
 SHIPPED = {"model": "embeddinggemma-2:270m", "ollama_host": "http://127.0.0.1:11434", "autostart": True}
@@ -451,6 +453,96 @@ def embed(texts, quiet=False, backend=None):
     return _embed_ollama(texts, quiet) if name == "ollama" else _embed_onnx(texts, quiet)
 
 
+# ---------------------------------------------------------------- vectors
+# The one home of the pieces' vector math. Vectors are float32 rows stored unit
+# length, so a dot product is the cosine. numpy is a declared dependency of every
+# piece with no pure-Python fallback: the loops it replaced cost minutes on a few
+# hundred files for `siblings`, and a second copy is the duplication it retires.
+
+def normalise(vectors):
+    """`vectors` as float32 rows scaled to unit length; a zero row stays zero."""
+    m = np.array(vectors, dtype=np.float32, ndmin=2)
+    n = np.linalg.norm(m, axis=1, keepdims=True)
+    n[n == 0] = 1.0
+    return m / n
+
+
+def top_k(scores, k):
+    """Positions of the `k` highest `scores`, highest first; an earlier position wins a tie."""
+    s = np.asarray(scores)
+    k = min(int(k), s.shape[0])
+    if k <= 0:
+        return np.empty(0, dtype=np.intp)
+    part = np.argpartition(-s, k - 1)[:k] if k < s.shape[0] else np.arange(s.shape[0])
+    return part[np.lexsort((part, -s[part]))]
+
+
+def cosines(query, rows):
+    """The cosine of `query` against each of `rows`, which are stored unit length."""
+    return np.asarray(rows, dtype=np.float32) @ normalise(query)[0]
+
+
+def top_pairs(rows, k, block=512):
+    """The `k` most similar pairs among unit-length `rows`, as (cosine, i, j) with i < j,
+    highest first. Scored a block of rows at a time, so memory stays block by n."""
+    rows = np.asarray(rows, dtype=np.float32)
+    n = rows.shape[0]
+    best = []                                   # (cosine, i, j) of the kept candidates
+    for a in range(0, n, block):
+        sims = rows[a:a + block] @ rows.T
+        sims[np.tril_indices(sims.shape[0], k=a, m=n)] = -np.inf      # each pair once, i < j
+        flat = sims.ravel()
+        for p in top_k(flat, k):
+            if flat[p] == -np.inf:
+                break
+            i, j = divmod(int(p), n)
+            best.append((float(flat[p]), a + i, j))
+        best.sort(key=lambda t: (-t[0], t[1], t[2]))
+        del best[k:]
+    return best
+
+
+def load_vectors(source, n, dim):
+    """`n` rows of `dim` float32 from the start of `source`, memory-mapped read-only.
+    `source` is a path or a file open for binary reading; pass the file a caller has
+    already checked, so the mapping is of that descriptor and never of whatever the
+    path names a moment later. The caller checks the length; bytes past the rows are its own."""
+    if n == 0:
+        return np.zeros((0, dim), dtype=np.float32)
+    return np.memmap(source, dtype=np.float32, mode="r", shape=(n, dim))
+
+
+def _selftest_vectors():
+    """normalise, cosines, top_k and top_pairs against the arithmetic they replace."""
+    import random
+    rnd = random.Random(5)
+    raw = [[rnd.uniform(-1, 1) for _ in range(6)] for _ in range(23)] + [[0.0] * 6]
+    m = normalise(raw)
+    assert m.dtype == np.float32 and m.shape == (24, 6) and not m[-1].any(), "a zero row must stay zero"
+    assert abs(float(np.linalg.norm(m[0])) - 1) < 1e-6
+    q = [rnd.uniform(-1, 1) for _ in range(6)]
+    qn = sum(x * x for x in q) ** 0.5
+    want = [sum(a * b / qn for a, b in zip(q, row)) for row in m.tolist()]
+    got = cosines(q, m)
+    assert max(abs(g - w) for g, w in zip(got.tolist(), want)) < 1e-5, "cosines drifted"
+    assert top_k([0.2, 0.9, 0.9, 0.1], 3).tolist() == [1, 2, 0], "ties go to the earlier position"
+    assert top_k([1.0], 5).tolist() == [0] and top_k([], 2).tolist() == []
+    pairs = sorted(((float(m[i] @ m[j]), i, j) for i in range(24) for j in range(i + 1, 24)),
+                   key=lambda t: (-t[0], t[1], t[2]))
+    for blk in (1, 5, 512):
+        got = top_pairs(m, 7, block=blk)
+        assert [(i, j) for _, i, j in got] == [(i, j) for _, i, j in pairs[:7]], f"top_pairs at block {blk}"
+    assert top_pairs(m[:1], 3) == [], "one row has no pair"
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "v"
+        f.write_bytes(m.tobytes() + b"tail")
+        assert np.array_equal(load_vectors(f, 24, 6), m) and load_vectors(f, 0, 6).shape == (0, 6)
+        with open(f, "rb") as fh:
+            mapped = load_vectors(fh, 24, 6)
+        assert np.array_equal(mapped, m), "a mapping must outlive the file object it came from"
+
+
 def _selftest_fetch():
     """Offline: a body whose digest is wrong is refused and leaves no file, a right one
     lands, and a failed request reaches the caller as RuntimeError."""
@@ -568,6 +660,7 @@ def _selftest():
         assert model_dir().parent == Path("/v/models"), "the model must live inside the venv"
     _selftest_fetch()
     _selftest_config()
+    _selftest_vectors()
     import tempfile
     saved = {k: os.environ.pop(k, None) for k in ("PANOPLY_VENV", "LOCKET_VENV", "HOME")}
     try:
