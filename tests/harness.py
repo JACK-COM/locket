@@ -32,10 +32,11 @@ def fixture_env():
     trust boundary itself is test_trust.py's, against the real check."""
     import memscan
     import paths
+    import trust
     with tempfile.TemporaryDirectory(prefix="locket-test-") as t:
         p = paths.Paths.under(Path(t) / "locket", host_stores=paths.PATHS.host_stores)
         tmp = Path(tempfile.gettempdir()).resolve()
-        real_trusted = memscan.trusted
+        real_trusted = trust.trusted
 
         def fixture_trusted(d):
             q = Path(d).resolve()
@@ -43,9 +44,16 @@ def fixture_env():
 
         env = {"LOCKET_REGISTRY": str(p.registry), "LOCKET_HEALTH_DIR": str(p.health_dir),
                "LOCKET_GREPASSIST_LOG": str(p.grepassist_log)}
+        yes = lambda *_a, **_k: True                       # noqa: E731
+        # Patched where each name lives and where memscan re-exports it: trust's own
+        # callers and every split module call `trust.<name>`, memscan's remaining code
+        # and the front call memscan's binding. Drop the memscan pair once no code
+        # left in memscan calls these bare.
         with paths.use(p), mock.patch.dict(os.environ, env), \
+                mock.patch.object(trust, "trusted", fixture_trusted), \
                 mock.patch.object(memscan, "trusted", fixture_trusted), \
-                mock.patch.object(memscan, "person_confirms", lambda *_a, **_k: True):
+                mock.patch.object(trust, "person_confirms", yes), \
+                mock.patch.object(memscan, "person_confirms", yes):
             memscan.settings.cache_clear()
             try:
                 yield p
