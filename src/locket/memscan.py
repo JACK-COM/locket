@@ -50,19 +50,24 @@ from pathlib import Path, PurePosixPath
 
 import hosts
 import paths
-from corpus import (  # noqa: F401  (re-exported)
-    _archive_md, _own_md, _walk_files, archived_claims, corpus, csv_rows, csv_sources,
-    has_content, md_files, resolve, skipped_files, subtract_archived,
+
+# The layers below this module, re-exported under the names its remaining code, the
+# front and ~/.claude/hooks already use. Code inside a layer calls `<module>.<name>`,
+# so a test patches a name where it lives (`fixture_env` patches trust's).
+from fsio import (  # noqa: F401  (re-exported)
+    MAX_FILE_BYTES, MAX_SCAN, MAX_STORE_BYTES, MAX_STORE_FILES, PATH_MAX, SafeOut,
+    _inode, _regular, _replace_atomic, _same, open_safe, read_or_empty, read_safe,
+    relay, sqlite_rows,
 )
-from claims import (  # noqa: F401  (re-exported)
-    CLAIMS_VERSION, ENTRY_TOKENS, FIRE_FLOOR, IDX_LINE, LINK, MIN_TOKENS, PAIR_FLOOR,
-    _ENDS, _LINE_MEANINGFUL, _NO_JOIN_FROM, claims, cross_file_pairs, pointer_only,
-    score_against, similar, strip, tokens, unclaimed, unwrap,
+from health import (  # noqa: F401  (re-exported)
+    HEALTH_MARKER_CAP, HEALTH_STALE_OTHER, HEALTH_STALE_POSIX, HEALTH_TEMP_AGE, HookRun,
+    _fold_dead_markers, _marker_name, _utc, health_ack, health_dir, health_error,
+    health_report,
 )
-from corpora import (  # noqa: F401  (re-exported)
-    _clear_settings, _label, _phys_root_of, _raw_corpora, _root_of, _walked_by,
-    all_corpora, corpus_for, corpus_for_cwd, corpus_here, corpus_key, excluded_file,
-    parent_of, roots_of, search_root, settings, top_of,
+from manifest import (  # noqa: F401  (re-exported)
+    HOLDING_SPACES, INDEX_FILES, LEDGER_SCHEMAS, LEDGER_SURFACES, LEGACY_MANIFEST,
+    MANIFEST, MANIFEST_SCHEMA, OLD_MANIFEST, _SCHEMA_KEYS, _inside, _manifest_data,
+    has_manifest, manifest_file, validate_manifest,
 )
 from trust import (  # noqa: F401  (re-exported)
     _TRUST_CACHE, _granted, _read_manifest, _trusted_ids, changed_since_trust,
@@ -70,31 +75,20 @@ from trust import (  # noqa: F401  (re-exported)
     registry, registry_pins, registry_stale, trusted, untrusted_stores,
     write_store_file,
 )
-from manifest import (  # noqa: F401  (re-exported)
-    HOLDING_SPACES, INDEX_FILES, LEDGER_SCHEMAS, LEDGER_SURFACES, LEGACY_MANIFEST,
-    MANIFEST, MANIFEST_SCHEMA, OLD_MANIFEST, _SCHEMA_KEYS, _inside, _manifest_data,
-    has_manifest, manifest_file, validate_manifest,
+from corpora import (  # noqa: F401  (re-exported)
+    _clear_settings, _label, _phys_root_of, _raw_corpora, _root_of, _walked_by,
+    all_corpora, corpus_for, corpus_for_cwd, corpus_here, corpus_key, excluded_file,
+    parent_of, roots_of, search_root, settings, top_of,
 )
-from health import (  # noqa: F401  (re-exported)
-    HEALTH_MARKER_CAP, HEALTH_STALE_OTHER, HEALTH_STALE_POSIX, HEALTH_TEMP_AGE, HookRun,
-    _fold_dead_markers, _marker_name, _utc, health_ack, health_dir, health_error,
-    health_report,
+from claims import (  # noqa: F401  (re-exported)
+    CLAIMS_VERSION, ENTRY_TOKENS, FIRE_FLOOR, IDX_LINE, LINK, MIN_TOKENS, PAIR_FLOOR,
+    _ENDS, _LINE_MEANINGFUL, _NO_JOIN_FROM, claims, cross_file_pairs, pointer_only,
+    score_against, similar, strip, tokens, unclaimed, unwrap,
 )
-from fsio import (  # noqa: F401  (re-exported)
-    MAX_FILE_BYTES, MAX_SCAN, MAX_STORE_BYTES, MAX_STORE_FILES, PATH_MAX, SafeOut,
-    _inode, _regular, _replace_atomic, _same, open_safe, read_or_empty, read_safe,
-    relay, sqlite_rows,
+from corpus import (  # noqa: F401  (re-exported)
+    _archive_md, _own_md, _walk_files, archived_claims, corpus, csv_rows, csv_sources,
+    has_content, md_files, resolve, skipped_files, subtract_archived,
 )
-
-
-# The registry: manifest directories that `corpora`, `all` and a substring
-# argument can find. The gate derives a corpus from the written path and needs
-# no registry, but enumeration has nothing to derive from, and a whole-disk
-# search for manifests is not an option. `init <dir>` writes the manifest if
-# absent and registers the path; the manifest stays the authority that a
-# directory IS a corpus, so a row whose manifest is gone is reported, never
-# trusted. Lives beside memfind's venv, outside every corpus; `LOCKET_REGISTRY`
-# points a test at a scratch one.
 
 
 def migrate(root):

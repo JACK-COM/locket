@@ -17,6 +17,14 @@ import manifest
 import paths
 
 
+# The registry: manifest directories that `corpora`, `all` and a substring
+# argument can find. The gate derives a corpus from the written path and needs
+# no registry, but enumeration has nothing to derive from, and a whole-disk
+# search for manifests is not an option. `init <dir>` writes the manifest if
+# absent and registers the path; the manifest stays the authority that a
+# directory IS a corpus, so a row whose manifest is gone is reported, never
+# trusted. Lives in Locket's state directory, outside every corpus;
+# `LOCKET_REGISTRY` points a test at a scratch one.
 def _registry_data():
     try:
         data = json.loads(paths.PATHS.registry.read_text())
