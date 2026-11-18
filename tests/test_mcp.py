@@ -89,6 +89,20 @@ def _suite():
               "params": {"name": "locket_check_before_write",
                          "arguments": {"text": "a,b\n", "path": str(scratch / "R.csv"), "append": True}}})
     assert "No concerns" in r["result"]["content"][0]["text"], r
+    # the hook's own gate: the registry and a store's manifest are refused, and a link
+    # into a store is judged as the file it reaches
+    for i, (target, said) in enumerate(((scratch / "corpora.json", "trust registry"),
+                                        (root / memscan.MANIFEST, "configuration"))):
+        r = call({"jsonrpc": "2.0", "id": 30 + i, "method": "tools/call",
+                  "params": {"name": "locket_check_before_write",
+                             "arguments": {"text": "{}", "path": str(target)}}})
+        assert said in r["result"]["content"][0]["text"], r
+    link = scratch / "elsewhere.md"
+    link.symlink_to(root / "facts.md")
+    r = call({"jsonrpc": "2.0", "id": 32, "method": "tools/call",
+              "params": {"name": "locket_check_before_write",
+                         "arguments": {"text": claim * 3, "path": str(link), "append": True}}})
+    assert "not inside a memory store" not in r["result"]["content"][0]["text"], r
     r = call({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
               "params": {"name": "locket_find", "arguments": {"statement": claim, "store": str(root)}}})
     assert not r["result"]["isError"] and "[" in r["result"]["content"][0]["text"], r

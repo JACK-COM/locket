@@ -47,6 +47,7 @@ import time
 from collections import Counter, defaultdict
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
+from typing import NamedTuple
 
 import hosts
 import paths
@@ -1259,6 +1260,33 @@ def added_text(tool_input, text, prior):
     return text.replace(body, " ", 1)
 
 
+# The net-new material a write must carry before any novelty check reads the corpus or
+# the archive; under it a write is an edit, not a fact.
+MIN_ADDED = 200
+
+
+class Novel:
+    """The net-new material of one write, worked out once and shared by every check on it.
+
+    `added` is `added_text` at MIN_ADDED or None. `net()` is `added` with archived
+    provenance subtracted, or None once that leaves it under MIN_ADDED: archived text
+    is a move, not a fork. The archive is read on the first `net()` only, so a check
+    that ends on a cheap question first never reads it."""
+
+    def __init__(self, tool_input, text, prior, archived):
+        added = added_text(tool_input, text, prior)
+        self.added = added if added is not None and len(added) >= MIN_ADDED else None
+        self._archived, self._net, self._done = archived, None, False
+
+    def net(self):
+        if not self._done:
+            self._done = True
+            if self.added is not None:
+                net = subtract_archived(self.added, self._archived())
+                self._net = net if len(net) >= MIN_ADDED else None
+        return self._net
+
+
 # A holding space has its own furniture: "Promotion target if this holds across
 # instances:" is a stem several entries share, not an entry any of them duplicates.
 # The discriminator is SUBSTANCE, not repetition: stems carry 5 to 6 content
@@ -1333,7 +1361,7 @@ def holding_space_hit(added, prior):
 
 
 def hook_decision(name, tool_input, text, prior, docs, archived=None,
-                  autonomous=False, sets=None, root=None):
+                  autonomous=False, sets=None, root=None, novel=None):
     """The write-time nudge as one function: `(message, blocking)`.
 
     `docs` and `archived` are CALLABLES, invoked only after the cheap gates,
@@ -1352,14 +1380,18 @@ def hook_decision(name, tool_input, text, prior, docs, archived=None,
     one session, each of them the discipline being followed, with the only way
     through being the Bash path §2d forbids. Cycle behaviour is unchanged: a
     cycle cannot act on a warning either, so the guard it gets stays hard.
+
+    `novel` is the write's `Novel`, shared with `memfind_gate` so the archive is
+    subtracted once per write; built here from `archived` when absent.
     """
     sets = sets or settings(None)
     if name in sets["index_files"]:           # an index line is meant to point
         return None, False
     if name in sets["ledger_surfaces"]:       # chronology is the whole value
         return None, False
-    added = added_text(tool_input, text, prior)
-    if added is None or len(added) < 200:
+    novel = novel or Novel(tool_input, text, prior, archived or (lambda: []))
+    added = novel.added
+    if added is None:
         return None, False
     lead = LEAD_BLOCKING if autonomous else LEAD_WARNING
     if name in sets["holding_spaces"]:
@@ -1398,12 +1430,11 @@ def hook_decision(name, tool_input, text, prior, docs, archived=None,
     if ledger:
         history += f" If the date records what a session did, it is a row in {ledger.name}."
     blocks = bool(stacked and autonomous)
-    # Provenance before novelty: archived text is a move, not a fork. Subtraction
-    # only removes, so a pure relocation exits here without the corpus being read.
-    # ⚠ The floor now measures stripped text, which is shorter than raw, so this
-    # gate is marginally tighter than the one above. Fewer nudges, never more.
-    added = subtract_archived(added, archived() if archived else [])
-    if len(added) < 200:
+    # Provenance before novelty: subtraction only removes, so a pure relocation exits
+    # here without the corpus being read. ⚠ The floor now measures stripped text,
+    # which is shorter than raw, so this gate is marginally tighter than the one above.
+    added = novel.net()
+    if added is None:
         return history, blocks
     corpus = docs()
     # The replaced span stops existing the moment the edit lands, so it must leave
@@ -1582,7 +1613,7 @@ def semantic_neighbours(root, text, top=3, timeout=4):
         return None
 
 
-def memfind_gate(payload, name, tool_input, text, prior, root):
+def memfind_gate(payload, name, tool_input, text, prior, root, novel=None, autonomous=None):
     """Fire the §2e question once per session carrying its own answer, else None.
 
     A process gate, not a verdict: it asks whether the question was posed, which is
@@ -1591,9 +1622,10 @@ def memfind_gate(payload, name, tool_input, text, prior, root):
     satisfies the gate even where ollama is down and it returns nothing.
 
     Autonomous runs are exempt. A cycle writes on a schedule with no session in
-    front of it, cannot act on a nudge, and cannot report being blocked.
+    front of it, cannot act on a nudge, and cannot report being blocked. `autonomous`
+    defaults to CLAUDE_AUTONOMOUS; `novel` is the write's shared `Novel`.
     """
-    if os.environ.get("CLAUDE_AUTONOMOUS") == "1":
+    if os.environ.get("CLAUDE_AUTONOMOUS") == "1" if autonomous is None else autonomous:
         return None
     # INDEX_FILES is deliberately NOT exempt here. Its lexical exemption exists
     # because a pointer line is meant to restate its target; that says nothing
@@ -1602,16 +1634,14 @@ def memfind_gate(payload, name, tool_input, text, prior, root):
     sets = settings(root)
     if name in sets["append_surfaces"]:
         return None                         # chronology, and staging
-    added = added_text(tool_input, text, prior)
-    if added is None or len(added) < 200:
+    novel = novel or Novel(tool_input, text, prior, lambda: archived_claims(root))
+    if novel.added is None or session_asked(payload):
         return None
     # The same provenance subtraction the novelty nudge applies. Without it a
     # relocation clears that nudge and trips this one instead, which resurrects
     # the exact fault provenance-awareness exists to retire.
-    added = subtract_archived(added, archived_claims(root))
-    if len(added) < 200:
-        return None
-    if session_asked(payload):
+    added = novel.net()
+    if added is None:
         return None
 
     out = [f"Net-new material is about to land in {name}, and this session has not asked "
@@ -3695,57 +3725,69 @@ def is_registry(path):
         return False
 
 
-def hook_mode(payload):
-    """The write-time gate on one normalised Write or Edit: the trust registry, the
-    ledger schema for a CSV, the lexical checks, then the 2e question. Reached from
-    `hook`, and from `bashguard` when a shell call turned out to be a Codex patch."""
-    ti = payload["tool_input"]
-    path = str(ti.get("file_path", ""))
+class Decision(NamedTuple):
+    message: object     # what the writer is told, or None
+    blocking: bool      # the write must not land
+    checked: str        # "refused", "ledger", "csv", "outside", "store", or "error"
+
+
+def evaluate_write(path, tool_input, *, append=False, autonomous=False, payload=None):
+    """The write gate on one Write or Edit to `path`, for every host and for the MCP's
+    check: the trust registry and store configs, the ledger schema and source rows for
+    a CSV, the lexical checks, then the 2e question.
+
+    `tool_input` carries `content` (a whole file) or `old_string`/`new_string` (an
+    edit); with `append`, its `content` or `new_string` is an entry going on the end.
+    `payload` is the host's, for its cwd and session. A check that raises lets the
+    write through, recorded by `health_error`: a guardrail must never break a write."""
+    payload = payload or {}
     real = os.path.realpath(_absolute(path, payload.get("cwd"))) if path else ""
     if real and real != path and (is_registry(real) or store_config(real) is not None
                                   or corpus_for(real) is not None):
         path = real                         # a link or alias is judged as the file it reaches
-        ti = {**ti, "file_path": real}
-        payload = {**payload, "tool_input": ti}
     if path and is_registry(path):
-        return emit(payload, REGISTRY_REFUSAL.format(reg=paths.PATHS.registry), True, "hook")
+        return Decision(REGISTRY_REFUSAL.format(reg=paths.PATHS.registry), True, "refused")
     cfg = store_config(path) if path else None
     if cfg is not None:
-        return emit(payload, CONFIG_REFUSAL.format(name=cfg[1], store=cfg[0]), True, "hook")
-    if path.lower().endswith(".csv"):  # a ledger row: schema, decidable, may block
+        return Decision(CONFIG_REFUSAL.format(name=cfg[1], store=cfg[0]), True, "refused")
+    ti = {k: v for k, v in tool_input.items() if k != "_append"}
+    if append:
+        entry = ti.get("content") if ti.get("content") is not None else ti.get("new_string")
+        ti = {"new_string": str(entry or "")}
+    ti["file_path"] = path
+    if path.lower().endswith(".csv"):       # a ledger row: schema, decidable, may block
         try:
             msg, blocking = ledger_decision(path, ti)
-            if not blocking:
-                prior = read_or_empty(path)
-                msg = source_row_decision(path, ti, prior)[0]
-        except Exception as e:          # a guardrail must never break a write
+            if blocking:
+                return Decision(msg, True, "ledger")
+            msg = source_row_decision(path, ti, read_or_empty(path), append=append)[0]
+            return Decision(msg, False, "ledger" if ledger_schema_for(path)[0] is not None else "csv")
+        except Exception as e:
             health_error("hook", "ledger", e)
-            return 0
-        return emit(payload, msg, blocking, "hook")
+            return Decision(None, False, "error")
     root = corpus_for(path)
     if root is None:
-        return 0
+        return Decision(None, False, "outside")
     text = str(ti.get("content") or ti.get("new_string") or "")
-    prior = read_or_empty(path)         # "" for a new file, an unreadable one or a refused one
-    if ti.get("_append") and prior:     # an append is a Write of prior + entry
+    prior = read_or_empty(path)             # "" for a new file, an unreadable one or a refused one
+    if append and prior:                    # an append is a Write of prior + entry
         text = prior.rstrip("\n") + "\n" + text
     name = Path(path).name
+    novel = Novel(ti, text, prior, lambda: archived_claims(root))
     try:
-        msg, blocking = hook_decision(
-            name, ti, text, prior, lambda: corpus(root),
-            lambda: archived_claims(root),
-            autonomous=os.environ.get("CLAUDE_AUTONOMOUS") == "1",
-            sets=settings(root), root=root)
-    except Exception as e:              # a guardrail must never break a write: a
-        health_error("hook", "lexical", e)  # dangling symlink in the corpus raised here
-        return 0
+        msg, blocking = hook_decision(name, ti, text, prior, lambda: corpus(root),
+                                      autonomous=autonomous, sets=settings(root), root=root,
+                                      novel=novel)
+    except Exception as e:                  # a dangling symlink in the corpus raised here
+        health_error("hook", "lexical", e)
+        return Decision(None, False, "error")
     if msg and blocking:
-        return emit(payload, msg, True)
+        return Decision(msg, True, "store")
     # The silent path is the paraphrase blind spot: lexical scoring found
     # nothing, which is also what it returns for a fact restated in new words.
     try:
-        gate = memfind_gate(payload, name, ti, text, prior, root)
-    except Exception as e:              # a guardrail must never break a write
+        gate = memfind_gate(payload, name, ti, text, prior, root, novel=novel, autonomous=autonomous)
+    except Exception as e:
         health_error("hook", "2e", e)
         gate = None
     # A non-blocking nudge must still reach the model when the 2e gate blocks,
@@ -3754,8 +3796,17 @@ def hook_mode(payload):
     # worded for the landed case would assert the opposite of what happened.
     if gate:
         warn = msg.replace(LEAD_WARNING, LEAD_BLOCKING, 1) if msg else None
-        return emit(payload, "\n\n".join(x for x in (warn, gate) if x), True)
-    return emit(payload, msg, False, "hook")
+        return Decision("\n\n".join(x for x in (warn, gate) if x), True, "store")
+    return Decision(msg, False, "store")
+
+
+def hook_mode(payload):
+    """The write gate on one normalised Write or Edit, delivered to the host. Reached
+    from `hook`, and from `bashguard` when a shell call turned out to be a Codex patch."""
+    ti = payload["tool_input"]
+    d = evaluate_write(str(ti.get("file_path", "")), ti, append=bool(ti.get("_append")),
+                       autonomous=os.environ.get("CLAUDE_AUTONOMOUS") == "1", payload=payload)
+    return emit(payload, d.message, d.blocking, "hook")
 
 
 def main(argv):

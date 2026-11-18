@@ -133,7 +133,8 @@ def t_across(args):
 
 
 def t_check_before_write(args):
-    """The write-time hook, on request: the one-authority nudge and the 2e
+    """The write-time hook, on request, through the hook's own gate: the registry and
+    config refusals, a CSV's schema and source rows, the one-authority nudge and the 2e
     question, over the text about to be written. Advisory; nothing here blocks."""
     text = str(args.get("text") or "")
     path = str(args.get("path") or "")
@@ -141,46 +142,26 @@ def t_check_before_write(args):
     if not text or not path:
         raise ValueError("text and path are required")
     p = Path(path).expanduser()
-    if p.suffix.lower() == ".csv":
-        # What the hook does with a CSV: the ledger schema, which may block, then
-        # a registered source's new rows scored against the store, which warns.
-        ti = ({"old_string": old, "new_string": text} if old
-              else {"new_string": text} if args.get("append") else {"content": text})
-        msg, _ = memscan.ledger_decision(str(p), ti)
-        if msg:
-            return msg.replace("the write is refused", "the write should not land")
-        prior = memscan.read_or_empty(p)     # never through a link or a FIFO, never past the cap
-        msg, _ = memscan.source_row_decision(str(p), ti, prior, append=bool(args.get("append")))
-        if msg:
-            return msg.replace(memscan.LEAD_WARNING, "About to write:")
-        if memscan.ledger_schema_for(p)[0] is not None:
-            return "No concerns: every row fits the ledger's schema."
-        return (f"No concerns: {p.name} has no ledger schema, and no row it adds restates "
-                f"a claim a registered store already carries.")
-    root = memscan.corpus_for(p)
-    if root is None:
-        return (f"{p} is not inside a memory store this tool knows, so nothing to check. "
-                f"Call locket_corpora; a folder becomes a store once a person runs  locket trust <folder>.")
-    prior = memscan.read_or_empty(p)
     # Three shapes, and the caller has to say which, because a filesystem connector
     # writes whole files and the hook cannot see the operation behind them:
     # `old_text` is an edit; `append` is an entry going on the end; otherwise `text`
     # is the whole new file, so a rewrite in place scores as nothing added, which
     # is the discipline being followed and must not draw a nudge naming the file.
-    ti = {"file_path": str(p)}
-    if old:
-        ti.update(old_string=old, new_string=text)
-    elif args.get("append") and prior:
-        text = prior.rstrip("\n") + "\n" + text
-    msg, _ = memscan.hook_decision(
-        p.name, ti, text, prior, lambda: memscan.corpus(root),
-        lambda: memscan.archived_claims(root), autonomous=False,
-        sets=memscan.settings(root), root=root)
-    gate = memscan.memfind_gate({"_host": "mcp", "_asked": ASKED}, p.name, ti, text, prior, root)
-    parts = [x for x in (msg, gate) if x]
-    if not parts:
-        return "No concerns: nothing here already owns this text, and the session has asked the store."
-    return "\n\n".join(parts).replace(memscan.LEAD_WARNING, "About to write:")
+    ti = {"old_string": old, "new_string": text} if old else {"content": text}
+    d = memscan.evaluate_write(str(p), ti, append=bool(args.get("append")) and not old,
+                               payload={"_host": "mcp", "_asked": ASKED})
+    if d.message:
+        return (d.message.replace("the write is refused", "the write should not land")
+                .replace(memscan.LEAD_WARNING, "About to write:")
+                .replace(memscan.LEAD_BLOCKING, "About to write:"))
+    return {
+        "outside": (f"{p} is not inside a memory store this tool knows, so nothing to check. Call "
+                    f"locket_corpora; a folder becomes a store once a person runs  locket trust <folder>."),
+        "ledger": "No concerns: every row fits the ledger's schema.",
+        "csv": (f"No concerns: {p.name} has no ledger schema, and no row it adds restates "
+                f"a claim a registered store already carries."),
+        "error": "The check failed inside Locket, so this text is unchecked; `locket doctor` reports the error.",
+    }.get(d.checked, "No concerns: nothing here already owns this text, and the session has asked the store.")
 
 
 def t_audit(args):
