@@ -20,6 +20,14 @@ CMD = shlex.split(os.environ.get("LOCKET_CMD", f"{sys.executable} {REPO / 'src/l
 BAD_RULINGS = "Ruling,Category,Area,Date\nshort,nope,x,not-a-date\n"
 
 
+def grant(env, d):
+    """Register `d` as a person's `locket trust` would: through the source under test,
+    so the row carries whatever pin that source writes."""
+    code = f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan; memscan.register({str(d)!r})"
+    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+
+
 class Scratch(unittest.TestCase):
     def setUp(self):
         self._t = tempfile.TemporaryDirectory()
@@ -46,8 +54,7 @@ class Scratch(unittest.TestCase):
                               stdin=None if payload is not None else stdin, timeout=60)
 
     def trust(self, d):
-        rows = json.loads(self.registry.read_text())["corpora"] if self.registry.exists() else []
-        self.registry.write_text(json.dumps({"corpora": rows + [str(d)]}))
+        grant(self.env, d)
 
     def write(self, path, content):
         return {"hook_event_name": "PreToolUse", "tool_name": "Write", "session_id": "t",
@@ -133,19 +140,18 @@ class TrustNeedsAPerson(Scratch):
         self.assertIn("locket trust", r.stdout + r.stderr)
 
 
-    def test_trust_at_a_terminal_registers(self):
-        """The one path that grants trust, run for real: a pty stands in for the person."""
+    def as_person(self, *args):
+        """Run `locket *args` on a pty and type `yes` at its prompt, as a person would."""
         import pty
         import select
         pid, fd = pty.fork()
         if pid == 0:                                    # child: the person's terminal session
             try:
                 os.chdir(self.clone)
-                os.execvpe(CMD[0], [*CMD, "trust", str(self.clone)], self.env)
+                os.execvpe(CMD[0], [*CMD, *args], self.env)
             finally:
                 os._exit(127)                           # never fall back into the test runner
-        out = b""
-        sent = False
+        out, sent = b"", False
         while True:
             ready, _, _ = select.select([fd], [], [], 30)
             if not ready:
@@ -161,16 +167,27 @@ class TrustNeedsAPerson(Scratch):
                 os.write(fd, b"yes\n")
                 sent = True
         os.waitpid(pid, 0)
-        self.assertTrue(sent, out.decode(errors="replace"))
-        self.assertTrue(self.registered(), out.decode(errors="replace"))
+        return sent, out.decode(errors="replace")
+
+    def test_trust_at_a_terminal_registers(self):
+        """The one path that grants trust, run for real: a pty stands in for the person."""
+        sent, out = self.as_person("trust", str(self.clone))
+        self.assertTrue(sent, out)
+        self.assertTrue(self.registered(), out)
+
+    def test_untrust_without_a_terminal_is_refused(self):
+        self.trust(self.clone)
+        r = self.run_locket("untrust", str(self.clone))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertTrue(self.registered(), "an agent cannot withdraw a store's guardrails")
 
     def test_untrust_withdraws_by_identity(self):
         variant = str(self.clone).upper()
         if not Path(variant).exists():
             self.skipTest("case-sensitive filesystem")
         self.trust(self.clone)
-        r = self.run_locket("untrust", variant)
-        self.assertIn("row removed", r.stdout, r.stderr)
+        sent, out = self.as_person("untrust", variant)
+        self.assertIn("row removed", out)
         self.assertFalse(self.registered())
 
     def test_registry_write_by_case_variant_is_refused(self):
@@ -195,10 +212,10 @@ class ConfigIsAPersonsToWrite(Scratch):
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
     def test_named_rows_file_write_is_refused(self):
-        self.trust(self.clone)
         (self.clone / "locket.json").write_text(json.dumps({"triggers": "rules/rows.json"}))
         (self.clone / "rules").mkdir()
         (self.clone / "rules" / "rows.json").write_text('{"rows": []}')
+        self.trust(self.clone)                          # trusted as it now stands
         r = self.run_locket("hook", payload=self.write(self.clone / "rules" / "rows.json", '{"rows": []}'))
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
@@ -285,6 +302,15 @@ class RedTeamCases(Scratch):
         self.assertNotEqual(r.stdout + r.stderr, "", "the manifest in the patch draws the refusal")
         self.assertIn("locket.json", r.stdout + r.stderr)
 
+    def test_shell_write_of_a_store_config_is_refused(self):
+        mem = self.home / ".claude" / "projects" / "-x" / "memory"
+        mem.mkdir(parents=True)
+        for cmd in (f"cat > {mem / 'triggers.json'} <<'EOF'\n{{}}\nEOF",
+                    f"cd {mem} && printf x > locket.json",
+                    f"echo '{{}}' > ~/.claude/triggers.json"):
+            r = self.run_locket("bashguard", payload=self.bash(cmd))
+            self.assertEqual(r.returncode, 2, cmd + " | " + r.stdout + r.stderr)
+
     def test_registry_named_in_shell_is_refused(self):
         r = self.run_locket("bashguard", payload=self.bash(f"cat {self.registry}"))
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
@@ -316,6 +342,81 @@ class RedTeamCases(Scratch):
         self.assertNotIn("\x1b", out)
         self.assertNotIn("\u202e", out)
         self.assertLess(len(out), 4000)
+
+
+class RoundTwo(Scratch):
+    """The second blind round and its audit, one case each."""
+
+    def probe(self, expr):
+        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan, trigger; "
+                f"from pathlib import Path; print({expr})")
+        r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def test_window_edges_do_not_invent_anchors(self):
+        step = 64 * 1024 - 4096
+        text = "x" * step + "rm -rf /" + "y" * 70000
+        self.assertEqual(self.probe(f"trigger._search(r'^rm -rf', {text!r})"), "False")
+        self.assertEqual(self.probe(f"trigger._search(r'rm -rf', {text!r})"), "True", "the control")
+
+    def test_a_fully_read_long_call_is_not_unread(self):
+        self.assertEqual(self.probe("trigger._search('zzz', 'a' * 950000)"), "False")
+
+    def test_padding_across_a_window_boundary_still_fires(self):
+        step = 64 * 1024 - 4096
+        (self.home / ".claude" / "triggers.json").write_text(json.dumps({"rows": [
+            {"id": "rm", "tools": "Bash", "content": "rm -rf", "block": True, "question": "Refused."}]}))
+        r = self.run_locket("trigger", payload=self.bash("x" * (step - 3) + " rm -rf ~ " + "x" * 90000))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_case_variant_config_name_is_refused(self):
+        variant = self.home / ".claude" / "TRIGGERS.JSON"
+        if not Path(str(self.home).upper()).exists():
+            self.skipTest("case-sensitive filesystem")
+        r = self.run_locket("hook", payload=self.write(variant, '{"rows": []}'))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_embedder_settings_write_is_refused(self):
+        cfg = self.home / ".panoply" / "config.json"
+        r = self.run_locket("hook", payload=self.write(cfg, '{"embed": {"ollama_host": "http://evil:1"}}'))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_trust_verb_in_an_agent_shell_is_refused(self):
+        r = self.run_locket("bashguard", payload=self.bash("printf 'yes\\n' | script -q /dev/null locket trust ."))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_a_link_into_host_memory_is_judged_as_host_memory(self):
+        link = self.clone / "notes"
+        link.symlink_to(self.home / ".claude")
+        r = self.run_locket("hook", payload=self.write(link / "triggers.json", '{"rows": []}'))
+        self.assertEqual(r.returncode, 2, "a write through a link reaches the file it names: " + r.stderr)
+
+    def test_member_through_a_link_stays_inside(self):
+        outside = self.home / "outside"
+        (outside / "sub").mkdir(parents=True)
+        (outside / "sub" / "secret.md").write_text("A secret sentence long enough to count as a claim.\n")
+        (self.clone / "link").symlink_to(outside)
+        (self.clone / "locket.json").write_text(json.dumps({"members": ["link/sub"]}))
+        self.trust(self.clone)
+        self.assertEqual(self.probe(f"[str(p) for p in memscan.md_files(Path({str(self.clone)!r}))]"), "[]")
+
+    def test_an_unpinned_row_is_not_trusted(self):
+        self.registry.write_text(json.dumps({"corpora": [str(self.clone)]}))     # written by hand
+        self.assertEqual(self.probe(f"memscan.trusted(Path({str(self.clone)!r}))"), "False")
+
+    def test_init_refuses_the_home_directory(self):
+        r = self.run_locket("init", str(self.home))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse((self.home / "locket.json").exists())
+
+    def test_cli_output_carries_no_control_character(self):
+        (self.clone / "MEMORY.md").write_text("- [Title \x1b[2J\u202e hidden](fact.md) \u2014 a hook line here\n")
+        (self.clone / "fact.md").write_text("A fact.\n")
+        self.trust(self.clone)
+        r = self.run_locket("pointers", str(self.clone))
+        for hidden in ("\x1b", "\u202e"):
+            self.assertNotIn(hidden, r.stdout)
 
 
 class TrustIsByIdentity(Scratch):

@@ -179,8 +179,8 @@ def config_digest(d):
     sig = []
     for f in files:
         try:
-            st = os.lstat(f)
-            sig.append((str(f), st.st_ino, st.st_mtime_ns, st.st_size))
+            st = os.lstat(f)                # ctime: a restored mtime cannot reset it
+            sig.append((str(f), st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size))
         except OSError:
             sig.append((str(f), None))
     sig = tuple(sig)
@@ -189,12 +189,13 @@ def config_digest(d):
         return hit[1]
     h = hashlib.sha256()
     for f in files:
-        h.update(f.name.encode() + b"\0")
         try:
             with open_safe(f, binary=True) as fh:
-                h.update(fh.read())
+                body = fh.read()
         except OSError:
-            h.update(b"\0absent\0")
+            body = None
+        tag = b"absent" if body is None else str(len(body)).encode()
+        h.update(f.name.encode() + b"\0" + tag + b"\0" + (body or b""))
     _DIGESTS[str(d)] = (sig, h.hexdigest())
     return h.hexdigest()
 
@@ -255,7 +256,7 @@ def _granted(d):
         return True
     if ident in rows:
         pin = rows[ident]
-        return pin is None or pin == config_digest(d)
+        return pin is not None and pin == config_digest(d)
     return d.name == "memory" and _inode(d.parent.parent) == _inode(CLAUDE / "projects")
 
 
@@ -289,13 +290,37 @@ def relay(text, limit=200, lines=False):
     return flat if len(flat) <= limit else flat[:limit - 1] + "\u2026"
 
 
+class SafeOut:
+    """A text stream that passes every line through `relay(lines=True)`'s character
+    rule: whatever a mode prints (a title, a file name, a history line from a store)
+    reaches a terminal or an agent with no control, bidi or invisible character."""
+
+    def __init__(self, stream):
+        self._s = stream
+
+    def write(self, text):
+        import unicodedata
+        keep = "\n\t"
+        return self._s.write("".join(c if c in keep or unicodedata.category(c) not in _INVISIBLE else " "
+                                     for c in str(text)))
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+
 def _same(a, b):
     """Whether two paths name one directory: by inode where both exist, else by
     resolved path. Spelling is not identity on a case-insensitive disk."""
     ia, ib = _inode(a), _inode(b)
     if ia is not None and ib is not None:
         return ia == ib
-    return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+    pa, pb = Path(a).expanduser().resolve(), Path(b).expanduser().resolve()
+    if pa == pb:
+        return True
+    # not yet on disk: the same name under one directory, case aside, is taken as one
+    # file, since on a case-insensitive disk it is, and a gate errs toward refusing
+    return (pa.name.casefold() == pb.name.casefold() and pa.parent != pa
+            and _same(pa.parent, pb.parent))
 
 
 def write_store_file(path, text):
@@ -309,20 +334,31 @@ def write_store_file(path, text):
     # to what Locket wrote. Any other edit leaves the store inert until re-trusted.
     repin = (p.name in (MANIFEST, OLD_MANIFEST, LEGACY_MANIFEST) and _granted(p.parent)
              and any(_same(p.parent, r) for r in registry()))
-    _replace_atomic(p, text, f".{p.name}.")
+    try:                                    # an edited file keeps its mode; a new one takes the umask's
+        mode = os.stat(p).st_mode & 0o777
+    except FileNotFoundError:
+        mask = os.umask(0)
+        os.umask(mask)
+        mode = 0o666 & ~mask
+    _replace_atomic(p, text, f".{p.name}.", mode)
     if repin:
         register(p.parent)
 
 
 def pin_unpinned():
     """Pin every registered store that has no pin yet (rows from before 0.12) to its
-    configuration as it stands. Returns the stores pinned."""
-    pins, done = registry_pins(), []
-    for r in registry():
-        if str(r) not in pins and has_manifest(r):
-            register(r)
-            done.append(r)
-    return done
+    configuration as it stands, once a person agrees: an unpinned row is untrusted,
+    since a registry written by hand carries no pins. Returns the stores pinned, or
+    None when a person was needed and none answered."""
+    pins = registry_pins()
+    todo = [r for r in registry() if str(r) not in pins and has_manifest(r)]
+    if todo and not person_confirms(
+            f"Pin {len(todo)} stores registered before 0.12 to their configuration as it stands?",
+            [str(r) for r in todo[:8]], "pin them"):
+        return None
+    for r in todo:
+        register(r)
+    return todo
 
 
 def _write_registry(rows, pins=None):
@@ -499,9 +535,12 @@ def trust_summary(d):
     rows = Path(d) / Path(rows_name).expanduser()
     try:
         data = json.loads(read_safe(rows))
-        n = len(data.get("rows") or []) if isinstance(data, dict) else 0
-        blocking = sum(1 for r in (data.get("rows") or []) if isinstance(r, dict) and r.get("block"))
-        out.append(f"trigger rows: {n} in {rows}, {blocking} of them blocking")
+        rws = [r for r in (data.get("rows") or []) if isinstance(r, dict)] if isinstance(data, dict) else []
+        out.append(f"trigger rows: {len(rws)} in {rows}, "
+                   f"{sum(1 for r in rws if r.get('block'))} of them blocking")
+        for r in rws[:12]:
+            out.append(f"{'BLOCKS' if r.get('block') else 'asks'} [{r.get('id', '?')}] when "
+                       f"{r.get('tools')!s} matches /{r.get('content')!s}/: {r.get('question')!s}")
     except (OSError, ValueError):
         pass
     return out
@@ -766,7 +805,7 @@ def corpus_for(path):
     p = Path(path).expanduser()
     if not p.is_absolute():
         p = Path.cwd() / p
-    if p.suffix != ".md":
+    if p.suffix.lower() != ".md":           # MEMORY.MD is MEMORY.md on a case-insensitive disk
         return None
     root = _phys_root_of(p.parent)          # membership and exclusion are the physical store's
     if root is None:
@@ -1048,7 +1087,8 @@ def settings(root):
     """`_settings_for`, cached per store and per state of the trust registry, so a store
     trusted or untrusted in another process is seen without a restart."""
     _trusted_ids()
-    return _settings_for(root, next(iter(_TRUST_CACHE)))
+    pinned = root is not None and _inode(root) in _TRUST_CACHE[next(iter(_TRUST_CACHE))][1]
+    return _settings_for(root, (next(iter(_TRUST_CACHE)), config_digest(root) if pinned else None))
 
 
 def _clear_settings():
@@ -1316,9 +1356,12 @@ def _corpus_dirs(root):
         own.sort()
         yield root, own
         # a member that is a symlink would walk wherever it points, outside the store
+        real_root = os.path.realpath(root)
         tops = [root / n for n in sorted(mem)
                 if all(entered(part) for part in Path(n).parts)
-                and (root / n).is_dir() and not (root / n).is_symlink()]
+                and (root / n).is_dir() and not (root / n).is_symlink()
+                # no component may be a link out: `link/sub` walked wherever `link` pointed
+                and os.path.realpath(root / n).startswith(real_root + os.sep)]
     for top in tops:
         for dirpath, dirnames, filenames in os.walk(top):
             here = Path(dirpath)
@@ -2309,6 +2352,9 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
     the three built-in ledgers, writing a manifest even on a store by convention,
     because asking for ledgers is asking for configuration."""
     d = Path(target).expanduser()
+    if d.is_dir() and d.resolve() in (Path("/"), HOME.resolve()):
+        print(f"{d} is too broad to be a store; init the folder that holds the memory", file=sys.stderr)
+        return 1
     if not d.is_dir():
         print(f"{d} is not a directory", file=sys.stderr)
         return 1
@@ -5409,8 +5455,12 @@ MODES
   trust DIR  let DIR's manifest act: its trigger rows, ledger schemas and
             sources. Asks a person at a terminal to type yes; an agent cannot
             grant it. Until then a manifest outside the host stores is inert.
+            Trust is pinned to DIR's locket.json, reference-sources.json and
+            rows file as they stand: after editing any of them, or a pull that
+            changes them, the store is inert until you trust it again.
   forget DIR  drop DIR's registry row, which also withdraws its trust (`untrust`
-            is the same verb). Its manifest stays, inert.
+            is the same verb), once a person confirms at a terminal. Its
+            manifest stays, inert.
   selftest  run the internal checks.
 
 HOOK MODES (PreToolUse entry points, JSON on stdin; not for manual use)
@@ -6882,7 +6932,7 @@ def _utc(t=None):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() if t is None else t))
 
 
-def _replace_atomic(path, data, prefix):
+def _replace_atomic(path, data, prefix, mode=None):
     """Write `data` (str or bytes) beside `path` and rename it over, so a reader never sees
     a partial file. The temp is removed when the write fails; a writer killed mid-way can
     still leave one, which each surface's own sweep removes."""
@@ -6892,6 +6942,8 @@ def _replace_atomic(path, data, prefix):
             out.write(data)
             out.flush()
             os.fsync(out.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -7568,10 +7620,11 @@ def store_config(path):
         p = Path.cwd() / p
     if len(str(p)) > PATH_MAX:
         return None
-    names = {MANIFEST, OLD_MANIFEST, LEGACY_MANIFEST, "triggers.json"}
-    d = p.parent
-    if p.name in names and (trusted(d) or d in set(HOST_STORES.values())):
-        return d, p.name
+    names = {n.lower() for n in (MANIFEST, OLD_MANIFEST, LEGACY_MANIFEST, "triggers.json")}
+    for q in (p, Path(os.path.realpath(p))):  # by name on a case-insensitive disk, and through a link
+        d = q.parent
+        if q.name.lower() in names and (trusted(d) or d in set(HOST_STORES.values())):
+            return d, q.name
     phys = _phys_root_of(d)
     if phys is not None:
         rows = _read_manifest(phys).get("triggers")
@@ -7583,8 +7636,35 @@ def store_config(path):
     return None
 
 
-REGISTRY_REFUSAL = ("This write edits Locket's trust registry, {reg}. Trust is a person's act at a "
-                    "terminal: ask the user to run  locket trust <dir>  (or  locket untrust <dir>).")
+_CONFIG_WORD = re.compile(r"[^\s;&|<>()]*(?:locket\.json|memfind\.json|reference-sources\.json|triggers\.json)\b")
+
+
+_TRUST_VERB = re.compile(r"\b(?:locket|memscan(?:\.py)?|locket\.py)\s+(?:trust|untrust|forget)\b")
+TRUST_REFUSAL = ("Granting or withdrawing a store's trust is a person's act at their own terminal, "
+                 "never through an agent's shell. Tell the user the command to run.")
+
+
+def shell_store_config(command, cwd):
+    """(store, name) for the first store configuration file a shell command names,
+    read as the shell would resolve it, else None. Naming one is enough: no agent task
+    needs to touch a store's configuration from a shell, and whether a command writes a
+    file cannot be read off its text, while whether it names one can."""
+    for i, m in enumerate(_CONFIG_WORD.finditer(command[:MAX_SCAN])):
+        if i >= 100:
+            break
+        tok = m.group(0)
+        bases = [""] if tok.startswith(("/", "~", "$HOME", "${HOME}")) else _cd_targets(command, cwd, m.start())
+        for b in bases:
+            path = _expand_home(tok) if not b else str(Path(b) / tok)
+            hit = store_config(path)
+            if hit is not None:
+                return hit
+    return None
+
+
+REGISTRY_REFUSAL = ("This touches Locket's trust registry or embedder settings ({reg}). Both are a "
+                    "person's to change at a terminal: ask the user to run  locket trust <dir>, "
+                    "locket untrust <dir>  or  locket configure embedder ...  themselves.")
 
 
 _PATHLIKE = re.compile(r"""[^\s'"<>;&|()]+\.(?:md|csv)\b""")
@@ -7614,10 +7694,13 @@ def oversized_decision(command, cwd):
 
 
 def is_registry(path):
-    """Whether `path` names the trust registry, by resolved path: a decidable
-    question, so the gate on it may block."""
+    """Whether `path` names a file that decides what Locket trusts or where it sends
+    text: the trust registry, or the Panoply settings that name the embedder host.
+    By identity, so a case variant or a link is the same file; decidable, so it may block."""
+    guarded = [REGISTRY, Path(os.environ.get("PANOPLY_CONFIG", str(HOME / ".panoply" / "config.json"))),
+               REGISTRY.parent / "config.json"]
     try:
-        return _same(path, REGISTRY)
+        return any(_same(path, g) for g in guarded)
     except (OSError, RuntimeError, ValueError):
         return False
 
@@ -7628,6 +7711,12 @@ def hook_mode(payload):
     `hook`, and from `bashguard` when a shell call turned out to be a Codex patch."""
     ti = payload["tool_input"]
     path = str(ti.get("file_path", ""))
+    real = os.path.realpath(_absolute(path, payload.get("cwd"))) if path else ""
+    if real and real != path and (is_registry(real) or store_config(real) is not None
+                                  or corpus_for(real) is not None):
+        path = real                         # a link or alias is judged as the file it reaches
+        ti = {**ti, "file_path": real}
+        payload = {**payload, "tool_input": ti}
     if path and is_registry(path):
         return emit(payload, REGISTRY_REFUSAL.format(reg=REGISTRY), True, "hook")
     cfg = store_config(path) if path else None
@@ -7721,7 +7810,13 @@ def _hook_entry(mode):
                 return 0
             return emit(payload, msg, blocking, mode)
         bare = re.sub(r"""['"\\]""", "", command)
-        if (".locket" in bare and "corpora.json" in bare) or str(REGISTRY) in bare:
+        if _TRUST_VERB.search(bare):
+            return emit(payload, TRUST_REFUSAL, True, mode)
+        cfg = shell_store_config(bare, payload.get("cwd"))
+        if cfg is not None:
+            return emit(payload, CONFIG_REFUSAL.format(name=cfg[1], store=cfg[0]), True, mode)
+        if ((".locket" in bare and ("corpora.json" in bare or "config.json" in bare))
+                or (".panoply" in bare and "config.json" in bare) or str(REGISTRY) in bare):
             # a shell command naming the registry is refused whether or not it writes: no
             # agent task needs the file, and a write to it would grant trust
             return emit(payload, REGISTRY_REFUSAL.format(reg=REGISTRY), True, mode)
@@ -7809,6 +7904,13 @@ def _main_rest(mode, argv):
     if mode in ("forget", "untrust"):
         if len(argv) < 3:
             print(f"{mode} needs a directory:  locket {mode} <dir>", file=sys.stderr)
+            return 1
+        d = Path(argv[2]).expanduser()
+        if any(_same(d, r) for r in registry()) and not person_confirms(
+                f"Withdraw trust from {d}? Its trigger rows, ledger schemas and sources stop acting.",
+                [], "withdraw it"):
+            print(f"registry: unchanged. Withdrawing a store's guardrails is a person's act at a "
+                  f"terminal; ask the user to run:  locket {mode} {shlex.quote(str(d))}")
             return 1
         print(f"registry: {REGISTRY} ({'row removed' if forget(argv[2]) else 'not listed'})")
         return 0

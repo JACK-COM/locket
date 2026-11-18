@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.test_trust import SRC
+from tests.test_trust import SRC, grant
 
 CLAIM = "The harbour gauge at the north pier is read at dawn and at dusk by the night watchman.\n"
 
@@ -29,11 +29,11 @@ class Reads(unittest.TestCase):
         self.outside.mkdir()
         (self.outside / "secret.md").write_text(CLAIM)
         reg = self.home / ".locket" / "corpora.json"
-        reg.write_text(json.dumps({"corpora": [str(self.store)]}))
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith("LOCKET_") and k not in ("CODEX_HOME", "HERMES_HOME")}
         self.env.update(HOME=str(self.home), LOCKET_REGISTRY=str(reg),
                         LOCKET_HEALTH_DIR=str(self.home / "health"))
+        grant(self.env, self.store)
 
     def tearDown(self):
         self._t.cleanup()

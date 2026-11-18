@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.test_trust import CMD, SRC
+from tests.test_trust import CMD, SRC, grant
 
 
 class Output(unittest.TestCase):
@@ -31,7 +31,7 @@ class Output(unittest.TestCase):
         d = self.home / name
         d.mkdir()
         (d / "locket.json").write_text("{}\n")
-        self.reg.write_text(json.dumps({"corpora": [str(d)]}))
+        grant(self.env, d)
         return d
 
     def hook(self, payload):

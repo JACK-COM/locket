@@ -136,7 +136,7 @@ VERBS = [
      "locket install --desktop              plus the Claude Desktop server; restart the app after"),
     ("uninstall", "[--yes] [--purge] [--dry-run]",
      "remove the command, ~/.locket, every cache, and the shared venv when no other piece uses it; "
-     "with --purge every manifest and the usage ledger; print what is left",
+     "with --purge every manifest and the usage ledger, confirmed by a person at a terminal; print what is left",
      "locket uninstall --dry-run            print what would go, remove nothing\n"
      "locket uninstall                      remove, after asking once\n"
      "locket uninstall --yes                remove without asking\n"
@@ -801,7 +801,8 @@ def _probe_hook(cmd, codex=False):
         # the probe store is trusted through a registry of its own, so the probe never
         # adds a row to the live one and an untrusted manifest stays inert as it should
         reg = store / ".registry.json"
-        reg.write_text(json.dumps({"corpora": [str(store.resolve())]}))
+        reg.write_text(json.dumps({"corpora": [str(store.resolve())],
+                                   "pins": {str(store.resolve()): memscan.config_digest(store.resolve())}}))
         r, _secs = _run_hook(cmd, payload, 30, LOCKET_HEALTH_DIR=str(store / ".health"),
                              LOCKET_REGISTRY=str(reg))
         if r is None:
@@ -1214,6 +1215,15 @@ def cmd_doctor():
         row("fail", "stores", "none found", "locket init <folder of markdown>")
     # A host store or a project memory is a store by convention and needs no manifest.
     conventional = set(memscan._raw_corpora().values())
+    # a store trusted by convention has no pin, so a rows file appearing in one is named
+    for d in sorted((memscan.CLAUDE / "projects").glob("*/memory")):
+        if (d / "triggers.json").is_file():
+            row("warn", "config", f"{d / 'triggers.json'} adds trigger rows to a project's auto-memory, "
+                "which is trusted without a pin; read it, and delete it if you did not write it")
+    unpinned = [r for r in memscan.registry() if str(r) not in memscan.registry_pins()]
+    if unpinned:
+        row("warn", "trust", f"{len(unpinned)} stores registered before 0.12 act as no store until pinned: "
+            + ", ".join(map(str, unpinned[:4])), "locket migrate  (at a terminal)")
     skipped = []
     for r in set(stores.values()):
         try:
@@ -1772,6 +1782,12 @@ def _selftest_body():
 
 
 def main(argv):
+    if not isinstance(sys.stdout, memscan.SafeOut):
+        sys.stdout = memscan.SafeOut(sys.stdout)    # nothing a store holds reaches a terminal raw
+    return _main(argv)
+
+
+def _main(argv):
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
         _parser()[0].print_help()
         return 0 if len(argv) > 1 else 1
@@ -1857,7 +1873,11 @@ def main(argv):
             print(f"index: {c} is no longer read; the index now lives in "
                   f"{memscan.REGISTRY.parent / 'cache'}. Delete it:  rm -r {shlex.quote(str(c))}")
         # 0.12: trust is pinned to a store's configuration; pin the rows that predate it
-        for d in memscan.pin_unpinned():
+        pinned = memscan.pin_unpinned()
+        if pinned is None:
+            print("trust: stores registered before 0.12 are unpinned and act as no store until a person "
+                  "runs  locket migrate  at a terminal")
+        for d in pinned or []:
             print(f"trust: pinned {d} to its configuration as it stands; a later change to its "
                   f"locket.json or rows file needs  locket trust {shlex.quote(str(d))}  again")
         # 0.12: a manifest acts only once a person trusts it; name the ones that stopped

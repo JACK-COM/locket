@@ -119,6 +119,7 @@ def _haystack(tool_input, fields):
     return " ".join(v for v in tool_input.values() if isinstance(v, str))
 
 
+TRANSCRIPT_TAIL = 8 * 1024 * 1024
 OVERLAP = 4096          # a match no longer than this is found across a window boundary
 MAX_WINDOWS = 16        # 1 MB of a call read, at most
 
@@ -131,13 +132,21 @@ def _search(pattern, text, flags=0, unread=True):
     so padding never stands in for the escape."""
     if len(text) <= memscan.MAX_SCAN:
         return re.search(pattern, text, flags) is not None
+    rx = re.compile(pattern, flags)
     step = memscan.MAX_SCAN - OVERLAP
     for i in range(MAX_WINDOWS):
         start = i * step
         if start >= len(text):
             return False
-        if re.search(pattern, text[start:start + memscan.MAX_SCAN], flags):
-            return True
+        end = min(start + memscan.MAX_SCAN, len(text))
+        # pos/endpos keep `^`, `\b` and lookbehind judged against the whole text; a match
+        # ending at an inner window's edge may owe that to the edge (`$`, a lookahead), so
+        # it is set aside: the next window, OVERLAP back, sees it with what follows it
+        for m in rx.finditer(text, start, end):
+            if m.end() < end or end == len(text):
+                return True
+        if end == len(text):
+            return False
     return unread
 
 
@@ -148,8 +157,11 @@ def _transcript_has(path, pattern):
         return False
     try:
         rx = re.compile(pattern)
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            return any(rx.search(line[:memscan.MAX_SCAN]) for line in fh)
+        with open(path, "rb") as fh:            # the last TRANSCRIPT_TAIL bytes, where a recent
+            fh.seek(0, os.SEEK_END)               # load or answer sits; never the whole log
+            fh.seek(max(0, fh.tell() - TRANSCRIPT_TAIL))
+            tail = fh.read().decode("utf-8", errors="replace")
+        return any(rx.search(line[:memscan.MAX_SCAN]) for line in tail.splitlines())
     except (OSError, re.error):
         return False
 
@@ -256,10 +268,18 @@ def _owner_missing(root, owner):
     return f"names a label no row of {path.name} carries: {label}"
 
 
+MAX_CAP = 40            # rows a file may run, whatever its `cap` says: each costs every call
+
+
+def _cap(data):
+    c = data.get("cap")
+    return min(c, MAX_CAP) if isinstance(c, int) and not isinstance(c, bool) and c > 0 else CAP
+
+
 def _show(path):
     home = str(Path.home())
     s = str(path)
-    return "~" + s[len(home):] if s.startswith(home + os.sep) else s
+    return memscan.relay("~" + s[len(home):] if s.startswith(home + os.sep) else s, 300)
 
 
 def fire(payload, host=None):
@@ -287,7 +307,7 @@ def fire(payload, host=None):
             continue        # a broken file never takes the tool down; `doctor` and `check` name it
         rows = [r for r in data.get("rows") or [] if isinstance(r, dict)
                 and all(isinstance(r.get(k), str) and r[k] for k in ("tools", "content", "question"))]
-        cap = data.get("cap") if isinstance(data.get("cap"), int) and data.get("cap") > 0 else CAP
+        cap = _cap(data)
         quiet = _quiet(cwd, data.get("quiet_under"))
         for row in rows[:cap]:
             if quiet and not row.get("everywhere"):
@@ -301,15 +321,15 @@ def fire(payload, host=None):
             line = (f"[{memscan.relay(row.get('id', 'trigger'), 60)}] "
                     f"{memscan.relay(row['question'], 2000, lines=True)}")
             if row.get("owner"):
-                path, label = _owner(root, row["owner"])
-                line += f"\n  -> {_show(path)}" + (f"#{label}" if label else "")
+                opath, label = _owner(root, row["owner"])
+                line += f"\n  -> {_show(opath)}" + (f"#{label}" if label else "")
             if row.get("pointer"):
                 line += f"\n  -> {memscan.relay(row['pointer'], 300)}"
             parts.append(line)
             block |= bool(row.get("block")) and event != "UserPromptSubmit"
         if len(rows) > cap:
             parts.append(f"[over-cap] {_show(path)} holds {len(rows)} rows and runs {cap}; these are not "
-                         f"running: {', '.join(str(r.get('id', '?')) for r in rows[cap:])}. Argue one out or "
+                         f"running: {memscan.relay(', '.join(str(r.get('id', '?')) for r in rows[cap:]), 400)}. Argue one out or "
                          f"raise `cap` deliberately.")
     return "\n".join(parts), block
 
@@ -362,7 +382,7 @@ def findings(root):
     import _manifest_schema
     out = [f"{_show(path)}: {f}" for f in _manifest_schema.check_value(data, SCHEMA, "")]
     rows = [r for r in data.get("rows") or [] if isinstance(r, dict)]
-    cap = data.get("cap") if isinstance(data.get("cap"), int) and data.get("cap") > 0 else CAP
+    cap = _cap(data)
     if len(rows) > cap:
         out.append(f"{_show(path)}: {len(rows)} rows against a cap of {cap}; the last {len(rows) - cap} never run")
     seen = set()

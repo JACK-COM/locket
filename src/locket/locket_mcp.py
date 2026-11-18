@@ -59,7 +59,7 @@ def _store(name):
 
 def _capture(fn, *a, **kw):
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
+    with contextlib.redirect_stdout(memscan.SafeOut(buf)):
         fn(*a, **kw)
     return buf.getvalue()
 
@@ -99,8 +99,10 @@ def t_forget(args):
     d = str(args.get("path") or "").strip()
     if not d:
         raise ValueError("path is required")
-    return (f"{d}: registry row removed and its trust withdrawn. Its locket.json stays, inert."
-            if memscan.forget(d) else f"{d} is not in the registry")
+    if any(memscan._same(Path(d).expanduser(), r) for r in memscan.registry()):
+        return (f"{d} is trusted, and withdrawing a store's guardrails is a person's act: ask the user "
+                f"to run  locket untrust {d}  at a terminal")
+    return f"{d} is not in the registry"
 
 
 def t_find(args):
@@ -396,10 +398,12 @@ def selftest():
     # on whatever shape that store happened to have on the machine running it.
     root = scratch / "store"
     # the store a person trusted: registered in the scratch registry the server reads
-    (scratch / "corpora.json").write_text(json.dumps({"corpora": [str(root.resolve())]}))
     root.mkdir()
     (root / memscan.MANIFEST).write_text(json.dumps({
         "index_files": [], "ledger_surfaces": [], "holding_spaces": ["INBOX.md"]}))
+    # the store a person trusted, pinned to its manifest, in the scratch registry the server reads
+    (scratch / "corpora.json").write_text(json.dumps({
+        "corpora": [str(root.resolve())], "pins": {str(root.resolve()): memscan.config_digest(root.resolve())}}))
     (root / "facts.md").write_text(
         "The default execution path is the dossier pipeline run interactively.\n"
         "Silhouette glyphs scale by wingspan across the comparison cards.\n")
@@ -465,7 +469,7 @@ def selftest():
     assert "vault" not in r["result"]["content"][0]["text"], r["result"]["content"][0]["text"]
     r = call({"jsonrpc": "2.0", "id": 14, "method": "tools/call",
               "params": {"name": "locket_forget", "arguments": {"path": str(root)}}})
-    assert "row removed" in r["result"]["content"][0]["text"], r
+    assert "person's act" in r["result"]["content"][0]["text"], r      # an agent cannot withdraw trust
     r = call({"jsonrpc": "2.0", "id": 8, "method": "nope"})
     assert r["error"]["code"] == -32601, r
     p.stdin.close(); p.wait(timeout=10)
