@@ -20,11 +20,13 @@ import memscan  # noqa: E402
 
 BASH = shutil.which("bash")
 CASES = 250
-WORDS = ["A", "A-B", "E.1"]
+WORDS = ["A", "A-B", "E.1", "EF"]
 OPENERS = ["cat <<{w}", "cat <<-{w}", "cat <<'{w}'", 'cat <<"{w}"', "cat <<\\{w}", "cat << {w}",
            "cat <<{w}; cat <<{v}", "cat <<{w} # note", "cat<<{w}",
            "cat <<<{w}", "cat <<< {w}", 'echo "x <<{w}"', "echo 'x <<{w}'", "# <<{w}",
-           "echo $((1<<2))"]
+           "echo $((1<<2))", "echo ${{x//<<{w}/y}}", "echo ${{x// << {w}/y}}", "echo $[1<<2]",
+           "echo $[ 1 << 2 ]", "a[1<<2]=3", "x=abcdefgh; echo ${{x:1<<1:2}}", "cat <<$'{w}'",
+           "cat <<E\\\nF", 'echo "${{x:-<<{w}}}"']
 CLOSERS = ["{w}", "\t{w}", "{w} ", " {w}"]
 # The trust verb is built from parts: bashguard refuses a command that names it, and
 # this file is read by commands.
@@ -124,6 +126,26 @@ class Bodies(unittest.TestCase):
         # the body's own quote must not open a string that runs past the delimiter
         cmd = 'git commit -m "$(cat <<\'EOF\'\nsays "hi\nEOF\n)"\ncd /elsewhere\n'
         self.assertIn("cd /elsewhere", memscan._shell_code(cmd))
+
+
+class Comments(unittest.TestCase):
+    def test_an_escaped_hash_starts_no_comment(self):
+        for cmd in ("echo a\\ #b; echo L1", "echo a\\\n#b; echo L1", "echo ${x:- #}; echo L1"):
+            self.assertIn("echo L1", memscan._shell_code(cmd), cmd)
+
+    def test_a_cd_after_an_escaped_hash_moves(self):
+        self.assertEqual(memscan._cd_targets("echo a\\ #b; cd /x\n", "/y"), ["/x"])
+
+
+class Interpreters(unittest.TestCase):
+    def test_body_is_code_where_its_pipeline_runs_an_interpreter(self):
+        for cmd in ("env bash <<EOF\n" + VERB + "\nEOF", "cat <<EOF | sh\n" + VERB + "\nEOF",
+                    'bash -c "$(cat <<EOF\n' + VERB + '\nEOF\n)"'):
+            self.assertTrue(TrustVerbHidden.seen(None, cmd), cmd)
+
+    def test_a_script_name_is_no_interpreter(self):
+        for cmd in ("cat <<EOF > run.sh\n" + VERB + "\nEOF", "cat <<EOF > node-notes.md\n" + VERB + "\nEOF"):
+            self.assertFalse(TrustVerbHidden.seen(None, cmd), cmd)
 
 
 class Segments(unittest.TestCase):

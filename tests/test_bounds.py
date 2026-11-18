@@ -25,6 +25,7 @@ SHAPES = {
     "a deep chain of cd": ("bash_write_targets", "'cd x; ' * 5000 + 'cp a.md b.md; ' * 1500"),
     "30,000 unclosed parens": ("bash_write_targets", "'((' * 15000 + ' x > a.md'"),
     "10,000 heredoc openers on one line": ("bash_write_targets", "'cat <<a ' * 10000 + '\\n' + 'a\\n' * 10000"),
+    "15,000 nested quoted substitutions": ("bash_write_targets", "'cd x; ' + '\"$(' * 15000 + ')\"' * 15000 + ' > a.md'"),
     "20,000 redirects before a csv": ("ledger_bash_decision", "'>' * 20000 + ' a.csv'"),
     "25,000 unpunctuated lines": ("unwrap", "('w ' * 8 + '\\n') * 25000"),
     "a long indented line then 5,000 wraps": ("unwrap", "' ' * 100000 + 'x\\n' + 'w\\n' * 5000"),
