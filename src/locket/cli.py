@@ -6,6 +6,7 @@ print help, so a hook verb dispatched on every tool call never pays for it.
 import sys
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import commands
 import fsio
@@ -18,7 +19,7 @@ FAMILIES = (meaning, overlap, hygiene, hooks, stores, settings, machine)
 SCRIPTS = {"find": "memfind", "scan": "memscan"}      # a family's SEE, and the script it names
 
 
-def _help(rest):
+def _help(rest: list[str]) -> int:
     which = rest[0] if rest else ""
     which = {"memfind": "find", "memscan": "scan"}.get(which, which)
     v = _BY_NAME.get(which)
@@ -34,12 +35,12 @@ def _help(rest):
     return 0
 
 
-def _scan_help():
+def _scan_help() -> int:
     print(help_text.usage())
     return 0
 
 
-def _manifest_help():
+def _manifest_help() -> int:
     print(help_text.manifest_help(), end="")
     return 0
 
@@ -62,7 +63,7 @@ _SEE = {v.name: getattr(f, "SEE", "") for f in FAMILIES for v in f.VERBS}
 
 
 @lru_cache(maxsize=None)
-def parser():
+def parser() -> tuple[Any, Any]:
     """(the top-level parser, its subparsers action), every listed verb a subparser."""
     import argparse
     fmt = argparse.RawDescriptionHelpFormatter
@@ -85,11 +86,11 @@ def parser():
     return p, sub
 
 
-def _subparser(name):
+def _subparser(name: str) -> Any:
     return parser()[1].choices[name]
 
 
-def wants_help(name, rest):
+def wants_help(name: str, rest: list[str]) -> bool:
     """A help request anywhere after a listed verb, trailing included, so none reaches a
     verb as a corpus or path: `-h` or `--help`, or a bare `help` unless something named
     `help` exists here to be the directory or file it names. A quoted first argument
@@ -103,7 +104,7 @@ def wants_help(name, rest):
     return "help" in (rest[1:] if v.args.startswith('"') else rest) and not Path("help").exists()
 
 
-def dispatch(name, rest):
+def dispatch(name: str, rest: list[str]) -> int:
     """Run one verb by any of its spellings: its name, an older alias, or a dashed form
     (`--index`, `--selftest`, `--version`, `-V`, `-v`)."""
     if name in ("-V", "-v"):
@@ -119,7 +120,7 @@ def dispatch(name, rest):
     return v.run(rest)
 
 
-def main(argv, version=""):
+def main(argv: list[str], version: str = "") -> int:
     commands.VERSION = version
     if not isinstance(sys.stdout, fsio.SafeOut):
         sys.stdout = fsio.SafeOut(sys.stdout)       # nothing a store holds reaches a terminal raw

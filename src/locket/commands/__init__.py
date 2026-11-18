@@ -9,7 +9,8 @@ CLI prints and the MCP server returns as text.
 import os
 import sys
 from io import StringIO
-from typing import Callable, NamedTuple, Optional
+from pathlib import Path
+from typing import Any, Callable, NamedTuple, Optional
 
 import corpora
 import corpus
@@ -27,10 +28,10 @@ class Report:
         self.lines, self.count = lines, count
 
     @property
-    def text(self):
+    def text(self) -> str:
         return "\n".join(self.lines)
 
-    def show(self):
+    def show(self) -> None:
         """Print the lines as the CLI shows them; nothing at all for an empty report."""
         if self.lines:
             print(self.text)
@@ -77,14 +78,14 @@ class Verb(NamedTuple):
 
 # ---------------------------------------------------------------- the CLI's corpus argument
 
-def corpus_verb(fn, header=True):
+def corpus_verb(fn: Callable[[Path, list[str]], Report], header: bool = True) -> Callable[[list[str]], int]:
     """`run` for a verb over one store: `fn(root, rest)` returns its `Report`. The corpus
     argument is a name, a path or `all` (every store holding markdown, one after another);
     omitted, it is the store the current directory sits in, never a fixed one, so the
     verb run in another repo never sweeps this one and reports it as that repo's.
     `header` prints the directory resolved and whether the write hook reaches it, because
     a literal path can name a directory the hook never guards."""
-    def run(rest):
+    def run(rest: list[str]) -> int:
         if rest[:1] == ["all"]:
             rc = 0
             for k, v in sorted(corpora.all_corpora().items()):
@@ -113,7 +114,7 @@ def corpus_verb(fn, header=True):
     return run
 
 
-def floor_arg(rest, default):
+def floor_arg(rest: list[str], default: float) -> float:
     """An optional similarity floor as the first argument after the corpus."""
     return float(rest[0]) if rest else default
 
@@ -125,7 +126,7 @@ STORE_ARG = {"type": "string", "description":
              "Omit it when the machine has one store."}
 
 
-def store_root(name):
+def store_root(name: Optional[str]) -> Path:
     """A store's path from a name, or the only store on the machine when no name is
     given, else an error naming what the model can call next."""
     if name:
@@ -140,7 +141,7 @@ def store_root(name):
                      + ", ".join(sorted(found)) + ", or 'all'")
 
 
-def as_text(report):
+def as_text(report: Report) -> str:
     """A report as the text the CLI prints, through the same SafeOut filter, so store
     text never reaches the model raw."""
     buf = StringIO()
@@ -149,7 +150,7 @@ def as_text(report):
     return buf.getvalue()
 
 
-def over_stores(name, fn):
+def over_stores(name: Optional[str], fn: Callable[[Path], Report]) -> str:
     """A report over one store or, for 'all', every store with markdown."""
     if name == "all":
         out = [f"== {k}\n" + as_text(fn(v)) for k, v in sorted(corpora.all_corpora().items())
@@ -158,7 +159,7 @@ def over_stores(name, fn):
     return as_text(fn(store_root(name)))
 
 
-def report_tool(description, fn, **props):
+def report_tool(description: str, fn: Callable[[Path, dict], Report], **props: Any) -> Tool:
     """A `Tool` running `fn(root, args)` over the store the call names, or every store."""
     return Tool(description, lambda a, s: over_stores(a.get("store"), lambda r: fn(r, a)),
                 {"store": STORE_ARG, **props})
