@@ -22,6 +22,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import hosts  # noqa: E402
 import memscan  # noqa: E402
 import paths  # noqa: E402
 import _settings  # noqa: E402
@@ -368,12 +369,12 @@ def cmd_install(argv=()):
                   f'        {{"fileMatch": ["locket.json", "memfind.json"], "url": "file://{paths.PATHS.schema_file}"}}')
     print(_embedder_line())
     if "--hooks" in argv:
-        rc |= _merge_json(memscan.CLAUDE / "settings.json", _add_claude_hooks)
+        rc |= _merge_json(hosts.claude() / "settings.json", _add_claude_hooks)
     if "--codex" in argv:
-        rc |= _merge_json(memscan.CODEX / "hooks.json", _add_codex_hooks)
+        rc |= _merge_json(hosts.codex() / "hooks.json", _add_codex_hooks)
         print("Codex runs a hook only once it is trusted: start `codex`, run /hooks, and trust "
               "each Locket entry. A later change to an entry asks again; an upgrade does not")
-        profiles = sorted(f.name for f in memscan.CODEX.glob("*.config.toml"))
+        profiles = sorted(f.name for f in hosts.codex().glob("*.config.toml"))
         if profiles:
             print(f"Codex profile config found ({', '.join(profiles)}): trust given in /hooks under --profile "
                   "(as `ollama launch codex` runs it) is written there and lapses on restart; copy its "
@@ -526,11 +527,11 @@ def cmd_uninstall(argv):
     locket_dir = paths.PATHS.state
     caches = _caches()
     manifests = _manifests()
-    settings = memscan.CLAUDE / "settings.json"
+    settings = hosts.claude() / "settings.json"
     hook_lines, new_settings = _settings_hooks(settings) if settings.is_file() else ([], None)
-    codex_cfg = memscan.CODEX / "hooks.json"
+    codex_cfg = hosts.codex() / "hooks.json"
     codex_lines, new_codex = _settings_hooks(codex_cfg) if codex_cfg.is_file() else ([], None)
-    hermes_cfg = memscan.HERMES / "config.yaml"
+    hermes_cfg = hosts.hermes() / "config.yaml"
     hermes_lines = _hermes_lines(hermes_cfg) if hermes_cfg.is_file() else []
     desktop = DESKTOP_CONFIG
     mcp = False
@@ -1061,7 +1062,7 @@ def _codex_trust(timeout=20):
     try:
         p = subprocess.Popen([exe, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
-                             env={**os.environ, "CODEX_HOME": str(memscan.CODEX)},
+                             env={**os.environ, "CODEX_HOME": str(hosts.codex())},
                              start_new_session=True)    # an npm launcher's native child dies with it
     except OSError:
         return None
@@ -1087,7 +1088,7 @@ def _codex_trust(timeout=20):
         for m in ({"id": 1, "method": "initialize", "params": {"clientInfo": {
                        "name": "locket-doctor", "title": None, "version": __version__}, "capabilities": None}},
                   {"method": "initialized"},
-                  {"id": 2, "method": "hooks/list", "params": {"cwds": [str(memscan.CODEX)]}}):
+                  {"id": 2, "method": "hooks/list", "params": {"cwds": [str(hosts.codex())]}}):
             p.stdin.write(json.dumps(m) + "\n"); p.stdin.flush()
             if m.get("id") == 1 and reply_to(1) is None:
                 return None
@@ -1183,7 +1184,7 @@ def cmd_doctor():
     # A host store or a project memory is a store by convention and needs no manifest.
     conventional = set(memscan._raw_corpora().values())
     # a store trusted by convention has no pin, so a rows file appearing in one is named
-    for d in sorted((memscan.CLAUDE / "projects").glob("*/memory")):
+    for d in sorted((hosts.claude() / "projects").glob("*/memory")):
         if (d / "triggers.json").is_file():
             row("warn", "config", f"{d / 'triggers.json'} adds trigger rows to a project's auto-memory, "
                 "which is trusted without a pin; read it, and delete it if you did not write it")
@@ -1279,8 +1280,8 @@ def cmd_doctor():
     elif sizes:
         row("ok", "csv size", f"{len(sizes)} declared CSV(s), every one under {reading}")
 
-    settings = memscan.CLAUDE / "settings.json"
-    if memscan.CLAUDE.is_dir():
+    settings = hosts.claude() / "settings.json"
+    if hosts.claude().is_dir():
         hooks = _registered_hooks(settings) if settings.is_file() else {}
         if hooks is None:
             row("fail", "claude hooks", f"{settings} is not valid JSON", f"fix {settings}, then locket install --hooks")
@@ -1367,8 +1368,8 @@ def cmd_doctor():
         row("ok", "hook health", "no hook run abandoned or failed open " +
             (f"since {rec.get('since', '?')}" if rec else "on record"))
 
-    codex_cfg = memscan.CODEX / "hooks.json"
-    if memscan.CODEX.is_dir():
+    codex_cfg = hosts.codex() / "hooks.json"
+    if hosts.codex().is_dir():
         hooks = _registered_hooks(codex_cfg) if codex_cfg.is_file() else {}
         missing = [v for _, v, _t in CLAUDE_HOOKS if v not in hooks] if hooks is not None else []
         if hooks is None:
@@ -1382,7 +1383,7 @@ def cmd_doctor():
                 # whether Codex will dispatch it is trust, which only Codex's own hooks/list may say
                 trust = _codex_trust()
                 lapsed = [k for k, s in (trust or {}).items() if s != "trusted"]
-                gap = _profile_trust_gap(memscan.CODEX, lapsed) if lapsed else {}
+                gap = _profile_trust_gap(hosts.codex(), lapsed) if lapsed else {}
                 if not trust:               # {} too: a reply naming no Locket entry proves nothing
                     row("warn", "codex hooks", "registered, and the write hook fires on a known fork in a patch; "
                         "Codex could not report trust, and skips a hook until it is trusted",
@@ -1416,7 +1417,7 @@ def cmd_doctor():
                 row("ok", f"{label} entries", "every Locket entry, under every event, runs")
 
     import trigger
-    rows_path = trigger.rows_file(memscan.CLAUDE)
+    rows_path = trigger.rows_file(hosts.claude())
     if rows_path.is_file():
         try:
             events = (json.loads(settings.read_text()).get("hooks") or {}) if settings.is_file() else {}
@@ -1424,7 +1425,7 @@ def cmd_doctor():
             events = None
         unregistered = [e for e, _m in CLAUDE_TRIGGER
                         if events is not None and not _trigger_command(events.get(e) if isinstance(events, dict) else None)]
-        problems = trigger.findings(memscan.CLAUDE)
+        problems = trigger.findings(hosts.claude())
         if unregistered:
             row("fail", "triggers", f"{rows_path} has rows, but the hook is not registered for "
                 f"{' or '.join(unregistered)}", "locket install --hooks")
@@ -1440,7 +1441,7 @@ def cmd_doctor():
                     f"run it by hand: {_trigger_command(events.get('PreToolUse'))}")
 
     import time
-    if memscan.CLAUDE.is_dir():
+    if hosts.claude().is_dir():
         try:
             events = (json.loads(settings.read_text()).get("hooks") or {}) if settings.is_file() else {}
             registered = _event_command(events.get(CLAUDE_USAGE[0]), CLAUDE_USAGE[1])
@@ -1458,7 +1459,7 @@ def cmd_doctor():
         else:
             row("ok", "usage", f"recorded as each session ends; {seen}")
 
-    hermes_cfg = memscan.HERMES / "config.yaml"
+    hermes_cfg = hosts.hermes() / "config.yaml"
     if hermes_cfg.is_file():
         events = _hermes_hooks(hermes_cfg.read_text(errors="replace"))
         missing = [f"{v} on {e}" for e, v in HERMES_HOOKS
@@ -1472,8 +1473,8 @@ def cmd_doctor():
         else:
             row("ok", "hermes hooks", "all five registered")
         cmd = next((c for c in events.get("pre_tool_call", []) if _is_locket_hook(c, "trigger")), None)
-        hermes_rows = trigger.rows_file(memscan.HERMES)
-        problems = trigger.findings(memscan.HERMES)
+        hermes_rows = trigger.rows_file(hosts.hermes())
+        problems = trigger.findings(hosts.hermes())
         if problems:
             row("fail", "hermes triggers", f"{len(problems)} problem(s) in {hermes_rows}: {problems[0]}",
                 "locket trigger check hermes")

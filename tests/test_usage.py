@@ -25,7 +25,7 @@ def _suite():
         (proj / "s1/subagents").mkdir(parents=True)
         today = dt.date.today()
         ts = lambda d: dt.datetime.combine(today - dt.timedelta(days=d), dt.time(12)).astimezone().isoformat()
-        cwd = str(memscan.HOME / "code/app")
+        cwd = str(paths.HOME / "code/app")
 
         def resp(i, d, sid="s1", model="claude-x", **u):
             return json.dumps({"type": "assistant", "timestamp": ts(d), "cwd": cwd, "sessionId": sid,

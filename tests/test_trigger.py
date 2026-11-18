@@ -7,6 +7,7 @@ from pathlib import Path
 
 from tests.harness import fixture_env
 
+import hosts  # noqa: E402
 import memscan  # noqa: E402
 import paths  # noqa: E402
 import trigger as tg  # noqa: E402
@@ -85,14 +86,14 @@ def _suite():
             "a Hermes tool with no Claude Code twin was not matched by its own name"
         assert "[hermes-raw]" in herm("patch", {"path": "x.md", "new_string": "zzz"})[0], \
             "a row naming a mapped Hermes tool by its own name did not fire"
-        saved_homes = memscan.CLAUDE, memscan.HERMES
-        memscan.CLAUDE, memscan.HERMES = other, host
+        saved_homes = dict(paths.PATHS.host_stores)
+        paths.PATHS.host_stores.update(council=other, hermes=host)
         try:
             assert "[git-reset]" in tg.fire({"hook_event_name": "pre_tool_call", "tool_name": "terminal",
                                           "tool_input": {"command": "git reset --hard"}, "cwd": str(other)})[0], \
                 "a Hermes call did not read Hermes's own rows"
         finally:
-            memscan.CLAUDE, memscan.HERMES = saved_homes
+            paths.PATHS.host_stores.clear(); paths.PATHS.host_stores.update(saved_homes)
         import sqlite3
         con = sqlite3.connect(host / "state.db")
         con.execute("create table messages (session_id text, role text, content text, tool_calls text)")

@@ -50,8 +50,8 @@ from collections import Counter, defaultdict
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
+import hosts
 import paths
-from paths import CLAUDE, CODEX, HERMES, HOME
 # A per-corpus manifest, optional. Its presence makes ANY directory a corpus for
 # the write-time gate and for a literal path, so a memory store on a host this
 # file has never heard of is covered by writing one file into it; its absence
@@ -86,49 +86,6 @@ def has_manifest(root):
 # directory IS a corpus, so a row whose manifest is gone is reported, never
 # trusted. Lives beside memfind's venv, outside every corpus; `LOCKET_REGISTRY`
 # points a test at a scratch one.
-# Each host's core directory is its council store, found without a manifest:
-# the whole of `~/.claude` (memory, rules, skills, agents and their memories,
-# the constitution at its root) is one corpus, so a rule restating a memory
-# fact draws the write-time nudge instead of surfacing only in `across`.
-# Claude Code's per-project auto-memory is derived from the path instead
-# (`corpus_for`) and is a store of its own, never a member of council.
-# What counts as corpus INSIDE a host's core directory. The home is mostly host
-# state (sessions, caches, plugins, transcripts, the project stores above), and
-# the host adds directories between releases, so the default is an allowlist:
-# a directory not named here is out until a manifest's `members` lets it in,
-# which fails by omission where a denylist leaks every new directory silently.
-# Root-level markdown (CLAUDE.md, SOUL.md, AGENTS.md) is always in. Hermes's and
-# Codex's `skills/` are bundled with the agent rather than authored, so they are out.
-HOST_MEMBERS = {
-    CLAUDE: {"memory", "rules", "skills", "agents", "agent-memory"},
-    HERMES: {"memories"},
-    CODEX: {"memories"},
-}
-# Host state that lives INSIDE a member and is excluded whatever a manifest
-# says, like `.memfind`: Claude Code mirrors the account's synced skills into
-# `skills/synced/<bucket>/`, a verbatim copy of the live skill bodies, so every
-# skill paired against itself at 1.00 on the first audit of the whole home.
-HOST_EXCLUDED = {
-    CLAUDE: {"synced"},
-}
-# Shorthands for the CLI only. Any other argument is taken as a literal path, so
-# `memscan audit ~/.claude/projects/<slug>/memory` works without a name here.
-# Directories inside a corpus that are deliberately NOT deduplicated. An archive
-# is a verbatim copy of superseded text, so it duplicates by design and would trip
-# on every write; an in-flight investigation thread appends until it closes
-# (prime-memory-discipline §6); `discovery-research` holds Mode-2 angle files the
-# surveillance cycle appends to on a schedule, with no session in front of it to
-# read a nudge that BLOCKS the write. The cache directory is never prose.
-# Trees a package manager or a build writes: never prose, and their READMEs and
-# changelogs would score as claims against the store they sit in. Unioned into
-# every store's exclusions rather than defaulted, because a manifest's own
-# `excluded_dirs` replaces the defaults and must not re-admit them. A dotted
-# directory (.venv, .build, .git) is already skipped by name.
-DEPENDENCY_DIRS = {"node_modules", "bower_components", "jspm_packages", "vendor",
-                   "Pods", "Carthage", "DerivedData", "venv", "site-packages",
-                   "__pycache__", "build", "dist"}
-EXCLUDED_DIRS = {"archive", "in-flight", "harness-logs", "discovery-research", ".memfind",
-                 "backups", "backup"}   # a backup is a verbatim copy, so it forks by design
 
 
 def _registry_data():
@@ -213,8 +170,8 @@ def _trusted_ids():
         key = (str(paths.PATHS.registry), None, None)
     key += tuple(str(p) for p in paths.PATHS.host_stores.values())
     if key not in _TRUST_CACHE:
-        hosts = {_inode(p) for p in paths.PATHS.host_stores.values()}
-        hosts.discard(None)
+        host_ids = {_inode(p) for p in paths.PATHS.host_stores.values()}
+        host_ids.discard(None)
         pins = registry_pins()
         rows = {}
         for p in registry():
@@ -222,7 +179,7 @@ def _trusted_ids():
             if ident is not None:
                 rows[ident] = pins.get(str(p))
         _TRUST_CACHE.clear()
-        _TRUST_CACHE[key] = (hosts, rows)
+        _TRUST_CACHE[key] = (host_ids, rows)
     return _TRUST_CACHE[key]
 
 
@@ -241,13 +198,13 @@ def _granted(d):
     ident = _inode(d)
     if ident is None:
         return False
-    hosts, rows = _trusted_ids()
-    if ident in hosts:
+    host_ids, rows = _trusted_ids()
+    if ident in host_ids:
         return True
     if ident in rows:
         pin = rows[ident]
         return pin is not None and pin == config_digest(d)
-    return d.name == "memory" and _inode(d.parent.parent) == _inode(CLAUDE / "projects")
+    return d.name == "memory" and _inode(d.parent.parent) == _inode(hosts.claude() / "projects")
 
 
 def changed_since_trust(d):
@@ -429,7 +386,7 @@ def session_dirs():
         except OSError:                     # a transcript rotated away mid-scan
             return 0.0
 
-    for proj in (CLAUDE / "projects").glob("*"):
+    for proj in (hosts.claude() / "projects").glob("*"):
         hit = _unslug(proj.name)
         if hit:
             out.add(hit)
@@ -439,12 +396,12 @@ def session_dirs():
             if cwd:
                 out.add(cwd)
                 break
-    rollouts = sorted((CODEX / "sessions").glob("*/*/*/*.jsonl"), reverse=True)
+    rollouts = sorted((hosts.codex() / "sessions").glob("*/*/*/*.jsonl"), reverse=True)
     for f in rollouts[:500]:
         cwd = _first_cwd(f, limit=1)
         if cwd:
             out.add(cwd)
-    db = HERMES / "state.db"
+    db = hosts.hermes() / "state.db"
     try:
         import sqlite3
     except ImportError:                     # a Python built without it reads no Hermes record
@@ -472,7 +429,7 @@ def untrusted_stores():
             if p in seen:
                 break
             seen.add(p)
-            if p == HOME or p == p.parent:
+            if p == paths.HOME or p == p.parent:
                 break
             if has_manifest(p) and not _granted(p):
                 found.add(p)
@@ -599,7 +556,7 @@ def _raw_corpora():
     # a project's name yields to a host key and to a registered store's name, which
     # a `belongs_to` elsewhere may already point at
     taken = set(paths.PATHS.host_stores) | {_read_manifest(p).get("name") for p in reg}
-    for d in sorted((CLAUDE / "projects").glob("*/memory")):
+    for d in sorted((hosts.claude() / "projects").glob("*/memory")):
         name = _read_manifest(d).get("name")
         ok = isinstance(name, str) and name and name not in taken and name not in out
         out[name if ok else d.parent.name] = d
@@ -753,7 +710,7 @@ def resolve(name):
     # sibling slug containing it (`-…-DevDocs` opening `-…-DevDocs-Persona`), and
     # `devdocs` beside `devdocs-persona` is not ambiguous. Slugs come only from
     # `projects/`, or a registered `~/vault/memory` would answer to `vault`.
-    slugs = {d.parent.name: d for d in listed.values() if d.parent.parent == CLAUDE / "projects"}
+    slugs = {d.parent.name: d for d in listed.values() if d.parent.parent == hosts.claude() / "projects"}
     exact, part = (lambda k: k.lower() == low), (lambda k: low in k.lower())
     hits = {}
     for keyed, test in ((listed, exact), (slugs, exact), (listed, part), (slugs, part)):
@@ -778,7 +735,7 @@ def corpus_for_cwd(cwd):
     replacing every non-alphanumeric character with a dash.
     """
     slug = re.sub(r"[^A-Za-z0-9]", "-", str(Path(cwd).resolve()))
-    d = CLAUDE / "projects" / slug / "memory"
+    d = hosts.claude() / "projects" / slug / "memory"
     return top_of(d) if d.is_dir() else None
 
 
@@ -827,7 +784,7 @@ def _phys_root_of(d):
     store, a directory holding a manifest, or Claude Code's
     `~/.claude/projects/<slug>/memory`. Membership, exclusion and the walk are
     the physical store's; the corpus it belongs to is `top_of` it."""
-    projects = CLAUDE / "projects"
+    projects = hosts.claude() / "projects"
     stores = set(paths.PATHS.host_stores.values())
     if len(str(d)) > PATH_MAX:              # no file lives there; walking it cost a stat per part
         return None
@@ -1061,15 +1018,13 @@ def _own_walk(root, m=None):
     m = _read_manifest(root) if m is None else m
     mem = m.get("members")
     members = ({str(x) for x in mem if isinstance(x, str) and _inside(x)} if isinstance(mem, list)
-               else (set(HOST_MEMBERS[Path(root)]) if root is not None
-                     and Path(root) in HOST_MEMBERS else None))
+               else hosts.members_of(root))
     val = m.get("excluded_dirs")
-    excluded = {str(x) for x in val} if isinstance(val, list) else set(EXCLUDED_DIRS)
+    excluded = {str(x) for x in val} if isinstance(val, list) else set(hosts.EXCLUDED_DIRS)
     excluded.add(".memfind")                  # the cache is never prose, whatever the manifest says
-    if root is not None and Path(root) in HOST_EXCLUDED:
-        excluded |= HOST_EXCLUDED[Path(root)]
+    excluded |= hosts.excluded_of(root)
     excluded.update({"backups", "backup"})    # nor is a backup, which forks by design
-    excluded |= DEPENDENCY_DIRS               # nor a dependency or build tree, whatever the manifest says
+    excluded |= hosts.DEPENDENCY_DIRS               # nor a dependency or build tree, whatever the manifest says
     return members, excluded
 
 
@@ -1913,7 +1868,7 @@ def project_dir_for(corpus_root):
     splitting only guesses.
     """
     try:
-        rel = Path(corpus_root).resolve().relative_to((CLAUDE / "projects").resolve())
+        rel = Path(corpus_root).resolve().relative_to((hosts.claude() / "projects").resolve())
     except (ValueError, OSError):
         return None
     rest, cur = rel.parts[0].lstrip("-"), Path("/")
@@ -1982,7 +1937,7 @@ def _own_code_roots(corpus_root):
     proj = project_dir_for(corpus_root)
     if proj:
         roots.append((proj, frozenset()))
-    for home in (CLAUDE, HERMES):
+    for home in (hosts.claude(), hosts.hermes()):
         if home.is_dir():
             roots.append((home, CLAUDE_SKIP))
     return roots
@@ -2352,7 +2307,7 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
     the three built-in ledgers, writing a manifest even on a store by convention,
     because asking for ledgers is asking for configuration."""
     d = Path(target).expanduser()
-    if d.is_dir() and d.resolve() in (Path("/"), HOME.resolve()):
+    if d.is_dir() and d.resolve() in (Path("/"), paths.HOME.resolve()):
         print(f"{d} is too broad to be a store; init the folder that holds the memory", file=sys.stderr)
         return 1
     if not d.is_dir():
@@ -2475,7 +2430,7 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
     by_convention = inside == d and not m.is_file()
     if m.is_file():
         by_convention = d in set(paths.PATHS.host_stores.values()) or (
-            d.name == "memory" and d.parent.parent == CLAUDE / "projects")
+            d.name == "memory" and d.parent.parent == hosts.claude() / "projects")
         man = _manifest_data(d)
         if name is not None and man.get("name") != name:
             write_store_file(m, json.dumps({**man, "name": name}, indent=2) + "\n")
@@ -3407,7 +3362,7 @@ def session_asked(payload):
     if payload.get("transcript_path"):
         return memfind_asked(payload.get("transcript_path"))
     if payload.get("session_id") and payload.get("_host") == "hermes":
-        return memfind_asked_db(HERMES / "state.db", payload.get("session_id"))
+        return memfind_asked_db(hosts.hermes() / "state.db", payload.get("session_id"))
     if payload.get("_host") == "mcp":       # the server lives the session and keeps count
         return bool(payload.get("_asked"))
     return True
@@ -4269,7 +4224,7 @@ def _expand_home(tok):
     tok = tok.replace('"', "").replace("'", "")     # `"$HOME/dir"/f.md` quotes mid-token
     for pre in ("${HOME}", "$HOME"):
         if tok == pre or tok.startswith(pre + "/"):
-            tok = str(HOME) + tok[len(pre):]
+            tok = str(paths.HOME) + tok[len(pre):]
     # os.path, not Path: an unknown `~user` stays literal, as the shell leaves it,
     # where Path.expanduser raises and silently disables the guard for the command
     return os.path.expanduser(tok) if tok.startswith("~") else tok
@@ -4361,7 +4316,7 @@ def _cd_timeline(command, cwd):
             d = command[m.start(2):m.end(2)].strip() if m.group(2) is not None else ""
             d = d or None
             if d is None or d == "~":
-                here = str(HOME)
+                here = str(paths.HOME)
             elif any(c in d for c in "$`(") and not d.strip("'\"").startswith(("$HOME", "${HOME}")):
                 here = None
             elif d == "-":
@@ -5607,7 +5562,7 @@ def normalise(payload):
             if isinstance(txt, str):
                 added.append(txt)
         target = ti.get("target") or "memory"   # top-level in both shapes
-        ti = {"file_path": str(HERMES / "memories" / ("USER.md" if target == "user" else "MEMORY.md"))}
+        ti = {"file_path": str(hosts.hermes() / "memories" / ("USER.md" if target == "user" else "MEMORY.md"))}
         if old:                              # replace: an Edit with its anchor
             ti.update(old_string="\n".join(old), new_string="\n".join(added))
         else:                                # add: an append, so the hook sees
@@ -5701,7 +5656,7 @@ def hermes_shown(session_id, message, since, db=None):
     carries the start of `message`: True, False, or None when state.db cannot say.
     Hermes stores a blocked call's message as that call's result, JSON-encoded,
     before the next tool round runs."""
-    db = HERMES / "state.db" if db is None else Path(db)
+    db = hosts.hermes() / "state.db" if db is None else Path(db)
     if not session_id or not db.is_file():
         return None
     head = message[:300]            # stored JSON-encoded, so it is read back through json
@@ -5767,14 +5722,14 @@ def gate_status():
     """One line per host on whether the 2e question gate can see a session here,
     and whether a non-blocking nudge has a way to reach the model."""
     lines = []
-    if CLAUDE.is_dir():
+    if hosts.claude().is_dir():
         lines.append("2e gate on Claude Code: armed (reads the session transcript "
                      "Claude Code hands the hook); nudges reach the model on the write")
-    if CODEX.is_dir():
+    if hosts.codex().is_dir():
         lines.append("2e gate on Codex: armed (reads the rollout transcript Codex hands the "
                      "hook); nudges reach the model on the write, once /hooks has trusted them")
-    if HERMES.is_dir():
-        db = HERMES / "state.db"
+    if hosts.hermes().is_dir():
+        db = hosts.hermes() / "state.db"
         lines.append("2e gate on Hermes: " + ("armed (reads state.db by session_id)"
                                               if db.is_file() else
                                               "UNARMED, state.db not found, so every "
@@ -5875,7 +5830,7 @@ def is_registry(path):
     """Whether `path` names a file that decides what Locket trusts or where it sends
     text: the trust registry, or the Panoply settings that name the embedder host.
     By identity, so a case variant or a link is the same file; decidable, so it may block."""
-    guarded = [paths.PATHS.registry, Path(os.environ.get("PANOPLY_CONFIG", str(HOME / ".panoply" / "config.json"))),
+    guarded = [paths.PATHS.registry, Path(os.environ.get("PANOPLY_CONFIG", str(paths.HOME / ".panoply" / "config.json"))),
                paths.PATHS.state / "config.json"]
     try:
         return any(_same(path, g) for g in guarded)

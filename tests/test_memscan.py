@@ -14,6 +14,7 @@ from unittest import mock
 from tests.harness import SRC, fixture_env
 
 import memscan as ms  # noqa: E402
+import hosts  # noqa: E402
 import paths  # noqa: E402
 
 
@@ -351,7 +352,7 @@ def _selftest_inner():
         (home / rel).write_text(body)
     import io as _io, contextlib as _ctx
     paths.PATHS.host_stores["home"] = home
-    ms.HOST_MEMBERS[home] = {"memory", "rules"}
+    hosts.HOST_MEMBERS["home"] = {"memory", "rules"}
     ms.settings.cache_clear()
     assert ms.corpus_for(home / "rules/r.md") == home, "a member directory resolves to the home"
     assert ms.corpus_for(home / "CLAUDE.md") == home, "root-level markdown is corpus"
@@ -417,9 +418,9 @@ def _selftest_inner():
     assert ms.resolve_citation("ui/y.py", 1, cidx)[0] == "missing", "a two-part path matched a stranger's folder"
     # A member path is entered only if every component would be: `memory/archive`
     # stays provenance even when a manifest names it as a member.
-    ms.HOST_MEMBERS[home] = {"memory", "rules", "memory/archive"}; ms.settings.cache_clear()
+    hosts.HOST_MEMBERS["home"] = {"memory", "rules", "memory/archive"}; ms.settings.cache_clear()
     assert not any("archive" in str(q) for q in ms.md_files(home)), "a member path entered an excluded dir"
-    ms.HOST_MEMBERS[home] = {"memory", "rules"}; ms.settings.cache_clear()
+    hosts.HOST_MEMBERS["home"] = {"memory", "rules"}; ms.settings.cache_clear()
     # One unreadable file is skipped and the rest still score: raised, it emptied the
     # whole read inside the hook and the catch-all let the write through.
     if hasattr(os, "getuid") and os.getuid() != 0:
@@ -446,17 +447,17 @@ def _selftest_inner():
     assert ms.corpus_for(home / "rules/r.md") is None, "a manifest's members replaces the host default"
     assert ms.corpus_for(home / "memory/a.md") == home
     (home / ms.MANIFEST).unlink(); ms.settings.cache_clear()
-    del paths.PATHS.host_stores["home"]; del ms.HOST_MEMBERS[home]
+    del paths.PATHS.host_stores["home"]; del hosts.HOST_MEMBERS["home"]
     ms.settings.cache_clear()
     for slug in ("-a-notes", "-b-myapp", "-c-brand-new-project"):
-        p = ms.CLAUDE / f"projects/{slug}/memory/x.md"
+        p = hosts.claude() / f"projects/{slug}/memory/x.md"
         assert ms.corpus_for(p) == p.parent, slug
     assert ms.corpus_for(COUNCIL / "archive/x.md") is None                       # verbatim by design
     assert ms.corpus_for(COUNCIL / "in-flight/x.md") is None                     # appends until it closes
-    assert ms.corpus_for(ms.CLAUDE / "projects/-a/memory/archive/x.md") is None
+    assert ms.corpus_for(hosts.claude() / "projects/-a/memory/archive/x.md") is None
     assert ms.corpus_for(COUNCIL / "x.txt") is None                              # not markdown
     assert ms.corpus_for("/Users/x/Software/notes/x.md") is None                 # outside the corpus
-    assert ms.corpus_for(ms.CLAUDE / "projects/-a/x.md") is None                    # project root, not memory
+    assert ms.corpus_for(hosts.claude() / "projects/-a/x.md") is None                    # project root, not memory
 
     big = "x" * 900
     assert ms.added_text({}, big, "") == big                                     # new or empty file
@@ -636,7 +637,7 @@ def _selftest_inner():
 
     # the walker and the write-time gate must cover the same files, or a
     # subdirectory is nudged against a corpus it is not a member of
-    for d in ms.EXCLUDED_DIRS:
+    for d in hosts.EXCLUDED_DIRS:
         assert ms.corpus_for(COUNCIL / f"{d}/x.md") is None, d
 
     # --- the §2e question gate -------------------------------------------------
@@ -718,14 +719,17 @@ def _selftest_inner():
     # --- bashguard: fires on the thing, silent on every near-miss -------------
     # a command naming a scratch path is exempt by design, so under a HOME in
     # /tmp (Homebrew's test sandbox) every absolute-path case would pass silently
-    if not any(m in str(ms.CLAUDE) + "/" for m in ms.SCRATCH_MARKERS):
-        cmem = str(ms.CLAUDE / "projects" / "-Users-x-proj" / "memory")
+    # Claude Code's home is the real one for this block, under HOME, so every
+    # home-relative spelling names it; the council store moves back after.
+    paths.PATHS.host_stores["council"] = saved_council; ms.settings.cache_clear()
+    if not any(m in str(hosts.claude()) + "/" for m in ms.SCRATCH_MARKERS):
+        cmem = str(hosts.claude() / "projects" / "-Users-x-proj" / "memory")
         def bw(cmd, cwd=cmem, auto=False):
             return ms.bash_write_decision(cmd, cwd, autonomous=auto)
         assert bw("cat > MEMORY.md <<EOF")[1], "a redirect into a corpus file must block"
         assert bw("sed -i '' 's/a/b/' MEMORY.md")[1], "sed -i must block"
         assert bw(f"echo x >> {cmem}/topic_note.md")[1], "an absolute corpus path must block"
-        rel = Path(cmem).relative_to(ms.HOME)
+        rel = Path(cmem).relative_to(paths.HOME)
         for spelt in (f"~/{rel}", f"$HOME/{rel}", f"${{HOME}}/{rel}", f'"$HOME/{rel}"', f"'~/{rel}'"):
             assert bw(f"echo x >> {spelt}/topic_note.md")[1], f"a home-relative path must block: {spelt}"
         assert bw(f"cd ~/{rel} && echo x >> topic_note.md")[1], "a cd through ~ resolves a bare name"
@@ -916,6 +920,7 @@ def _selftest_inner():
         assert bw("cat > README.md")[1], "a .md written into a corpus dir is a corpus write"
         assert bw("cat > README.md", cwd="/Users/x/some-repo") == (None, False), \
             "the same command outside a corpus must stay silent"
+    paths.PATHS.host_stores["council"] = COUNCIL; ms.settings.cache_clear()
 
     # --- grepassist: only a question, never a regex ---------------------------
     assert ms.prose_like("workspace root is a git repository")
@@ -1033,10 +1038,10 @@ def _selftest_inner():
         os.environ["HOME"] = real_home
     # --- a project store answers to its manifest's name, and to its slug still
     import contextlib, io
-    real_claude, fake = ms.CLAUDE, Path(tempfile.mkdtemp())
+    real_claude, fake = hosts.claude(), Path(tempfile.mkdtemp())
     proj = fake / "projects" / "-Users-x-devdocs" / "memory"
     proj.mkdir(parents=True); (proj / "a.md").write_text("A note about the project.\n")
-    ms.CLAUDE = fake
+    paths.PATHS.host_stores["council"] = fake
     try:
         assert "-Users-x-devdocs" in ms.all_corpora(), "an unnamed project store is keyed by its slug"
         (proj / ms.MANIFEST).write_text(json.dumps({"name": "devdocs-main"})); ms.settings.cache_clear()
@@ -1069,7 +1074,7 @@ def _selftest_inner():
         assert ms._read_manifest(proj) == {} and "-Users-x-devdocs" in ms._raw_corpora(), \
             "a manifest that is not UTF-8 degrades instead of raising"
     finally:
-        ms.CLAUDE = real_claude
+        paths.PATHS.host_stores["council"] = real_claude
         shutil.rmtree(fake, ignore_errors=True); ms.settings.cache_clear()
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
@@ -1660,12 +1665,12 @@ def _selftest_inner():
                        {"action": "add", "target": "memory", "new_text": "c"}]}})
     assert m["tool_input"]["file_path"].endswith("memories/MEMORY.md"), m
     assert m["tool_input"]["new_string"] == "b\nc" and m["tool_input"]["old_string"] == "a\nz", m
-    assert "MEMORY.md" not in ms.settings(ms.HERMES)["index_files"], \
+    assert "MEMORY.md" not in ms.settings(hosts.hermes())["index_files"], \
         "Hermes's MEMORY.md is its whole memory and must not inherit the index exemption"
     r = ms.normalise({"hook_event_name": "pre_tool_call", "tool_name": "write_file",
                    "tool_input": {"path": "MEMORY.md", "content": "c"},
-                   "cwd": str(ms.CLAUDE / "memory")})
-    assert r["tool_input"]["file_path"] == str(ms.CLAUDE / "memory" / "MEMORY.md"), \
+                   "cwd": str(hosts.claude() / "memory")})
+    assert r["tool_input"]["file_path"] == str(hosts.claude() / "memory" / "MEMORY.md"), \
         "a relative path resolves against the payload cwd, or the write escapes the gate"
     assert ms.session_asked({"_host": "hermes"}), "no session source at all fails open"
 

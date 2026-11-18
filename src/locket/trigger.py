@@ -32,6 +32,7 @@ import re
 import sys
 from pathlib import Path
 
+import hosts
 import memscan
 
 TRIGGERS = "triggers.json"
@@ -96,7 +97,7 @@ def rows_file(root):
 
 def stores_for(cwd, host=None):
     """The stores whose rows can fire here: the host's, then the one the directory is in."""
-    host = memscan.CLAUDE if host is None else host
+    host = hosts.claude() if host is None else host
     out = [host] if Path(host).is_dir() else []
     here = memscan.corpus_here(cwd)
     if here is not None and Path(here) not in [Path(h) for h in out]:
@@ -285,7 +286,7 @@ def fire(payload, host=None):
     """(message, block) for a hook payload from either host; message is "" when nothing fired."""
     payload = _host_payload(payload)
     if host is None:
-        host = {"hermes": memscan.HERMES, "codex": memscan.CODEX}.get(payload.get("_host"), memscan.CLAUDE)
+        host = {"hermes": hosts.hermes(), "codex": hosts.codex()}.get(payload.get("_host"), hosts.claude())
     cwd = payload.get("cwd") or os.getcwd()
     event = payload.get("hook_event_name") or "PreToolUse"
     if event == "UserPromptSubmit":
@@ -355,7 +356,7 @@ def hook(stdin=None, host=None):
             return 0
         try:
             return memscan.emit(payload, message, block, "trigger",
-                                Path(host or memscan.HERMES) / "state.db")
+                                Path(host or hosts.hermes()) / "state.db")
         except Exception:
             return 0
     if block and payload.get("_host") == "codex" and payload.get("hook_event_name") == "PreToolUse":
@@ -416,7 +417,7 @@ def check(argv):
         roots = [root]
     else:
         roots = stores_for(os.getcwd())
-        for other in (memscan.HERMES, memscan.CODEX):
+        for other in (hosts.hermes(), hosts.codex()):
             if other.is_dir() and other not in roots:
                 roots.insert(1, other)
     problems, files = [], 0

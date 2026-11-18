@@ -8,6 +8,7 @@ from pathlib import Path
 import tests.harness  # noqa: F401  (puts the source under test on sys.path)
 
 import memscan  # noqa: E402
+import paths  # noqa: E402
 
 CASES = 20000
 
@@ -36,7 +37,7 @@ def cd_reference(command, cwd, pos):
         d = command[m.start(2):m.end(2)].strip() if m.group(2) is not None else ""
         d = d or None
         if d is None or d == "~":
-            here = str(memscan.HOME)
+            here = str(paths.HOME)
         elif any(c in d for c in "$`(") and not d.strip("'\"").startswith(("$HOME", "${HOME}")):
             here = None
         elif d == "-":

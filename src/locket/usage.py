@@ -36,6 +36,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+import hosts
 import memscan
 import paths
 
@@ -98,19 +99,19 @@ def fold(rows, today=None):
 def _claude_dir(flag=None):
     if flag or os.environ.get("LOCKET_USAGE_CLAUDE"):
         return Path(flag or os.environ["LOCKET_USAGE_CLAUDE"]).expanduser()
-    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or memscan.CLAUDE).expanduser() / "projects"
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or hosts.claude()).expanduser() / "projects"
 
 
 def _hermes_db(flag=None):
     if flag or os.environ.get("LOCKET_USAGE_HERMES"):
         return Path(flag or os.environ["LOCKET_USAGE_HERMES"]).expanduser()
-    return Path(os.environ.get("HERMES_HOME") or memscan.HERMES).expanduser() / "state.db"
+    return Path(os.environ.get("HERMES_HOME") or hosts.hermes()).expanduser() / "state.db"
 
 
 def _project(cwd):
     if not cwd:
         return ""
-    home = str(memscan.HOME)
+    home = str(paths.HOME)
     return "~" + cwd[len(home):] if cwd == home or cwd.startswith(home + "/") else cwd
 
 

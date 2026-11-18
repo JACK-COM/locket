@@ -13,9 +13,6 @@ import tempfile
 from pathlib import Path
 
 HOME = Path.home()
-CLAUDE = HOME / ".claude"                # Claude Code's home
-HERMES = HOME / ".hermes"                # Hermes Agent's home
-CODEX = Path(os.environ.get("CODEX_HOME") or HOME / ".codex")   # Codex's home, which CODEX_HOME moves
 
 
 @dataclasses.dataclass(frozen=True)
@@ -69,7 +66,8 @@ class Paths:
             health_dir=Path(env.get("LOCKET_HEALTH_DIR") or state / "hook-health").expanduser(),
             grepassist_log=Path(env.get("LOCKET_GREPASSIST_LOG") or state / "grepassist.csv").expanduser(),
             pending_dir=Path(tempfile.gettempdir()) / f"memscan-pending-{uid}",
-            host_stores={"council": CLAUDE, "hermes": HERMES,
+            # Each host's home: Claude Code's, Hermes Agent's, and Codex's, which CODEX_HOME moves.
+            host_stores={"council": HOME / ".claude", "hermes": HOME / ".hermes",
                          "codex": Path(env.get("CODEX_HOME") or HOME / ".codex")},
         )
 
