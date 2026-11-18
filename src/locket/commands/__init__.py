@@ -18,10 +18,14 @@ import fsio
 VERSION = ""            # this release's, set by the front before dispatch (locket.py owns it)
 
 
-class Report(NamedTuple):
-    """What a report mode found: the lines to show, and how many findings they hold."""
-    lines: list
-    count: int = 0
+class Report:
+    """What a report mode found: the lines to show, and how many findings they hold.
+    A plain class: a NamedTuple's `count` field shadows `tuple.count`, and `dataclasses`
+    costs every hook about 3 ms of import."""
+    __slots__ = ("lines", "count")
+
+    def __init__(self, lines: list[str], count: int = 0):
+        self.lines, self.count = lines, count
 
     @property
     def text(self):
@@ -44,9 +48,13 @@ class Tool(NamedTuple):
     arguments' JSON Schema properties; `name` is the tool's name when it is not
     `locket_<verb>`."""
     description: str
-    call: Callable
+    call: Callable[[dict, Session], str]
     props: dict = {}
     name: str = ""
+
+
+def _no_run(rest: list[str]) -> int:
+    raise TypeError("this verb declares no run")
 
 
 class Verb(NamedTuple):
@@ -60,11 +68,11 @@ class Verb(NamedTuple):
     args: str = ""
     help: str = ""
     examples: Optional[str] = None
-    run: Optional[Callable] = None
+    run: Callable[[list[str]], int] = _no_run       # every verb passes one; NamedTuple order needs a default
     mcp: Optional[Tool] = None
-    aliases: tuple = ()
+    aliases: tuple[str, ...] = ()
     hidden: bool = False
-    guide: Optional[Callable] = None
+    guide: Optional[Callable[[Callable[[], None]], Optional[int]]] = None
     own_help: bool = False
 
 

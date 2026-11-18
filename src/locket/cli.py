@@ -65,9 +65,9 @@ _SEE = {v.name: getattr(f, "SEE", "") for f in FAMILIES for v in f.VERBS}
 def parser():
     """(the top-level parser, its subparsers action), every listed verb a subparser."""
     import argparse
-    fmt = dict(formatter_class=argparse.RawDescriptionHelpFormatter)
+    fmt = argparse.RawDescriptionHelpFormatter
     p = argparse.ArgumentParser(
-        prog="locket", epilog=help_text.EPILOG, **fmt,
+        prog="locket", epilog=help_text.EPILOG, formatter_class=fmt,
         description="locket: which memory file already holds this idea, and where a corpus repeats itself.")
     sub = p.add_subparsers(title="commands", metavar="<command>")
     for v in VERBS:
@@ -78,7 +78,7 @@ def parser():
         if "corpus" in v.args:
             tail = help_text.CORPUS_NOTE + tail
         shown = "\n".join("  " + ln for ln in v.examples.split("\n")) if v.examples else ""
-        c = sub.add_parser(v.name, help=v.help, description=v.help, **fmt,
+        c = sub.add_parser(v.name, help=v.help, description=v.help, formatter_class=fmt,
                            usage=f"locket {v.name} {v.args}".rstrip(),
                            epilog=(f"examples:\n{shown}\n" if shown else "") + tail)
         c.add_argument("args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)

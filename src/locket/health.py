@@ -4,6 +4,7 @@ instead of passing silently.
 """
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -69,17 +70,20 @@ class _HealthLock:
         self.d, self.fh, self.held = d, None, False
 
     def __enter__(self):
-        try:
-            import fcntl
-            take = lambda fh: fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except ImportError:
-            try:
-                import msvcrt
-            except ImportError:
-                return self                 # no lock primitive: the update is dropped, never run unlocked
+        if sys.platform == "win32":
+            import msvcrt
+
             def take(fh):
                 fh.seek(0)
                 msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            try:
+                import fcntl
+            except ImportError:
+                return self                 # no lock primitive: the update is dropped, never run unlocked
+
+            def take(fh):
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
             self.fh = open(self.d / ".lock", "a+")
         except OSError:

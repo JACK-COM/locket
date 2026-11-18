@@ -147,7 +147,7 @@ def _suite():
         assert "field count" in probes.csv_hook_latency("true", target, 5)[2], "a ragged last row was probed"
         for f in (ref, full / "RULINGS.csv", full / manifest.MANIFEST):
             f.unlink()
-        corpora.settings.cache_clear()
+        corpora.clear_settings()
         assert probes.hook_latency("true", {"empty": empty}, 5) == (None, None), "an empty store is timed"
         fast, _o = probes.hook_latency("true", {"empty": empty, "full": full}, 5)
         assert fast and fast[0] == "full" and fast[1] < 5, fast

@@ -285,7 +285,8 @@ def locket_lines(path):
 def config_hooks(text):
     """{event: [command]} from config.yaml's top-level `hooks:` block, read by indentation
     in the shape Step 4 prints, so doctor needs no YAML parser."""
-    out, inside, event, depth = {}, False, None, None
+    out: dict[str, list[str]] = {}
+    inside, event, depth = False, None, None
     for line in text.splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
             continue

@@ -178,7 +178,7 @@ def _selftest_inner():
     saved_council = paths.PATHS.host_stores["council"]
     _hook_health(fixture)
     paths.PATHS.host_stores["council"] = COUNCIL
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     docs = {
         "a.md": "The default execution path is the dossier pipeline run interactively.\n"
                 "Unrelated sentence about hangar rates and insurance quotes entirely.",
@@ -293,7 +293,7 @@ def _selftest_inner():
     (two / "beta" / manifest.MANIFEST).write_text(reg)
     (two / "beta" / "o.md").write_text(docs["a.md"] + "\n" + row)
     (two / "alpha" / "SHORT_TERM.md").write_text(docs["a.md"].split("\n")[0])
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     union5, _, _, cross5 = overlap.across_pairs(stores3)
     assert "alpha+beta::shared.csv#locket" in union5, sorted(union5)
     assert not any("shared.csv" in a or "shared.csv" in b for _, a, b, _, _ in cross5), \
@@ -376,7 +376,7 @@ def _selftest_inner():
     import io as _io, contextlib as _ctx
     paths.PATHS.host_stores["home"] = home
     hosts.HOST_MEMBERS["home"] = {"memory", "rules"}
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     assert corpora.corpus_for(home / "rules/r.md") == home, "a member directory resolves to the home"
     assert corpora.corpus_for(home / "CLAUDE.md") == home, "root-level markdown is corpus"
     assert corpora.corpus_for(home / "plugins/p.md") is None, "a non-member directory is host state"
@@ -448,9 +448,9 @@ def _selftest_inner():
         and "3 distinct path:line citations across 2 memory files" in r.text, r.text
     # A member path is entered only if every component would be: `memory/archive`
     # stays provenance even when a manifest names it as a member.
-    hosts.HOST_MEMBERS["home"] = {"memory", "rules", "memory/archive"}; corpora.settings.cache_clear()
+    hosts.HOST_MEMBERS["home"] = {"memory", "rules", "memory/archive"}; corpora.clear_settings()
     assert not any("archive" in str(q) for q in corpus.md_files(home)), "a member path entered an excluded dir"
-    hosts.HOST_MEMBERS["home"] = {"memory", "rules"}; corpora.settings.cache_clear()
+    hosts.HOST_MEMBERS["home"] = {"memory", "rules"}; corpora.clear_settings()
     # One unreadable file is skipped and the rest still score: raised, it emptied the
     # whole read inside the hook and the catch-all let the write through.
     if hasattr(os, "getuid") and os.getuid() != 0:
@@ -473,12 +473,12 @@ def _selftest_inner():
     assert rc == 0 and "by convention" in buf.getvalue() and not (home / manifest.MANIFEST).exists(), \
         "init on a host home is a no-op that does not refuse itself for the stores under it"
     (home / manifest.MANIFEST).write_text(json.dumps({"members": ["memory"]}))
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     assert corpora.corpus_for(home / "rules/r.md") is None, "a manifest's members replaces the host default"
     assert corpora.corpus_for(home / "memory/a.md") == home
-    (home / manifest.MANIFEST).unlink(); corpora.settings.cache_clear()
+    (home / manifest.MANIFEST).unlink(); corpora.clear_settings()
     del paths.PATHS.host_stores["home"]; del hosts.HOST_MEMBERS["home"]
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     for slug in ("-a-notes", "-b-myapp", "-c-brand-new-project"):
         p = hosts.claude() / f"projects/{slug}/memory/x.md"
         assert corpora.corpus_for(p) == p.parent, slug
@@ -751,7 +751,7 @@ def _selftest_inner():
     # /tmp (Homebrew's test sandbox) every absolute-path case would pass silently
     # Claude Code's home is the real one for this block, under HOME, so every
     # home-relative spelling names it; the council store moves back after.
-    paths.PATHS.host_stores["council"] = saved_council; corpora.settings.cache_clear()
+    paths.PATHS.host_stores["council"] = saved_council; corpora.clear_settings()
     if not any(m in str(hosts.claude()) + "/" for m in bashguard.SCRATCH_MARKERS):
         cmem = str(hosts.claude() / "projects" / "-Users-x-proj" / "memory")
         def bw(cmd, cwd=cmem, auto=False):
@@ -950,7 +950,7 @@ def _selftest_inner():
         assert bw("cat > README.md")[1], "a .md written into a corpus dir is a corpus write"
         assert bw("cat > README.md", cwd="/Users/x/some-repo") == (None, False), \
             "the same command outside a corpus must stay silent"
-    paths.PATHS.host_stores["council"] = COUNCIL; corpora.settings.cache_clear()
+    paths.PATHS.host_stores["council"] = COUNCIL; corpora.clear_settings()
 
     # --- grepassist: only a question, never a regex ---------------------------
     assert grepassist.prose_like("workspace root is a git repository")
@@ -1006,7 +1006,7 @@ def _selftest_inner():
         "excluded_dirs": ["old"], "ledger_surfaces": ["LOG.md"],
         "holding_spaces": ["INBOX.md"], "index_files": [],
         "code_roots": [str(d)]}))
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     assert corpora.corpus_for(store / "facts.md") == store, "a manifest names the corpus"
     assert corpora.corpus_for(store / "old" / "x.md") is None, "the manifest's excluded dir holds"
     assert corpora.corpus_for(store / "archive" / "x.md") == store, \
@@ -1031,7 +1031,7 @@ def _selftest_inner():
         assert corpora.search_root(["grep", "-rn", "../facts.md"], store / "old") == store, \
             "a relative path resolves against the session's cwd"
         assert corpora.search_root(["grep", "~/nowhere"], outside) is None, "a path that does not exist places nothing"
-        here = d / "cwd-store"; here.mkdir(); (here / manifest.MANIFEST).write_text("{}"); corpora.settings.cache_clear()
+        here = d / "cwd-store"; here.mkdir(); (here / manifest.MANIFEST).write_text("{}"); corpora.clear_settings()
         assert corpora.search_root(["grep", "-rn", "~/brain"], here) == store, \
             "a missing word (the verb) resolved against a cwd in another store must not place the search there"
         q = "a fact here"
@@ -1074,38 +1074,38 @@ def _selftest_inner():
     paths.PATHS.host_stores["council"] = fake
     try:
         assert "-Users-x-devdocs" in corpora.all_corpora(), "an unnamed project store is keyed by its slug"
-        (proj / manifest.MANIFEST).write_text(json.dumps({"name": "devdocs-main"})); corpora.settings.cache_clear()
+        (proj / manifest.MANIFEST).write_text(json.dumps({"name": "devdocs-main"})); corpora.clear_settings()
         assert corpora.all_corpora().get("devdocs-main") == proj, "a named project store is keyed by its name"
         assert corpus.resolve("devdocs-main") == proj and corpus.resolve("-Users-x-devdocs") == proj, \
             "the name resolves, and the slug still does"
         persona = fake / "projects" / "-Users-x-devdocs-Persona" / "memory"
         persona.mkdir(parents=True); (persona / "p.md").write_text("A persona note.\n")
-        corpora.settings.cache_clear()
+        corpora.clear_settings()
         assert corpus.resolve("-Users-x-devdocs") == proj, \
             "a named store's exact slug beats a longer unnamed slug containing it"
         assert corpus.resolve("-Users-x-devdocs-Persona") == persona and corpus.resolve("devdocs-main") == proj
         assert corpus.resolve("-USERS-X-DEVDOCS") == proj, "an exact slug matches without case"
-        shutil.rmtree(persona.parent); corpora.settings.cache_clear()
+        shutil.rmtree(persona.parent); corpora.clear_settings()
         loose = fake / "zq-loose-vault" / "memory"; loose.mkdir(parents=True)
         (loose / "v.md").write_text("A vault note.\n")
         (loose / manifest.MANIFEST).write_text(json.dumps({"name": "zq-named"}))
-        assert trust.register(loose); corpora.settings.cache_clear()
+        assert trust.register(loose); corpora.clear_settings()
         with contextlib.redirect_stderr(io.StringIO()):
             assert corpus.resolve("zq-loose-vault") is None, "only a projects/ store answers to its parent's name"
-        assert trust.forget(loose); corpora.settings.cache_clear()
+        assert trust.forget(loose); corpora.clear_settings()
         kid = fake / "projects" / "-Users-x-kid" / "memory"; kid.mkdir(parents=True)
         (kid / "b.md").write_text("Another note.\n")
-        (kid / manifest.MANIFEST).write_text(json.dumps({"belongs_to": "-Users-x-devdocs"})); corpora.settings.cache_clear()
+        (kid / manifest.MANIFEST).write_text(json.dumps({"belongs_to": "-Users-x-devdocs"})); corpora.clear_settings()
         assert corpora.parent_of(kid) == proj, "a belongs_to written by slug still joins the named store"
-        (proj / manifest.MANIFEST).write_text(json.dumps({"name": "council"})); corpora.settings.cache_clear()
+        (proj / manifest.MANIFEST).write_text(json.dumps({"name": "council"})); corpora.clear_settings()
         assert corpora.raw_corpora().get("council") != proj and "-Users-x-devdocs" in corpora.raw_corpora(), \
             "a project name never takes a host key"
-        (proj / manifest.MANIFEST).write_bytes(b'{"name": "\xff"}'); corpora.settings.cache_clear()
+        (proj / manifest.MANIFEST).write_bytes(b'{"name": "\xff"}'); corpora.clear_settings()
         assert trust.read_manifest(proj) == {} and "-Users-x-devdocs" in corpora.raw_corpora(), \
             "a manifest that is not UTF-8 degrades instead of raising"
     finally:
         paths.PATHS.host_stores["council"] = real_claude
-        shutil.rmtree(fake, ignore_errors=True); corpora.settings.cache_clear()
+        shutil.rmtree(fake, ignore_errors=True); corpora.clear_settings()
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         hygiene.cmd_budget(store).show()
@@ -1147,13 +1147,13 @@ def _selftest_inner():
             f.unlink()
     # a manifest it cannot parse, or `sources` that is not a list, is refused and never rewritten
     for bad in ('{"name": "a", "excluded_dirs": ["old"], "sources": [', '{"sources": {"k": 1}}'):
-        (store / manifest.MANIFEST).write_text(bad); corpora.settings.cache_clear()
+        (store / manifest.MANIFEST).write_text(bad); corpora.clear_settings()
         with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
             assert scaffold.scaffold_ledgers(store, "Brain") == 1, bad
         assert (store / manifest.MANIFEST).read_text() == bad, f"a bad manifest was rewritten: {bad}"
         assert not list(store.glob("*.csv")), "no ledger is written beside a manifest it refused"
     (store / manifest.MANIFEST).write_text(man_before)
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     spaced = d / "my notes"; spaced.mkdir(); (spaced / "a.md").write_text("A note.\n")
     with contextlib.redirect_stdout(io.StringIO()):
         assert scaffold.cmd_init(spaced, index=False, ledgers="") == 0, "a folder name with a space still takes ledgers"
@@ -1169,7 +1169,7 @@ def _selftest_inner():
     (store / "sub").mkdir(); (store / "sub" / "t.md").write_text("A target.\n")
     (store / "sub" / "MEMORY.md").write_text("- [T](t.md) the target\n- [G](gone.md) removed\n")
     (store / manifest.MANIFEST).write_text(json.dumps({"excluded_dirs": ["old"], "index_files": ["MEMORY.md"]}))
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     ih = {h[1]: h[4].exists() for h in hygiene.index_hooks(store)}
     assert ih == {"sub/t.md": True, "sub/gone.md": False}, ih
     shutil.rmtree(store / "sub")
@@ -1183,7 +1183,7 @@ def _selftest_inner():
         "excluded_dirs": ["old"], "index_files": [], "ledger_surfaces": ["LOG.md"],
         "holding_spaces": ["INBOX.md"],
         "sources": [{"path": str(store / "RULES.csv"), "text": "Ruling", "label": "Area"}]}))
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     c = corpus.corpus(store)
     assert "RULES.csv#cost" in c and "RULES.csv#dev-loop" in c, sorted(c)
     assert "RULES.csv#cost" not in corpus.corpus(store, csv=False), "memfind takes rows as its own units"
@@ -1225,7 +1225,7 @@ def _selftest_inner():
         "excluded_dirs": ["old"], "index_files": [], "ledger_surfaces": ["LOG.md"],
         "holding_spaces": ["INBOX.md", "QUEUE.md"],
         "sources": [{"path": str(store / "RULES.csv"), "text": "Ruling", "label": "Area"}]}))
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     (store / "INBOX.md").write_text(
         "A rebase fights the watcher, so build the sheet and commit it before rebasing.\n"
         "Gate: a third instance where the watcher ordering bites on a freshly built sheet.\n")
@@ -1249,11 +1249,11 @@ def _selftest_inner():
     assert "none of the configured holding spaces" in buf.getvalue(), \
         "a clean run still says what it was scored against"
     (store / manifest.MANIFEST).write_text("{not json")
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     assert corpora.settings(store)["ledger_surfaces"] == manifest.LEDGER_SURFACES, \
         "a broken manifest degrades to the defaults rather than taking the hook down"
     (store / manifest.MANIFEST).unlink()
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     assert corpus.resolve(str(store)).is_absolute(), "a literal path resolves absolute"
 
     # --- excluded_files: one file ignored at both ends --------------------------
@@ -1264,7 +1264,7 @@ def _selftest_inner():
         "excluded_dirs": ["old"], "index_files": ["facts.md"], "ledger_surfaces": ["LOG.md"],
         "excluded_files": ["notes/draft.md", "export*"],
         "sources": [{"path": str(store / "RULES.csv"), "text": "Ruling", "label": "Area"}]}))
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     got = corpus.md_files(store)
     assert store / "notes" / "draft.md" not in got, "a relative path excludes that file"
     assert store / "export.md" not in got, "a glob excludes by basename"
@@ -1275,10 +1275,10 @@ def _selftest_inner():
     (store / manifest.MANIFEST).write_text(json.dumps({
         "excluded_files": ["*.csv"],
         "sources": [{"path": str(store / "RULES.csv"), "text": "Ruling", "label": "Area"}]}))
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     assert corpus.csv_sources(store) == [], "an excluded CSV is not a source even when registered"
     assert "RULES.csv#cost" not in corpus.corpus(store)
-    (store / manifest.MANIFEST).write_text("{}\n"); corpora.settings.cache_clear()
+    (store / manifest.MANIFEST).write_text("{}\n"); corpora.clear_settings()
 
     # --- init and the registry: a manifest directory the listing can find -----
     saved = paths.PATHS; paths.PATHS = saved.replace(registry=d / "locket" / "corpora.json")
@@ -1339,18 +1339,18 @@ def _selftest_inner():
         assert not (d / manifest.MANIFEST).exists()
         (hand / manifest.MANIFEST).unlink(); hand.rmdir()
         assert trust.register(vault)
-        (vault / manifest.MANIFEST).write_text(json.dumps({"name": "vault-of-one"})); corpora.settings.cache_clear()
+        (vault / manifest.MANIFEST).write_text(json.dumps({"name": "vault-of-one"})); corpora.clear_settings()
         assert corpora.all_corpora().get("vault-of-one") == vault, "the manifest's name is the listing key"
         assert corpus.resolve("vault-of") == vault, "and a substring of it resolves"
         (d / "vault-of-one-persona").mkdir()
         (d / "vault-of-one-persona" / manifest.MANIFEST).write_text(json.dumps({"name": "vault-of-one-persona"}))
-        assert trust.register(d / "vault-of-one-persona"); corpora.settings.cache_clear()
+        assert trust.register(d / "vault-of-one-persona"); corpora.clear_settings()
         assert corpus.resolve("vault-of-one") == vault, "an exact name wins over a longer name containing it"
         with contextlib.redirect_stderr(io.StringIO()):
             assert corpus.resolve("vault-of") is None, "a substring of both is still ambiguous"
         assert trust.forget(d / "vault-of-one-persona")
         shutil.rmtree(d / "vault-of-one-persona")
-        (vault / manifest.MANIFEST).unlink(); corpora.settings.cache_clear()
+        (vault / manifest.MANIFEST).unlink(); corpora.clear_settings()
         assert vault not in corpora.all_corpora().values() and trust.registry_stale() == [vault], \
             "a registered path whose manifest is gone is reported, never enumerated"
         assert any("is gone" in l for l in stores.corpora_lines()), stores.corpora_lines()
@@ -1385,7 +1385,7 @@ def _selftest_inner():
             "name": "par", "members": ["docs"], "ledger_surfaces": ["LOG.md"],
             "whole_read_exempt": ["IMPL.md"],
             "sources": [{"path": "RULES.csv", "text": "Ruling", "label": "Area"}]}))
-        corpora.settings.cache_clear(); trust.register(par)
+        corpora.clear_settings(); trust.register(par)
         kid = (d / "elsewhere" / "memory").resolve(); (kid / "archive").mkdir(parents=True)
         (kid / "topic_one.md").write_text("Topic one holds a durable fact about hangars.\n")
         (kid / "SHORT.md").write_text("- an entry\n")
@@ -1394,12 +1394,12 @@ def _selftest_inner():
         (kid / manifest.LEGACY_MANIFEST).write_text(json.dumps(
             [{"path": str(par / "RULES.csv"), "text": "Ruling", "label": "Area"}]))
         (kid / manifest.MANIFEST).write_text(json.dumps({"name": "kid", "holding_spaces": ["SHORT.md"]}))
-        corpora.settings.cache_clear(); trust.register(kid)
+        corpora.clear_settings(); trust.register(kid)
         assert {"par", "kid"} <= set(corpora.all_corpora()), "before joining, both are listed"
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             assert scaffold.cmd_init(kid, index=False, parent="par") == 0, buf.getvalue()
-        corpora.settings.cache_clear()
+        corpora.clear_settings()
         assert trust.read_manifest(kid)["belongs_to"] == "par" and trust.read_manifest(kid)["name"] == "kid", \
             "init --parent adds belongs_to and keeps the rest of the manifest"
         assert "kid" not in corpora.all_corpora() and corpora.all_corpora()["par"] == par, \
@@ -1440,22 +1440,22 @@ def _selftest_inner():
         for bad in ("nobody", "kid"):
             with contextlib.redirect_stderr(io.StringIO()):
                 assert scaffold.cmd_init(kid, index=False, parent=bad) == 1, bad
-        sub = par / "docs"; (sub / manifest.MANIFEST).write_text("{}\n"); corpora.settings.cache_clear()
+        sub = par / "docs"; (sub / manifest.MANIFEST).write_text("{}\n"); corpora.clear_settings()
         with contextlib.redirect_stderr(io.StringIO()):
             assert scaffold.cmd_init(sub, index=False, parent="par") == 1, "a nested directory is a member, not a join"
-        (sub / manifest.MANIFEST).unlink(); corpora.settings.cache_clear()
+        (sub / manifest.MANIFEST).unlink(); corpora.clear_settings()
         (par / manifest.MANIFEST).write_text(json.dumps({"name": "par", "belongs_to": "kid"}))
-        corpora.settings.cache_clear()
+        corpora.clear_settings()
         assert corpora.parent_of(par) is None and corpora.parent_of(kid) is None, "a cycle leaves both standing alone"
         assert {"par", "kid"} <= set(corpora.all_corpora())
-        (par / manifest.MANIFEST).write_text(json.dumps({"name": "par"})); corpora.settings.cache_clear()
+        (par / manifest.MANIFEST).write_text(json.dumps({"name": "par"})); corpora.clear_settings()
         assert corpora.parent_of(kid) == par
         # nested on disk but outside the parent's members: a host home's own
         # auto-memory under projects/ is the case, and it joins
-        (par / manifest.MANIFEST).write_text(json.dumps({"name": "par", "members": ["docs"]})); corpora.settings.cache_clear()
+        (par / manifest.MANIFEST).write_text(json.dumps({"name": "par", "members": ["docs"]})); corpora.clear_settings()
         out = par / "projects" / "m"; out.mkdir(parents=True)
         (out / "o.md").write_text("A nested store outside the parent's members joins it.\n")
-        (out / manifest.MANIFEST).write_text(json.dumps({"name": "outm"})); corpora.settings.cache_clear()
+        (out / manifest.MANIFEST).write_text(json.dumps({"name": "outm"})); corpora.clear_settings()
         trust.register(out)                          # a real auto-memory is listed on sight
         with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
             assert scaffold.cmd_init(out, index=False, parent="par") == 0, "a store outside the members joins"
@@ -1464,7 +1464,7 @@ def _selftest_inner():
         # a joining folder called like one of the parent's directories needs a label
         am = (d / "host" / "projects" / "slug" / "memory").resolve(); am.mkdir(parents=True)
         (am / "a.md").write_text("An auto-memory fact about the council store here.\n")
-        (am / manifest.MANIFEST).write_text("{}\n"); corpora.settings.cache_clear(); trust.register(am)
+        (am / manifest.MANIFEST).write_text("{}\n"); corpora.clear_settings(); trust.register(am)
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
             assert scaffold.cmd_init(am, index=False, parent="par", name="docs") == 1, "a label naming a parent dir"
@@ -1479,7 +1479,7 @@ def _selftest_inner():
         assert trust.forget(par) and trust.forget(kid)
     finally:
         paths.PATHS = saved
-        corpora.settings.cache_clear()
+        corpora.clear_settings()
 
     # --- the manifest schema: hints for the hand that writes one ---------------
     sd = (d / "schemadir").resolve(); sd.mkdir()
@@ -1572,7 +1572,7 @@ def _selftest_inner():
     (led / manifest.MANIFEST).write_text(json.dumps({"ledgers": [
         {"path": "HISTORY-*-Sessions.csv", "caps": {"summary": 20}},
         {"path": "LEDGER-Closures.csv", "required": ["slug"], "caps": {"note": 10}}]}))
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     msg, blocking = ledger.ledger_decision(str(hist), {"content": hdr + good})
     assert blocking and "characters, cap 20" in msg and manifest.MANIFEST in msg, msg
     clos = led / "LEDGER-Closures.csv"; clos.write_text("slug,note\n")
@@ -1582,12 +1582,12 @@ def _selftest_inner():
     with contextlib.redirect_stdout(buf):
         n = _shown(hygiene.cmd_ledgers(led))
     assert n == 1 and "2 ledger(s) checked, 1 finding(s)" in buf.getvalue(), buf.getvalue()
-    (led / manifest.MANIFEST).write_text("{}\n"); corpora.settings.cache_clear()
+    (led / manifest.MANIFEST).write_text("{}\n"); corpora.clear_settings()
     assert "@@" not in help_text.usage() and "caps title ≤90" in help_text.usage(), "the help renders the built-ins from the constant"
     # an entry naming a built-in's glob MERGES onto it: only the keys it names change
     (led / manifest.MANIFEST).write_text(json.dumps({"ledgers": [
         {"path": "HISTORY-*-Sessions.csv", "enum": {"area": ["docs", ""]}}]}))
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     ok = '2026-09-20,Docs pass,"A row under the store\'s own areas.",docs,,,,\n'
     assert ledger.ledger_decision(str(hist), {"content": hdr + ok}) == (None, False), "a store's own area passes"
     msg, blocking = ledger.ledger_decision(str(hist), {"content": hdr + ok.replace(",docs,", ",ui,")})
@@ -1596,30 +1596,30 @@ def _selftest_inner():
     assert blocking and "date" in msg, "the built-in date pattern survives an enum override"
     msg, blocking = ledger.ledger_decision(str(hist), {"content": hdr + f'2026-09-20,{"t" * 91},s,docs,,,,\n'})
     assert blocking and "cap 90" in msg, "the built-in caps survive an enum override"
-    (led / manifest.MANIFEST).write_text("{}\n"); corpora.settings.cache_clear()
+    (led / manifest.MANIFEST).write_text("{}\n"); corpora.clear_settings()
     # `extends`: a file named outside the glob inherits a built-in by declaration
     odd = led / "HISTORY-session-summary.csv"
     assert ledger.ledger_schema_for(odd) == (None, None), "outside the glob, nothing governs it"
     (led / manifest.MANIFEST).write_text(json.dumps({"ledgers": [
         {"path": odd.name, "extends": "HISTORY-*-Sessions.csv", "enum": {"area": ["docs", ""]}}]}))
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     assert manifest.validate_manifest(led) == [], manifest.validate_manifest(led)
     assert ledger.ledger_decision(str(odd), {"content": hdr + ok}) == (None, False), "extends inherits the built-in"
     msg, blocking = ledger.ledger_decision(str(odd), {"content": hdr + ok.replace("2026-09-20", "20 Sep")})
     assert blocking and "date" in msg, "the inherited date pattern holds"
     (led / manifest.MANIFEST).write_text(json.dumps({"ledgers": [{"path": odd.name, "extends": "nope"}]}))
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     assert any("is no built-in" in f for f in manifest.validate_manifest(led)), manifest.validate_manifest(led)
-    (led / manifest.MANIFEST).write_text("{}\n"); corpora.settings.cache_clear()
+    (led / manifest.MANIFEST).write_text("{}\n"); corpora.clear_settings()
     # an entry naming one file inside the built-in's glob governs the sweep alone
     (led / manifest.MANIFEST).write_text(json.dumps({"ledgers": [
         {"path": hist.name, "enum": {"area": ["docs", ""]}}]}))
-    corpora.settings.cache_clear(); hist.write_text(hdr + ok)
+    corpora.clear_settings(); hist.write_text(hdr + ok)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         n = _shown(hygiene.cmd_ledgers(led))
     assert n == 0 and "1 ledger(s) checked, 0 finding(s)" in buf.getvalue(), buf.getvalue()
-    (led / manifest.MANIFEST).write_text("{}\n"); corpora.settings.cache_clear(); hist.write_text(hdr + good)
+    (led / manifest.MANIFEST).write_text("{}\n"); corpora.clear_settings(); hist.write_text(hdr + good)
     # rulings and claims: one glob covers the single-store and the project name
     rh, ch = "Ruling,Category,Area,Date\n", "Claim,Category,Area,Source,Date\n"
     rul = '"Pro unlocks by a one-time purchase, never a subscription.",product,pricing,2026-09-26\n'
@@ -1654,15 +1654,15 @@ def _selftest_inner():
         ledger.CSV_REPORT_BYTES = saved
     # the sweep walks the store: a ledger under a subdirectory is checked, one
     # under an excluded directory is not
-    (led / manifest.MANIFEST).write_text("{}\n"); corpora.settings.cache_clear()
+    (led / manifest.MANIFEST).write_text("{}\n"); corpora.clear_settings()
     (led / "memory").mkdir(exist_ok=True)
     (led / "memory" / "RULINGS.csv").write_text(rh + rul.replace(",pricing,", ",Pricing,"))
     (led / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
     (led / "node_modules" / "pkg" / "README.md").write_text("A dependency's readme is never prose of this store.\n")
     assert not any("node_modules" in str(p) for p in corpus.md_files(led)), "a dependency tree is not walked"
-    (led / manifest.MANIFEST).write_text(json.dumps({"excluded_dirs": ["drafts"]})); corpora.settings.cache_clear()
+    (led / manifest.MANIFEST).write_text(json.dumps({"excluded_dirs": ["drafts"]})); corpora.clear_settings()
     assert not any("node_modules" in str(p) for p in corpus.md_files(led)), "a store's own exclusions do not re-admit it"
-    (led / manifest.MANIFEST).write_text("{}\n"); corpora.settings.cache_clear()
+    (led / manifest.MANIFEST).write_text("{}\n"); corpora.clear_settings()
     (led / "archive").mkdir(exist_ok=True)
     (led / "archive" / "RULINGS.csv").write_text(rh + rul.replace(",pricing,", ",Pricing,"))
     buf = io.StringIO()
@@ -1670,7 +1670,7 @@ def _selftest_inner():
         n = _shown(hygiene.cmd_ledgers(led))
     assert n == 1 and "memory/RULINGS.csv" in buf.getvalue() and "archive/" not in buf.getvalue(), buf.getvalue()
     (led / "memory" / "RULINGS.csv").unlink(); (led / "archive" / "RULINGS.csv").unlink()
-    (led / manifest.MANIFEST).write_text("{}\n"); corpora.settings.cache_clear()
+    (led / manifest.MANIFEST).write_text("{}\n"); corpora.clear_settings()
 
     # --- host adapters: Hermes speaks the same payload in its own vocabulary ---
     h = adapters.normalise({"hook_event_name": "pre_tool_call", "tool_name": "write_file",
@@ -1831,7 +1831,7 @@ def _selftest_inner():
     shutil.rmtree(d, ignore_errors=True)
 
     paths.PATHS.host_stores["council"] = saved_council
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     shutil.rmtree(fixture, ignore_errors=True)
 def hook_payload_from(docs, text, top=3):
     """selftest seam: the FIRE_FLOOR gate against an in-memory corpus."""

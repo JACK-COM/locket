@@ -377,7 +377,7 @@ def check(argv):
         if path.is_file():
             files += 1
             try:
-                n = len(load(path).get("rows") or [])
+                n = str(len(load(path).get("rows") or []))
             except (OSError, ValueError, AttributeError):
                 n = "?"
             print(f"{_show(path)}: {n} rows")

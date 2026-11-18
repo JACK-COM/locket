@@ -50,8 +50,8 @@ def fixture_env():
         with paths.use(p), mock.patch.dict(os.environ, env), \
                 mock.patch.object(trust, "trusted", fixture_trusted), \
                 mock.patch.object(trust, "person_confirms", yes):
-            corpora.settings.cache_clear()
+            corpora.clear_settings()
             try:
                 yield p
             finally:
-                corpora.settings.cache_clear()
+                corpora.clear_settings()

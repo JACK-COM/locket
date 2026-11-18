@@ -50,6 +50,7 @@ def removal():
             listed = False
 
     def apply():
+        assert CONFIG is not None           # `listed` is False without one, so apply is never built
         bak = CONFIG.with_suffix(".json.locket-uninstall.bak")
         shutil.copy2(CONFIG, bak)
         data = json.loads(CONFIG.read_text()); data["mcpServers"].pop("locket", None)

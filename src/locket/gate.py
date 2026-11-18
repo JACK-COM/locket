@@ -258,7 +258,7 @@ def hook_decision(name, tool_input, text, prior, docs, archived=None,
     else:
         history = None
     session_rows = session_ledger(root) if history and root is not None else None
-    if session_rows:
+    if session_rows and history:
         history += f" If the date records what a session did, it is a row in {session_rows.name}."
     blocks = bool(stacked and autonomous)
     # Provenance before novelty: subtraction only removes, so a pure relocation exits

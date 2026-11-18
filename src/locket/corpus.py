@@ -12,6 +12,7 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional
 
 import claims
 import corpora
@@ -225,7 +226,7 @@ def _walk_files(root, pattern="*.md"):
             yield p
 
 
-def csv_sources(root):
+def csv_sources(root: Path) -> list[tuple[Path, str, Optional[str]]]:
     """Reference CSVs registered to this corpus: [(path, text column, label column)].
 
     From `sources` in `memfind.json`, or the older standalone `reference-sources.json`,
@@ -235,7 +236,8 @@ def csv_sources(root):
     write-time hook and a guardrail that dies on a bad file blocks the write it
     exists to advise on.
     """
-    out, seen = [], set()
+    out: list[tuple[Path, str, Optional[str]]] = []
+    seen = set()
     for r in corpora.roots_of(root):
         for pth, text, label in _own_csv_sources(r):
             key = pth.resolve()               # two stores registering one CSV is one source
@@ -289,7 +291,7 @@ def _rows_of(pth, textcol, labelcol, out):
 def csv_rows(root):
     """[(label, text)] for every registered CSV row, in file order, labelled
     `<file>.csv#<label value>`. Errors in one file skip that file, never raise."""
-    out = []
+    out: list[tuple[str, str]] = []
     for source in csv_sources(root):
         try:
             _rows_of(*source, out)
@@ -378,7 +380,7 @@ def _csv_claims(pth, textcol, labelcol):
     """[(label, claims)] per row of one registered CSV, rows with no claim kept, so
     every label `corpus()` would carry is still a file in the index. A file that
     stops parsing keeps the rows before the fault, as `csv_rows` does."""
-    rows = []
+    rows: list[tuple[str, str]] = []
     try:
         _rows_of(pth, textcol, labelcol, rows)
     except CSV_ERRORS:
@@ -490,7 +492,7 @@ def claim_index(root, csv=True):
         except OSError:
             continue
     if csv:
-        grouped = {}
+        grouped: dict[str, list] = {}
         for source in csv_sources(root):
             key = "\0".join([str(source[0]), source[1], source[2] or ""])
             try:

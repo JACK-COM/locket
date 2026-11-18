@@ -97,12 +97,12 @@ def merge_hooks(data, usage=True):
         pre.append({"matcher": matcher, "hooks": [{"type": "command", "timeout": timeout,
                     "command": install.hook_command(verb)}]})
         added.append(verb)
-    for event, matcher in TRIGGER:
+    for event, on in TRIGGER:
         entries = data["hooks"].setdefault(event, [])
         if trigger_command(entries):
             continue
         entry = {"hooks": [{"type": "command", "timeout": 5, "command": install.hook_command("trigger")}]}
-        entries.append({"matcher": matcher, **entry} if matcher else entry)
+        entries.append({"matcher": on, **entry} if on else entry)
         added.append(f"trigger ({event})")
     event, verb, timeout = USAGE
     if not usage:
@@ -182,7 +182,7 @@ def hook_entries(settings):
         return None
     hooks = data.get("hooks") if isinstance(data, dict) else None
     pre = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
-    out = {}
+    out: dict[str, tuple[str, int]] = {}
     for e in pre if isinstance(pre, list) else []:
         for h in (e.get("hooks") or []) if isinstance(e, dict) else []:
             cmd = str(h.get("command", "")) if isinstance(h, dict) else ""
@@ -412,8 +412,8 @@ def checks(m, row):
             registered = None
         age = (time.time() - paths.PATHS.usage_ledger.stat().st_mtime) / 86400 if paths.PATHS.usage_ledger.is_file() else None
         seen = "never recorded" if age is None else f"last recorded {age:.1f} days ago"
-        stale = registered and (p := install.script_in(registered)) and not p.is_file()
-        if stale:
+        dangling = bool(registered and (p := install.script_in(registered)) and not p.is_file())
+        if dangling:
             row("fail", "usage", f"the SessionEnd hook names a missing script: {p}",
                 "locket uninstall --dry-run, then remove the stale entry and locket install --hooks")
         elif not registered:

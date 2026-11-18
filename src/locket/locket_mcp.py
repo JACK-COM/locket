@@ -26,6 +26,7 @@ into `\\r\\n` and breaks the frame.
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cli
@@ -99,6 +100,7 @@ def serve():
         raw = raw.strip()
         if not raw:
             continue
+        resp: Optional[dict]
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:

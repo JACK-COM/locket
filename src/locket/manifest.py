@@ -167,10 +167,10 @@ def validate_manifest(root):
         data = json.loads(fsio.read_safe(m))
     except (json.JSONDecodeError, OSError) as e:
         return [f"manifest does not parse: {e}"]
-    out = []
+    out: list[str] = []
     _check(data, MANIFEST_SCHEMA, "", out)
-    for i, e in enumerate(data.get("ledgers") or [] if isinstance(data, dict) else []):
-        x = e.get("extends") if isinstance(e, dict) else None
+    for i, entry in enumerate(data.get("ledgers") or [] if isinstance(data, dict) else []):
+        x = entry.get("extends") if isinstance(entry, dict) else None
         if x is not None and x not in LEDGER_SCHEMAS:
             out.append(f"ledgers[{i}].extends: {x!r} is no built-in; one of {', '.join(LEDGER_SCHEMAS)}")
     return out
@@ -236,7 +236,7 @@ HOLDING_SPACES = {"SHORT_TERM.md", "OPEN_QUESTIONS.md", "MEMORY-proposed.md",
 _LEDGER_KEYS = r"[a-z][a-z0-9-]*(?:\|[a-z][a-z0-9-]*)*"
 
 
-LEDGER_SCHEMAS = {
+LEDGER_SCHEMAS: dict[str, dict] = {
     "HISTORY-*-Sessions.csv": {
         "columns": ["date", "title", "summary", "area", "repo", "commit_hash", "issue", "pr"],
         "required": ["date", "title", "summary"],

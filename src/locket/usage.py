@@ -135,7 +135,7 @@ def read_claude(root, since=None, notes=None):
     a resumed session copies the lines it resumes, so a line counts only on the first
     sight of its message id and request id: without that, a day reads about 2.5 times
     its size. Only files touched on or after `since` (epoch seconds) are opened."""
-    rows = defaultdict(_blank)
+    rows: defaultdict[tuple, dict] = defaultdict(_blank)
     if not root.is_dir():
         if notes is not None:
             notes.append(f"claude: no transcripts at {root}; skipped")
@@ -185,7 +185,7 @@ def read_hermes(db, notes=None):
     ones (titles, compression, review) included, which the `sessions` row leaves out;
     a Hermes too old to have it is read from `sessions`. A subagent's calls sit on its
     own session, never its parent's. Read-only, and tolerant of a missing column."""
-    rows = defaultdict(_blank)
+    rows: defaultdict[tuple, dict] = defaultdict(_blank)
     if not db.is_file():
         if notes is not None:
             notes.append(f"hermes: no state.db at {db}; skipped")
@@ -258,7 +258,7 @@ def record(claude=None, hermes=None, full=False, ledger=None, quiet=False):
     since the day before the last record, unless `full` or there is no ledger yet: a line
     dated on or after that day lives in a file modified on or after it."""
     ledger = ledger or paths.PATHS.usage_ledger
-    notes = []
+    notes: list[str] = []
     since = since_day = None
     if not full and ledger.is_file():
         start = dt.date.fromtimestamp(ledger.stat().st_mtime) - dt.timedelta(days=1)
@@ -323,7 +323,7 @@ def summarize(rows, days, today=None):
     base_start = max(start - dt.timedelta(days=BASELINE),
                      min((dt.date.fromisoformat(r["date"]) for r in rows), default=start))
     in_period = [r for r in rows if start.isoformat() <= r["date"] <= today.isoformat()]
-    per_day = defaultdict(lambda: {k: 0 for k in NUMS})
+    per_day: defaultdict[str, dict[str, int]] = defaultdict(lambda: {k: 0 for k in NUMS})
     for r in rows:
         if base_start.isoformat() <= r["date"] < start.isoformat():
             for k in NUMS:

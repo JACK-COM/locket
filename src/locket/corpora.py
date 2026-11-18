@@ -266,14 +266,14 @@ def search_root(words, cwd=None):
         p = Path(os.path.expanduser(os.path.expandvars(w)))
         if not p.is_absolute():
             p = Path(cwd or os.getcwd()) / p
-        p = os.path.normpath(p)             # `..` collapsed, or an excluded dir it passes through still counts
-        if not os.path.exists(p):           # os.path swallows every OSError, a name too long included
+        s = os.path.normpath(p)             # `..` collapsed, or an excluded dir it passes through still counts
+        if not os.path.exists(s):           # os.path swallows every OSError, a name too long included
             # only a glob cut may fall back to its directory (`~/brain/fact*.md` cut to `~/brain/fact`);
             # any other missing word, the verb `grep` first, would fall back to the cwd's own store
-            p = os.path.dirname(p) if cut else ""
-            if not p or not os.path.exists(p):
+            s = os.path.dirname(s) if cut else ""
+            if not s or not os.path.exists(s):
                 continue
-        p = Path(p)
+        p = Path(s)
         root = corpus_for((p if p.is_dir() else p.parent) / "_probe.md")
         if root is not None:
             return root
@@ -305,11 +305,9 @@ def settings(root):
     return _settings_for(root, (next(iter(trust.TRUST_CACHE)), trust.config_digest(root) if pinned else None))
 
 
-def _clear_settings():
+def clear_settings():
+    """Forget every store's settings, after a manifest or the registry changed in this process."""
     _settings_for.cache_clear()
-
-
-settings.cache_clear = _clear_settings      # every caller's reset still works
 
 
 @lru_cache(maxsize=None)

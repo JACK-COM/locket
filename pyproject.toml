@@ -26,3 +26,18 @@ version = {attr = "locket.locket.__version__"}
 
 [tool.setuptools.package-data]
 locket = ["INSTALL-locket.md"]
+
+[tool.mypy]
+# `make typecheck`. The scripts import their siblings bare, so the package directory is
+# the import root; the underscore modules are panoply-lib copies, checked in panoply-lib.
+python_version = "3.9"
+files = ["src/locket"]
+exclude = ['^src/locket/_[a-z]']
+mypy_path = "src/locket"
+explicit_package_bases = true
+ignore_missing_imports = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["_embed", "_settings", "_manifest_schema"]
+follow_imports = "skip"

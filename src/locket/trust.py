@@ -47,7 +47,7 @@ def registry_pins():
     return {str(k): v for k, v in pins.items() if isinstance(v, str)} if isinstance(pins, dict) else {}
 
 
-_DIGESTS = {}
+_DIGESTS: dict[str, tuple] = {}         # store: (stat signature, digest)
 
 
 def config_digest(d):
@@ -60,14 +60,14 @@ def config_digest(d):
     rows = m.get("triggers") if isinstance(m.get("triggers"), str) and m.get("triggers") else "triggers.json"
     rows = Path(rows).expanduser()
     files = [manifest.manifest_file(d), d / manifest.LEGACY_MANIFEST, rows if rows.is_absolute() else d / rows]
-    sig = []
+    parts: list[tuple] = []
     for f in files:
         try:
             st = os.lstat(f)                # ctime: a restored mtime cannot reset it
-            sig.append((str(f), st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size))
+            parts.append((str(f), st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size))
         except OSError:
-            sig.append((str(f), None))
-    sig = tuple(sig)
+            parts.append((str(f), None))
+    sig = tuple(parts)
     hit = _DIGESTS.get(str(d))
     if hit and hit[0] == sig:
         return hit[1]
@@ -84,7 +84,7 @@ def config_digest(d):
     return h.hexdigest()
 
 
-TRUST_CACHE = {}
+TRUST_CACHE: dict[tuple, tuple] = {}    # registry state: (host inodes, pinned rows)
 
 
 def trusted_ids():
@@ -92,7 +92,7 @@ def trusted_ids():
     the registry file changes, because the walk asks once per manifest it meets."""
     try:
         st = paths.PATHS.registry.stat()
-        key = (str(paths.PATHS.registry), st.st_mtime_ns, st.st_size)
+        key: tuple = (str(paths.PATHS.registry), st.st_mtime_ns, st.st_size)
     except OSError:
         key = (str(paths.PATHS.registry), None, None)
     key += tuple(str(p) for p in paths.PATHS.host_stores.values())

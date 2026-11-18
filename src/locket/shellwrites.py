@@ -286,7 +286,8 @@ def bash_write_targets(command, cwd):
                 return Path(c), decidable
         return None
 
-    blocking, opaque = [], []
+    blocking: list[str] = []
+    opaque: list[str] = []
     for pat, start in zip(BASH_WRITE, BASH_WRITE_STARTS):
         for m in write_matches(pat, start, command):
             hit = resolve(m.group("p"), m.start("p"))
@@ -300,12 +301,12 @@ def bash_write_targets(command, cwd):
     # gate's regex does not spell (`write_bytes`, mode `'wb'`) is still seen. Where every
     # destination folds and every call is known, its folded targets are the answer;
     # otherwise it gets the token scan below, as does all text outside a read program.
-    rest = list(command)
+    chars = list(command)
     for src, start, end, unreadable in pywrites.programs(command):
         w = None if unreadable else pywrites.writes(src)
         if w is None:
             continue                            # unread: its tokens stay in `rest`
-        rest[start:end] = " " * (end - start)
+        chars[start:end] = " " * (end - start)
         for t in w.targets:
             # a hole at the end may still be `.md`; inside the name it stands for any text
             probe = (t + ".md" if t.endswith(pywrites.HOLE) else t).replace(pywrites.HOLE, "*")
@@ -322,7 +323,7 @@ def bash_write_targets(command, cwd):
                     flag(resolve(tok, start + m.start()))
                     for base in w.bases:
                         flag(resolve(pywrites.join_path(base, tok), start + m.start()))
-    rest = "".join(rest)
+    rest = "".join(chars)
     if BASH_WRITE_OPAQUE.search(rest):
         for m in re.finditer(r"[\w./~-]+\.md", rest):
             flag(resolve(m.group(), m.start()))

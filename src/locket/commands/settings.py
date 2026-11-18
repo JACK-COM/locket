@@ -149,7 +149,7 @@ def _set_embed(args):
             print(msg, file=sys.stderr)
         if not ok:
             return 1
-    outcome = {}
+    outcome: dict[str, object] = {}
     change = lambda data, findings: _change(args, changes, clearing, data, findings, outcome)
     try:
         if args.dry_run:
@@ -167,9 +167,9 @@ def _set_embed(args):
     if "rc" in outcome:
         return outcome["rc"]
     if args.shared:
-        keys = set(changes) | clearing | (set(_embed.CONFIG_KEYS) if args.reset else set())
+        touched = set(changes) | clearing | (set(_embed.CONFIG_KEYS) if args.reset else set())
         data = _settings.load()[0]
-        for k in sorted(keys):
+        for k in sorted(touched):
             for p in _settings.overriding(data, "embed", k, usable=_embed._usable):
                 print(f"note: {p} sets its own {k}, so this change does not reach {p}; "
                       f"`{p} configure embedder --{k.replace('_', '-')} default` makes it follow the global one")
@@ -213,9 +213,9 @@ def _wrap(text):
 
 def parser():
     import _embed
-    fmt = dict(formatter_class=argparse.RawDescriptionHelpFormatter)
+    fmt = argparse.RawDescriptionHelpFormatter
     p = argparse.ArgumentParser(
-        prog="locket configure", **fmt,
+        prog="locket configure", formatter_class=fmt,
         description=_wrap("Show or change Locket's embedder settings, held in ~/.panoply/config.json, the "
                     "settings file every Panoply piece and every Locket process reads (the command line, "
                     "every hook, the MCP server). Run with no arguments to see each setting, where its "
@@ -235,7 +235,7 @@ def parser():
                "explains the file and what a model change does to each store's index.")
     sub = p.add_subparsers(dest="section", metavar="<section>")
     e = sub.add_parser(
-        "embedder", **fmt, help="the model and server Locket ranks by meaning with",
+        "embedder", formatter_class=fmt, help="the model and server Locket ranks by meaning with",
         description=_wrap("Change the embedder every Locket process uses. Each option writes one key of "
                     "Locket's own `embed` section, or of the top-level one every piece shares with --global; "
                     "options left out keep their current value. Pass `default` as a value to remove that "

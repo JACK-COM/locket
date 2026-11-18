@@ -8,6 +8,7 @@ import fnmatch
 import re
 from collections import Counter
 from pathlib import Path, PurePosixPath
+from typing import Optional
 
 import claims
 import corpora
@@ -38,7 +39,7 @@ def ledger_schemas(root):
             if not isinstance(e, dict) or not isinstance(e.get("path"), str):
                 continue
             own = {k: e[k] for k in manifest.SCHEMA_KEYS if k in e}
-            base = manifest.LEDGER_SCHEMAS.get(e.get("extends")) or _builtin_for(e["path"])
+            base = manifest.LEDGER_SCHEMAS.get(str(e.get("extends"))) or _builtin_for(e["path"])
             out[e["path"]] = _merge_schema(base, own)
             out[e["path"]]["_from"] = f"{manifest.manifest_file(r).name} in {r}"
     return out
@@ -217,7 +218,8 @@ def source_row_decision(path, tool_input, prior, append=False):
         return None, False
     before = Counter(_source_texts(prior, textcol))
     after = _source_texts(post, textcol)
-    added, seen = [], Counter()
+    added: list[str] = []
+    seen: Counter[str] = Counter()
     for t in after:
         seen[t] += 1
         if t and seen[t] > before[t]:
@@ -276,7 +278,8 @@ def declared_csvs(root):
     """[(path, text column or None)] for every CSV the store declares: each
     schema-governed ledger and each registered source, once. These are the
     files the write hook reads on every row written into them."""
-    out, seen = [], set()
+    out: list[tuple[Path, Optional[str]]] = []
+    seen = set()
     for p, text, _label in corpus.csv_sources(root):
         seen.add(p.resolve())
         out.append((p, text))

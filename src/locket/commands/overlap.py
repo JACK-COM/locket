@@ -72,7 +72,9 @@ def across_pairs(stores, floor=claims.PAIR_FLOOR):
     knowing: `_filter_pairs` counts furniture per prefix, so a shared file sits
     in its own bucket rather than in each holder's.
     """
-    holders, bodies, names = {}, {}, {}
+    holders: dict[str, list[str]] = {}
+    bodies: dict[str, str] = {}
+    names: dict[str, str] = {}
     for k, root in sorted(stores.items()):
         rs = corpora.roots_of(root)
         md = {corpora.corpus_key(root, p, rs): str(p.resolve()) for p in corpus.md_files(root)}

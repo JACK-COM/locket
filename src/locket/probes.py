@@ -231,12 +231,12 @@ def _csv_probe_edit(path, textcol):
         return None, f"it does not read as CSV ({type(e).__name__})"
     if len(records) < 2:
         return None, "it holds no row to model the probe on"
-    header, (rec, s, e) = records[0][0], records[-1]
+    header, (rec, s, end) = records[0][0], records[-1]
     if textcol not in header:
         return None, f"its header names no {textcol!r} column"
     if len(rec) != len(header):
         return None, "its last row has a different field count from the header"
-    old = "".join(lines[s:e]).rstrip("\r\n")
+    old = "".join(lines[s:end]).rstrip("\r\n")
     if text.count(old) != 1:
         return None, "its last row also appears earlier in the file"
     row = list(rec)

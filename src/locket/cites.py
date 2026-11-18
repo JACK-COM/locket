@@ -117,7 +117,7 @@ def _own_code_roots(corpus_root):
     if declared is not None:                 # the manifest names them outright
         return [((Path(corpus_root) / d) if not d.is_absolute() else d, frozenset())
                 for d in declared if ((Path(corpus_root) / d) if not d.is_absolute() else d).is_dir()]
-    roots = []
+    roots: list[tuple[Path, frozenset]] = []
     proj = project_dir_for(corpus_root)
     if proj:
         roots.append((proj, frozenset()))
@@ -140,7 +140,7 @@ def code_index(roots):
     """
     idx = defaultdict(list)
     for base, extra in roots:
-        sizes = Counter()
+        sizes: Counter[str] = Counter()
         base_s = str(base)
         for dirpath, dirnames, filenames in os.walk(base):
             # sorted, so the first hit `resolve_citation` reads is the same every run

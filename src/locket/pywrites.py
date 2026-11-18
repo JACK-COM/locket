@@ -90,6 +90,13 @@ _PY_SAME_FUNCS = frozenset(("str", "os.fspath", "os.path.expanduser", "os.path.a
                             "os.path.realpath", "os.path.normpath"))
 
 
+def receiver(call):
+    """The object a method call is made on (`p` in `p.write_text(...)`); the caller has
+    read the call's name as `.method`, which only an attribute call has."""
+    assert isinstance(call.func, ast.Attribute)
+    return call.func.value
+
+
 def programs(command):
     """[(source, start, end, unreadable)] for each Python program in `command`;
     offsets span the program text. `unreadable` marks a body whose literals are not
@@ -128,7 +135,7 @@ class _PyWrites:
         self.steps = 0                      # fold calls this run, against _FOLD_STEPS
         self.binds, self.unknown, self.aliases, self.defs = {}, set(), {}, set()
         self.targets, self.writes, self.decided, self.bases = [], False, True, []
-        accepted = set()
+        accepted: set[str] = set()
         for n in ast.walk(tree):
             if isinstance(n, ast.Assign):
                 for t in n.targets:
@@ -196,7 +203,8 @@ class _PyWrites:
         if isinstance(e, ast.Constant):
             return {e.value} if isinstance(e.value, str) else None
         if isinstance(e, ast.JoinedStr):
-            parts = [{str(v.value)} if isinstance(v, ast.Constant) else (self.fold(v.value, seen) or {HOLE})
+            parts = [{str(v.value)} if isinstance(v, ast.Constant)
+                     else ((self.fold(v.value, seen) if isinstance(v, ast.FormattedValue) else None) or {HOLE})
                      for v in e.values]
             return _cross(parts, lambda a, b: a + b) if parts else {""}
         if isinstance(e, ast.Name):
@@ -224,7 +232,7 @@ class _PyWrites:
             if name in _PY_SAME_FUNCS and len(e.args) == 1:
                 return self.fold(e.args[0], seen)
             if name in (".expanduser", ".resolve", ".absolute") and not e.args:
-                return self.fold(e.func.value, seen)
+                return self.fold(receiver(e), seen)
         return None
 
     def _calls(self, tree):
@@ -261,13 +269,13 @@ class _PyWrites:
                 continue
             method = name[1:] if name.startswith(".") else None
             if method in _PY_WRITE_METHODS:
-                dest = n.func.value
+                dest = receiver(n)
             elif method in ("rename", "replace") and len(n.args) + len(n.keywords) == 1 \
                     and (n.args or n.keywords[0].arg == "target"):
                 dest = self._arg(n, 0, "target")          # Path.rename(dst); str.replace takes two
             elif method == "open" or name in ("open", "io.open", "codecs.open"):
                 builtin = method is None
-                path = (self._arg(n, 0, "file") or self._arg(n, 0, "filename")) if builtin else n.func.value
+                path = (self._arg(n, 0, "file") or self._arg(n, 0, "filename")) if builtin else receiver(n)
                 mode = self._arg(n, 1 if builtin else 0, "mode")
                 m = {"r"} if mode is None else self.fold(mode)
                 if m is None or any(set(x) & set("wax+") for x in m):
@@ -324,7 +332,7 @@ class _PyWrites:
                 return bool(e.args) and self._mdish(e.args[-1], seen)
             if name in (".expanduser", ".resolve", ".absolute", ".with_name", ".with_suffix"):
                 return True if name == ".with_suffix" and e.args and self._mdish(e.args[0], seen) \
-                    else self._mdish(e.func.value, seen)
+                    else self._mdish(receiver(e), seen)
         return False
 
     def _unknown(self, call, *extra):

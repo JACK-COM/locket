@@ -109,7 +109,7 @@ def _doc_guide(module):
     def guide(own):
         import importlib
         own()
-        print("\n" + importlib.import_module(module).__doc__.split("\n\n", 1)[1].rstrip())
+        print("\n" + (importlib.import_module(module).__doc__ or "").split("\n\n", 1)[-1].rstrip())
         return 0
     return guide
 

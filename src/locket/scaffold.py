@@ -30,7 +30,7 @@ def migrate(root):
     old.rename(root / manifest.MANIFEST)
     if repin:
         trust.register(root)
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     return "migrated"
 
 
@@ -150,10 +150,10 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
             man["name"] = name
         man["belongs_to"] = parent
         trust.write_store_file(m, json.dumps(man, indent=2) + "\n")
-        corpora.settings.cache_clear()
+        corpora.clear_settings()
         if not trust.grant_trust(d, confirm):
             return 1
-        corpora.settings.cache_clear()
+        corpora.clear_settings()
         if corpora.parent_of(d, corpora.raw_corpora()) != target:
             print(f"{d} did not resolve to {target} after the write; check for a cycle "
                   f"through {parent!r}", file=sys.stderr)
@@ -218,13 +218,13 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
     else:
         trust.write_store_file(m, json.dumps({"name": name or d.name}, indent=2) + "\n")
         print(f"manifest: {m} (written, name {name or d.name!r})")
-    corpora.settings.cache_clear()
+    corpora.clear_settings()
     if by_convention:
         print("registry: not needed; listed by convention")
     else:
         if not trust.grant_trust(d, confirm):
             return 1
-        corpora.settings.cache_clear()
+        corpora.clear_settings()
     if ledgers is not None and scaffold_ledgers(d, ledgers):
         return 1
     n, rows = len(corpus.md_files(d)), len(corpus.csv_rows(d))
@@ -302,6 +302,6 @@ def scaffold_ledgers(d, name):
             added.append(f.name)
     if added:
         trust.write_store_file(m, json.dumps({**man, "sources": sources}, indent=2) + "\n")
-        corpora.settings.cache_clear()
+        corpora.clear_settings()
         print(f"manifest: {', '.join(added)} registered as sources")
     return 0

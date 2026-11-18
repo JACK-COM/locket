@@ -51,7 +51,7 @@ def ledger_bash_decision(command, cwd):
     if not targets:
         return None, False
     # keyed by resolved path, so two spellings of one ledger share one verdict
-    bodies = {c: [] for c in targets}
+    bodies: dict[str, list[str]] = {c: [] for c in targets}
 
     owners = {}                             # pipeline span: the ledgers it redirects into
 

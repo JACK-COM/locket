@@ -92,8 +92,8 @@ def run(target=None):
         if r is None or r in seen:
             continue
         seen.add(r)
-        for step in STORE:
-            what = step(r)
+        for store_step in STORE:
+            what = store_step(r)
             if what not in ("none", "already") or one:   # done or never needed is not news on a sweep
                 print(f"{r}: {what}"); n += 1
     if not n:

@@ -121,7 +121,7 @@ class ClaimCache(unittest.TestCase):
         (self.root / manifest.MANIFEST).write_text(json.dumps({
             "index_files": [], "ledger_surfaces": [],
             "sources": [{"path": "R.csv", "text": "Ruling", "label": "Area"}]}))
-        corpus.corpora.settings.cache_clear()           # the manifest changed on disk
+        corpus.corpora.clear_settings()           # the manifest changed on disk
         self.assertEqual(len(corpus.csv_rows(self.root)), 1)
         self.assertEqual(len(self.index_of().get("R.csv#ops", [])), 1)
 

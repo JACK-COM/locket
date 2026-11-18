@@ -46,7 +46,8 @@ def unwrap(txt):
     line is kept as its segments and joined once, and only its tail is tested for an
     ending, because rebuilding and re-searching the whole line on every wrap made one
     unpunctuated 200 KB file cost seconds inside the write hook."""
-    out, joinable = [], False               # each line as its segments; may the last take a wrap
+    out: list[list[str]] = []               # each line as its segments; may the last take a wrap
+    joinable = False
     for ln in txt.split("\n"):
         if (joinable and not _ENDS.search(_tail(out[-1]))
                 and ln.strip() and not _LINE_MEANINGFUL.match(ln)):
@@ -166,7 +167,8 @@ def _inverted(items, df):
 
 
 def cross_file_pairs(docs, floor=PAIR_FLOOR, same_file=False):
-    items, df = [], Counter()
+    items: list[tuple[str, str, frozenset]] = []
+    df: Counter[str] = Counter()
     for name, txt in docs.items():
         for s, ts in claims(txt):
             items.append((name, s, ts))
@@ -279,7 +281,7 @@ def _ranked(index, incoming, inc_all, hidden):
     """`score_against`'s rows for one index, skipping the names `hidden` drops."""
     items = index.items
     overlap = Counter(items[i][0] for w in inc_all for i in index.postings.get(w, ()))
-    best = {}                                   # file number: (score, order, pair)
+    best: dict[int, tuple] = {}                 # file number: (score, order, pair)
     for k, (isent, its) in enumerate(incoming):
         for i in index.candidates(its):
             f, s, ts = index.items[i]

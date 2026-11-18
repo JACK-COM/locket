@@ -66,7 +66,7 @@ def grep_words(cmd, cwd=None, _nested=False):
         return os.path.exists(os.path.join(cwd or os.getcwd(), w))
 
     for i in verbs:
-        seg = []
+        seg: list[str] = []
         for t in toks[i + 1:]:
             if t and not t.strip("();<>|&"):   # an operator ends the grep's words
                 if t[0] in "<>" and seg and seg[-1].isdigit():

@@ -53,7 +53,8 @@ def normalise(payload):
         return None
     ti = payload.get("tool_input")
     if not isinstance(ti, dict):
-        ti = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+        args = payload.get("args")
+        ti = args if isinstance(args, dict) else {}
     host = BY_NAME[host_of(payload)]
     tool, ti = host.native(payload, payload.get("tool_name"), dict(ti))
     # A relative path resolves against the SESSION's cwd, which the payload

@@ -5,3 +5,5 @@ pre-commit:
       run: ../panoply-lib/sync.sh --check locket
     selftest:
       run: python3 -m unittest discover -s tests -t . && python3 src/locket/locket.py selftest
+    typecheck:
+      run: make typecheck

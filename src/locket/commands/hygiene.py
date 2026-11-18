@@ -258,7 +258,8 @@ def cmd_links(root):
     stems = [p.stem for p in corpus.md_files(root)]      # same walker as `dangling`, or
                                                   # the classifier and the thing it
                                                   # classifies disagree
-    resolvable, unresolved = {}, {}
+    resolvable: dict[str, tuple] = {}
+    unresolved: dict[str, tuple] = {}
     for t, files in d.items():
         key = t.replace("-", "_")
         hits = [f for f in stems if f.endswith("_" + key)]

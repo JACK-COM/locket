@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 from pathlib import Path
+from typing import Optional
 
 import corpora
 import gate
@@ -39,7 +40,8 @@ def parse_patch(text):
     m = PATCH_BODY.search((text or "").replace("\r\n", "\n"))
     if not m:
         return []
-    out, cur = [], None
+    out: list[list] = []
+    cur: Optional[list] = None
     for line in m.group(1).split("\n"):
         f = PATCH_FILE.fullmatch(line.rstrip())
         if f:
@@ -162,6 +164,8 @@ def trust_status(timeout=20, version=""):
                              start_new_session=True)    # an npm launcher's native child dies with it
     except OSError:
         return None
+    stdin, stdout = p.stdin, p.stdout
+    assert stdin is not None and stdout is not None     # both opened as PIPE
 
     def kill():
         try:
@@ -172,7 +176,7 @@ def trust_status(timeout=20, version=""):
     timer.start()
 
     def reply_to(i):
-        for line in p.stdout:
+        for line in stdout:
             try:
                 m = json.loads(line)
             except ValueError:
@@ -185,7 +189,7 @@ def trust_status(timeout=20, version=""):
                        "name": "locket-doctor", "title": None, "version": version}, "capabilities": None}},
                   {"method": "initialized"},
                   {"id": 2, "method": "hooks/list", "params": {"cwds": [str(hosts.codex())]}}):
-            p.stdin.write(json.dumps(m) + "\n"); p.stdin.flush()
+            stdin.write(json.dumps(m) + "\n"); stdin.flush()
             if m.get("id") == 1 and reply_to(1) is None:
                 return None
         reply = reply_to(2)
@@ -195,7 +199,7 @@ def trust_status(timeout=20, version=""):
     finally:
         timer.cancel()
         kill()
-        for f in (p.stdin, p.stdout):
+        for f in (stdin, stdout):
             try:
                 f.close()
             except OSError:

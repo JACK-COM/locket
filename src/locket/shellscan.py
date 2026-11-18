@@ -104,7 +104,7 @@ def scan(command):
     # "expand" (`${...}` or `$[...]`, closed by `}` or `]`), each with its start. Inside
     # "dq" only `\`, `"`, `$(`, `${` and backticks mean anything; inside "expand" no
     # `<<` opens a heredoc and no `#` starts a comment.
-    stack = []
+    stack: list[tuple] = []
     closers = _closers(command)
 
     def arith_end(i):
@@ -267,7 +267,7 @@ _NOT_NEWLINE = re.compile(r"[^\n]")
 def _blank(command, spans, newlines):
     """`command` with each span blanked to spaces. Spans nest (a quote inside `$(` inside
     a quote), so they are merged first: blanking each in turn costs their summed length."""
-    merged = []
+    merged: list[list[int]] = []
     for a, b in sorted(spans):
         if merged and a <= merged[-1][1]:
             merged[-1][1] = max(merged[-1][1], b)

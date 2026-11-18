@@ -39,7 +39,8 @@ which a markdown-only index cannot see at all.
 Falls back with a clear message when ollama is not running; it is never a
 dependency of anything that must succeed.
 """
-import sys, os, json, math, time
+import sys, os, json, math, time, types
+from typing import Optional
 from pathlib import Path
 
 import numpy as np
@@ -79,7 +80,7 @@ def __getattr__(name):
     raise AttributeError(f"module 'memfind' has no attribute {name!r}")
 
 
-class _Module(type(sys)):
+class _Module(types.ModuleType):
     def __setattr__(self, name, value):
         if name in _EMBED_SETTINGS:
             key = "VENV" if name == "LOCKET_VENV" else name
@@ -116,7 +117,7 @@ def corpus_fingerprint(root):
     # many SKILL.md and MEMORY.md, and a basename key silently overwrote them,
     # leaving stale detection blind to every file but the last of each name.
     rs = corpora.roots_of(root)
-    fp = {corpora.corpus_key(root, p, rs): [p.stat().st_mtime_ns, p.stat().st_size]
+    fp: dict[str, object] = {corpora.corpus_key(root, p, rs): [p.stat().st_mtime_ns, p.stat().st_size]
           for p in sorted(corpus.md_files(root))}
     # The registered CSVs and the manifest naming them, so editing either one, or
     # adding a source, invalidates the index exactly as editing a memory file does.
@@ -175,7 +176,8 @@ def build_index(root, quiet=False):
 
     meta_p, vec_p = cache_paths(root)
     active = tag(resolve_backend()[0])
-    old_items, old_vecs, old_dim, old_fp = [], None, None, {}
+    old_items, old_dim, old_fp = [], None, {}
+    old_vecs: Optional[np.ndarray] = None
     if meta_p.exists() and vec_p.exists():
         try:
             m = read_meta(meta_p)
@@ -210,7 +212,9 @@ def build_index(root, quiet=False):
 
     fp = corpus_fingerprint(root)
     t = time.time()
-    items, parts, dim = [], [], old_dim
+    items: list[tuple[str, str]] = []
+    parts: list = []
+    dim = old_dim
     reused = fresh_files = 0
     for name, sents in per_file.items():
         if not sents:
@@ -221,6 +225,7 @@ def build_index(root, quiet=False):
                      and old_slice[name][1] == len(sents))
         if unchanged:
             start, count = old_slice[name]
+            assert old_vecs is not None             # `unchanged` holds only with a cache
             parts.append(old_vecs[start:start + count])
             reused += count
         else:
@@ -248,6 +253,7 @@ def build_index(root, quiet=False):
                 parts.append(fresh[text][None])
             else:
                 pos = old_row[text]
+                assert old_vecs is not None         # a row reused, not re-embedded, came from the cache
                 parts.append(old_vecs[pos:pos + 1])
                 reused += 1
             items.append((label, text))
@@ -397,7 +403,7 @@ def lexical_rank(statement, root, top=5, per_file=True, items=None):
         return (k1 + 1) / (1 + k1 * (1 - b + b * dl / avgdl))
 
     ideal = sum(idf.values()) * norm(len(q))
-    best = {}
+    best: dict[int, tuple[float, int]] = {}
     for i, t in enumerate(toks):
         shared = q & t
         if not shared:
@@ -441,7 +447,7 @@ def rank(statement, root, top=5, per_file=True, quiet=False, idx=None, lexical=T
                             items=idx[0] if idx else None)
     scores = _embed.cosines(qv, vecs).tolist()
     if per_file:
-        best = {}
+        best: dict = {}
         for i, c in enumerate(scores):
             f = items[i][0]
             # A CSV row is its own unit, so it never groups: the reader wants the ROW.
@@ -489,7 +495,7 @@ def siblings(root, top=30, quiet=False, idx=None):
     # Rows are excluded outright. A CSV row is one claim rather than a file with a
     # subject, so a per-row centroid is the claim itself, and pairing thousands of
     # them is quadratic in rows rather than in files.
-    per_file = {}
+    per_file: dict[str, list[int]] = {}
     for i, (name, _) in enumerate(items):
         if _is_row(name):
             continue
