@@ -10,10 +10,13 @@ import shutil
 import sys
 from pathlib import Path
 
-import _settings
+import corpora
 import hosts
-import memscan
+import manifest
 import paths
+import scaffold
+import _settings
+import trust
 
 
 HERE = Path(__file__).resolve().parent
@@ -180,7 +183,7 @@ def cmd_install(argv=()):
     if rc:
         return rc
     try:
-        memscan.cmd_schema(quiet=True); print(f"schema: {paths.PATHS.schema_file}")
+        scaffold.cmd_schema(quiet=True); print(f"schema: {paths.PATHS.schema_file}")
     except OSError as e:
         print(f"schema: not written ({e})")
     stale = paths.PATHS.schema_file.parent / "memfind.schema.json"   # the file's name before the rename
@@ -265,7 +268,7 @@ def _caches():
     """Every in-store `.memfind/` cache a release before 0.12 may have written: at each
     store root, in each member of a host store (older layout), and in every registered
     path. Nothing reads them now; `migrate` names them and `uninstall` removes them."""
-    roots = set(memscan._raw_corpora().values()) | set(memscan.registry())
+    roots = set(corpora._raw_corpora().values()) | set(trust.registry())
     out = set()
     for r in roots:
         if not r.is_dir():
@@ -278,10 +281,10 @@ def _caches():
 
 
 def _manifests():
-    roots = set(memscan._raw_corpora().values()) | set(memscan.registry())
+    roots = set(corpora._raw_corpora().values()) | set(trust.registry())
     out = []
     for r in roots:
-        for name in (memscan.MANIFEST, memscan.OLD_MANIFEST):
+        for name in (manifest.MANIFEST, manifest.OLD_MANIFEST):
             if (r / name).is_file():
                 out.append(r / name)
     return sorted(out)
@@ -400,7 +403,7 @@ def cmd_uninstall(argv):
         print("  nothing; Locket is not installed here")
     if dry:
         return 0
-    if purge and manifests and not memscan.person_confirms(
+    if purge and manifests and not trust.person_confirms(
             f"Delete the locket.json in {len(manifests)} stores, and the usage ledger?",
             [str(m) for m in manifests[:8]], "delete them"):
         # every store's configuration at once is a person's call, --yes or not

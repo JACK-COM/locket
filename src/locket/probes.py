@@ -11,10 +11,15 @@ import shutil
 import sys
 from pathlib import Path
 
+import corpus
+import health
 import hosts
 import install
+import ledger
+import manifest
 import memscan
 import paths
+import trust
 
 
 # A paragraph long enough to clear the gate's floor (`gate.MIN_ADDED`), written into a
@@ -160,7 +165,7 @@ def _probe_hook(cmd, codex=False):
     base.mkdir(parents=True, exist_ok=True)
     store = Path(tempfile.mkdtemp(prefix="doctor-probe-", dir=base))
     try:
-        (store / memscan.MANIFEST).write_text("{}\n")
+        (store / manifest.MANIFEST).write_text("{}\n")
         (store / "harbour.md").write_text(_PROBE + "\n")
         payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Write",
                               "tool_input": {"file_path": str(store / "zz-probe.md"), "content": _PROBE}}
@@ -174,7 +179,7 @@ def _probe_hook(cmd, codex=False):
         # adds a row to the live one and an untrusted manifest stays inert as it should
         reg = store / ".registry.json"
         reg.write_text(json.dumps({"corpora": [str(store.resolve())],
-                                   "pins": {str(store.resolve()): memscan.config_digest(store.resolve())}}))
+                                   "pins": {str(store.resolve()): trust.config_digest(store.resolve())}}))
         r, _secs = _run_hook(cmd, payload, 30, LOCKET_HEALTH_DIR=str(store / ".health"),
                              LOCKET_REGISTRY=str(reg))
         if r is None:
@@ -209,11 +214,11 @@ def _hook_timeout(settings, verb):
     return entry[1] if entry else CLAUDE_HOOK_DEFAULT_TIMEOUT
 
 
-def _probe_problem(r, health):
+def _probe_problem(r, record):
     """The first way a probe run failed open, or None: a crash (an exit other than 0 or
     2, or a traceback) or an error the hook's catch-all swallowed into its health record.
     A fast run that failed open is not a fast hook, so every latency probe asks this."""
-    _rec, problems = memscan.health_report(health, fold=False, kinds=("errors",))
+    _rec, problems = health.health_report(record, fold=False, kinds=("errors",))
     if r is not None and (r.returncode not in (0, 2) or "Traceback" in r.stderr):
         last = (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1][:120]
         problems = [f"the hook crashed ({last}), so the call ran unchecked"] + problems
@@ -257,7 +262,7 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
         for i, (name, root) in enumerate(sorted(stores.items())):
             root = Path(root)
             try:
-                if root not in host_roots and not memscan.has_content(root):
+                if root not in host_roots and not corpus.has_content(root):
                     continue                # nothing to score: neither markdown nor registered rows
             except OSError:
                 continue
@@ -268,17 +273,17 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
                                   "tool_name": "Write" if verb == "hook" else "Grep",
                                   "session_id": "locket-doctor-latency", "cwd": str(root),
                                   "transcript_path": str(transcript), "tool_input": ti})
-            health = Path(scratch) / f"health-{i}"
+            record = Path(scratch) / f"health-{i}"
             r, secs = _run_hook(cmd, payload, limit, LOCKET_GREPASSIST_LOG=os.devnull,
-                                LOCKET_HEALTH_DIR=str(health))
+                                LOCKET_HEALTH_DIR=str(record))
             crashed = r is not None and (r.returncode not in (0, 2) or "Traceback" in r.stderr)
             if limit / 2 < secs < limit and not crashed:
                 # A first run after an upgrade, or on a store whose index the OS has not cached,
                 # pays a one-time cost; the second run is what each later write pays, slower or
                 # faster, so it is the one reported, a timeout included.
                 r, secs = _run_hook(cmd, payload, limit, LOCKET_GREPASSIST_LOG=os.devnull,
-                                    LOCKET_HEALTH_DIR=str(health))
-            problem = _probe_problem(r, health)
+                                    LOCKET_HEALTH_DIR=str(record))
+            problem = _probe_problem(r, record)
             if problem and opened is None:
                 opened = (name, problem)
             if worst is None or secs > worst[1]:
@@ -295,7 +300,7 @@ def _declared_sizes(stores, names):
     out, seen = [], set()
     for n in names:
         try:
-            declared = memscan.declared_csvs(Path(stores[n]))
+            declared = ledger.declared_csvs(Path(stores[n]))
         except OSError:
             continue
         for p, text in declared:
@@ -344,7 +349,7 @@ def _csv_probe_edit(path, textcol):
     buf = _io.StringIO()
     _csv.writer(buf, lineterminator="").writerow(row)
     ti = {"file_path": str(path), "old_string": old, "new_string": old + "\n" + buf.getvalue()}
-    if memscan.ledger_decision(str(path), ti) != (None, False):
+    if ledger.ledger_decision(str(path), ti) != (None, False):
         return None, "a row modelled on its last row breaks its schema"
     return ti, None
 
@@ -371,12 +376,12 @@ def _csv_hook_latency(cmd, target, limit):
         payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Edit",
                               "session_id": "locket-doctor-latency", "cwd": str(path.parent),
                               "transcript_path": str(tr), "tool_input": ti})
-        health = Path(scratch) / "health"
-        env = {"LOCKET_GREPASSIST_LOG": os.devnull, "LOCKET_HEALTH_DIR": str(health)}
+        record = Path(scratch) / "health"
+        env = {"LOCKET_GREPASSIST_LOG": os.devnull, "LOCKET_HEALTH_DIR": str(record)}
         r, secs = _run_hook(cmd, payload, limit, **env)
         if limit / 2 < secs < limit:       # the second run is what each later write pays
             r, secs = _run_hook(cmd, payload, limit, **env)
-        problem = _probe_problem(r, health)
+        problem = _probe_problem(r, record)
         if problem is None and r is not None and r.returncode == 2:
             problem = "the hook blocked the probe row, so the scoring was never reached"
     return secs, problem, None

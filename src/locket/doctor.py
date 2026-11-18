@@ -8,13 +8,18 @@ import shutil
 import sys
 from pathlib import Path
 
-import _settings
 import adapters
+import corpora
+import corpus
+import health
 import hosts
 import install
-import memscan
+import ledger
+import manifest
 import paths
 import probes
+import _settings
+import trust
 
 
 def _system_line():
@@ -36,10 +41,10 @@ def cmd_status():
     print(f"scripts: {install.HERE}")
     print(f"on PATH: {'yes' if str(install.BIN) in os.environ.get('PATH', '').split(os.pathsep) else 'no'}")
     print(f"system: {_system_line()}")
-    print(f"registry: {paths.PATHS.registry} ({len(memscan.registry())} added with `locket init`; "
+    print(f"registry: {paths.PATHS.registry} ({len(trust.registry())} added with `locket init`; "
           f"host memory folders are found without it)")
     print(install._embedder_line())
-    n = len(memscan.all_corpora())
+    n = len(corpora.all_corpora())
     print(f"corpora: {n}  (`locket corpora` lists them)")
     print(adapters.gate_status())
     return 0
@@ -61,14 +66,14 @@ def cmd_doctor(version=""):
     row("ok", "selftest", "the write hook fires and an audit finds a pair") if broken is None \
         else row("fail", "selftest", broken[:160], "locket selftest")
 
-    stores = memscan.all_corpora()
+    stores = corpora.all_corpora()
     full = []
     if stores:
         # Named stores with something in them first; a project slug or an empty auto-memory
         # (one per folder a session ever ran in) is counted, not listed.
         def _holds(r):
             try:
-                return memscan.has_content(r)
+                return corpus.has_content(r)
             except OSError:
                 return False
         full = sorted((n for n, r in stores.items() if _holds(r)), key=lambda n: (n.startswith("-"), n))
@@ -79,20 +84,20 @@ def cmd_doctor(version=""):
     else:
         row("fail", "stores", "none found", "locket init <folder of markdown>")
     # A host store or a project memory is a store by convention and needs no manifest.
-    conventional = set(memscan._raw_corpora().values())
+    conventional = set(corpora._raw_corpora().values())
     # a store trusted by convention has no pin, so a rows file appearing in one is named
     for d in sorted((hosts.claude() / "projects").glob("*/memory")):
         if (d / "triggers.json").is_file():
             row("warn", "config", f"{d / 'triggers.json'} adds trigger rows to a project's auto-memory, "
                 "which is trusted without a pin; read it, and delete it if you did not write it")
-    unpinned = [r for r in memscan.registry() if str(r) not in memscan.registry_pins()]
+    unpinned = [r for r in trust.registry() if str(r) not in trust.registry_pins()]
     if unpinned:
         row("warn", "trust", f"{len(unpinned)} stores registered before 0.12 act as no store until pinned: "
             + ", ".join(map(str, unpinned[:4])), "locket migrate  (at a terminal)")
     skipped = []
     for r in set(stores.values()):
         try:
-            skipped += memscan.skipped_files(r)
+            skipped += corpus.skipped_files(r)
         except OSError:
             continue
     if skipped:
@@ -101,21 +106,21 @@ def cmd_doctor(version=""):
         row("warn", "skipped", f"{len(skipped)} store files are never read: {shown}",
             "replace a link or hard link with the file itself; a markdown file past the cap is not read")
     try:
-        loose = memscan.untrusted_stores()
+        loose = trust.untrusted_stores()
     except Exception as e:                  # a failed scan is reported, never read as "none found"
         loose = None
         row("warn", "trust", f"the scan for untrusted stores failed ({type(e).__name__}: {e})")
     for d in loose or []:
-        why = ("changed since you trusted it" if memscan.changed_since_trust(d) else "not trusted")
-        row("warn", "trust", f"{d} holds a {memscan.MANIFEST} that is {why}, so it acts as no store: "
+        why = ("changed since you trusted it" if trust.changed_since_trust(d) else "not trusted")
+        row("warn", "trust", f"{d} holds a {manifest.MANIFEST} that is {why}, so it acts as no store: "
             "its trigger rows, ledger schemas and sources are ignored",
-            f"locket trust {shlex.quote(str(d))}  (at a terminal, if you made it), or delete its {memscan.MANIFEST}")
+            f"locket trust {shlex.quote(str(d))}  (at a terminal, if you made it), or delete its {manifest.MANIFEST}")
     if loose is not None:
         row("ok", "trust", "scope: directories Claude Code, Codex or Hermes have opened a session in, "
             "and their parents" + ("" if loose else "; no untrusted store found"))
-    for gone in (p for p in memscan.registry_stale() if p not in conventional):
+    for gone in (p for p in trust.registry_stale() if p not in conventional):
         q = shlex.quote(str(gone))
-        row("warn", "registry", f"{gone} is registered but its {memscan.MANIFEST} is gone, so `all` and the "
+        row("warn", "registry", f"{gone} is registered but its {manifest.MANIFEST} is gone, so `all` and the "
             "store list no longer include it", f"locket init {q}  (to keep it), or  locket forget {q}")
 
     import configure
@@ -160,15 +165,15 @@ def cmd_doctor(version=""):
     # index and `index all` skips it, so it never counts against this check
     # The meaning index builds from markdown only, so a store holding only CSV rows has none to build.
     unindexed = [n for n in full if not install._memfind().cache_paths(stores[n])[0].is_file()
-                 and memscan.has_content(stores[n], csv=False)]
+                 and corpus.has_content(stores[n], csv=False)]
     if unindexed:
         row("warn", "index", f"not built for {', '.join(sorted(unindexed))}", "locket index all")
     elif stores:
         row("ok", "index", "built for every store")
 
     sizes = probes._declared_sizes(stores, full)
-    reading = f"{memscan.CSV_REPORT_BYTES / 1048576:g} MB"
-    big = [s for s in sizes if s[3] > memscan.CSV_REPORT_BYTES]
+    reading = f"{ledger.CSV_REPORT_BYTES / 1048576:g} MB"
+    big = [s for s in sizes if s[3] > ledger.CSV_REPORT_BYTES]
     if big:
         more = f", and {len(big) - 4} more" if len(big) > 4 else ""
         row("warn", "csv size", "; ".join(f"{p.name} in {n} is {b / 1048576:.1f} MB" for n, p, _t, b in big[:4])
@@ -257,7 +262,7 @@ def cmd_doctor(version=""):
 
     # Live runs, every host alike: a hook the host abandoned at its timeout, or one whose
     # catch-all swallowed an error, let its call through unchecked.
-    rec, problems = memscan.health_report()
+    rec, problems = health.health_report()
     if problems:
         row("fail", "hook health", f"since {rec.get('since', '?')}: " + "; ".join(problems),
             "find the cause, then `locket doctor --ack` to mark these seen")
@@ -278,15 +283,15 @@ def cmd_doctor(version=""):
             if probe is True:
                 # the probe runs the command directly, so it proves the hook, not Codex's dispatch;
                 # whether Codex will dispatch it is trust, which only Codex's own hooks/list may say
-                trust = probes._codex_trust(version=version)
-                lapsed = [k for k, s in (trust or {}).items() if s != "trusted"]
+                granted = probes._codex_trust(version=version)
+                lapsed = [k for k, s in (granted or {}).items() if s != "trusted"]
                 gap = probes._profile_trust_gap(hosts.codex(), lapsed) if lapsed else {}
-                if not trust:               # {} too: a reply naming no Locket entry proves nothing
+                if not granted:               # {} too: a reply naming no Locket entry proves nothing
                     row("warn", "codex hooks", "registered, and the write hook fires on a known fork in a patch; "
                         "Codex could not report trust, and skips a hook until it is trusted",
                         "in codex, run /hooks and trust each Locket entry")
                 elif not lapsed:
-                    row("ok", "codex hooks", f"registered, firing on a known fork in a patch, and trusted ({len(trust)} entries)")
+                    row("ok", "codex hooks", f"registered, firing on a known fork in a patch, and trusted ({len(granted)} entries)")
                 elif gap:
                     prof = ", ".join(f.name for f in gap)
                     row("warn", "codex hooks", f"{len(lapsed)} entries untrusted in config.toml, but trusted in {prof}, "
@@ -295,7 +300,7 @@ def cmd_doctor(version=""):
                         "recopy after any change to hooks.json")
                 else:
                     row("warn", "codex hooks", "registered and firing, but Codex reports " +
-                        ", ".join(f"{k.split(':', 1)[1]} {trust[k]}" for k in lapsed),
+                        ", ".join(f"{k.split(':', 1)[1]} {granted[k]}" for k in lapsed),
                         "in codex, run /hooks and trust each Locket entry")
             else:
                 row("fail", "codex hooks", "registered, but the write hook " +
