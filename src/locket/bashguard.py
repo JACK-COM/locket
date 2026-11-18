@@ -216,9 +216,24 @@ def _trust_verb(sh):
     return (TRUST_REFUSAL, True) if _TRUST_VERB.search(sh.bare) else None
 
 
+# The shell refuses a command that NAMES one of these files, reading or not, because what a
+# command writes cannot always be read off its text; each message names the way to read.
+SHELL_CONFIG_REFUSAL = (
+    "This shell command names {name}, the configuration that decides what Locket does in {store}, "
+    "and a shell command naming it is refused whether or not it writes. To read it, open it with "
+    "your file-reading tool, which no Locket guard refuses; `locket schema {store}` checks it. A person "
+    "edits it by hand: tell the user what you would change and why.")
+SHELL_REGISTRY_REFUSAL = (
+    "This shell command names Locket's trust registry or embedder settings ({reg}), and a shell "
+    "command naming either is refused whether or not it writes. To read them, `locket corpora` lists "
+    "the stores and `locket configure` shows each setting and where it comes from. Changing either is "
+    "a person's act at a terminal: ask the user to run  locket trust <dir>, locket untrust <dir>  or  "
+    "locket configure embedder ...  themselves.")
+
+
 def _store_config(sh):
     cfg = shell_store_config(sh.bare, sh.cwd)
-    return None if cfg is None else (gate.CONFIG_REFUSAL.format(name=cfg[1], store=cfg[0]), True)
+    return None if cfg is None else (SHELL_CONFIG_REFUSAL.format(name=cfg[1], store=cfg[0]), True)
 
 
 def _registry(sh):
@@ -227,7 +242,7 @@ def _registry(sh):
     b = sh.bare
     if (".locket" in b and ("corpora.json" in b or "config.json" in b)) \
             or (".panoply" in b and "config.json" in b) or any(str(p) in b for p in gate.registry_paths()):
-        return gate.REGISTRY_REFUSAL.format(reg=paths.PATHS.registry), True
+        return SHELL_REGISTRY_REFUSAL.format(reg=paths.PATHS.registry), True
     return None
 
 

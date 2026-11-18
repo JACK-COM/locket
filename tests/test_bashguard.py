@@ -237,5 +237,19 @@ class Registry(StoreCase):
         self.assertTrue(blocking, msg)
 
 
+class ReadingConfig(StoreCase):
+    COUNCIL = False
+
+    def test_a_refused_read_names_the_way_to_read(self):
+        """A command naming a store's manifest is refused, reading or not; the refusal
+        says so and names the file tool, so it never reads as a bug to work around."""
+        store = (self.tmp / "s").resolve(); store.mkdir()
+        (store / manifest.MANIFEST).write_text("{}\n")
+        msg, blocking = bashguard.decide(f"cat {store / manifest.MANIFEST}", str(self.tmp))
+        self.assertTrue(blocking, msg)
+        self.assertIn("file-reading tool", msg)
+        self.assertNotIn("This write", msg)
+
+
 if __name__ == "__main__":
     unittest.main()
