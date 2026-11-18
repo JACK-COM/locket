@@ -116,7 +116,7 @@ def t_find(args):
     for root in roots:
         rows = memfind.rank(statement, root, top=top, quiet=True)
         out.append(f"store: {root}")
-        out.extend(f"[{c:.3f}] {f}\n        {s[:190]}" for c, f, s in rows)
+        out.extend(f"[{c:.3f}] {memscan.relay(f, 160)}\n        {memscan.relay(s, 190)}" for c, f, s in rows)
         if memfind.LAST_RANK_MODE == "lexical":
             out.append("WORD OVERLAP ONLY: no embedder could be reached, so this cannot see a "
                        "paraphrase and a silent result is not evidence the store is silent.")
@@ -255,7 +255,7 @@ TOOLS = {
                             "the reply names that command for you to pass on. Idempotent.",
                     {"path": {"type": "string", "description": "Absolute path of the folder."}}),
     "locket_forget": (t_forget, "Drop a store from the registry. The folder's locket.json and "
-                                "its cache in ~/.locket/cache is rebuilt if it is trusted again.",
+                                "stays in the folder, inert; its index under ~/.locket/cache stays until uninstall.",
                       {"path": {"type": "string", "description": "Absolute path of the folder."}}),
     "locket_find": (t_find,
                     "Which memory files already hold this idea, ranked by meaning. Call it "

@@ -207,15 +207,19 @@ def registry_stale():
     return [p for p in registry() if not has_manifest(p)]
 
 
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
+_INVISIBLE = frozenset(("Cc", "Cf", "Co", "Cs", "Cn", "Zl", "Zp"))
 
 
 def relay(text, limit=200):
     """Text from a store, made safe to put in front of an agent or on a terminal:
-    control characters and line breaks become one space (a newline is how a planted
-    label poses as a fresh instruction; an escape sequence rewrites a terminal), and
-    the result is cut to `limit` characters."""
-    flat = _CONTROL.sub(" ", str(text)).strip()
+    every control, format, private-use, unassigned and line-separator character
+    becomes a space (a newline is how a planted label poses as a fresh instruction;
+    an escape sequence rewrites a terminal; bidi overrides, zero-width marks and tag
+    characters hide text from the person reading it), runs collapse, and the result
+    is cut to `limit` characters."""
+    import unicodedata
+    flat = "".join(" " if unicodedata.category(c) in _INVISIBLE else c for c in str(text)[:limit * 4])
+    flat = " ".join(flat.split())
     return flat if len(flat) <= limit else flat[:limit - 1] + "\u2026"
 
 
@@ -360,14 +364,22 @@ def human_confirms(d):
     not be enough. A determined agent can fake a terminal (`script`, a pty); that
     is a deliberate circumvention, the same class as editing the registry by hand,
     which the write gate refuses separately."""
+    return person_confirms(
+        f"Trust {d} as a Locket store? Its manifest can then add trigger rows that refuse "
+        f"tool calls, ledger schemas and source files. Only trust a directory you made or have read.",
+        trust_summary(d), "trust it")
+
+
+def person_confirms(question, details, act):
+    """True only when a person at a terminal types `yes` to `question`. The one
+    gate for every setting an agent must not be able to change on its own word."""
     if not (sys.stdin.isatty() and sys.stderr.isatty()):
         return False
     say = lambda line: print(line, file=sys.stderr)   # one stream for the whole exchange
-    say(f"Trust {d} as a Locket store? Its manifest can then add trigger rows that refuse "
-        f"tool calls, ledger schemas and source files. Only trust a directory you made or have read.")
-    for line in trust_summary(d):
+    say(question)
+    for line in details:
         say(f"  {relay(line)}")
-    sys.stderr.write("Type yes to trust it: "); sys.stderr.flush()
+    sys.stderr.write(f"Type yes to {act}: "); sys.stderr.flush()
     try:
         return sys.stdin.readline().strip() == "yes"
     except (EOFError, OSError):
@@ -889,7 +901,7 @@ def validate_manifest(root):
     if not m.is_file():
         return []
     try:
-        data = json.loads(m.read_text())
+        data = json.loads(read_safe(m))
     except (json.JSONDecodeError, OSError) as e:
         return [f"manifest does not parse: {e}"]
     out = []
@@ -925,6 +937,13 @@ def settings(root):
     trusted or untrusted in another process is seen without a restart."""
     _trusted_ids()
     return _settings_for(root, next(iter(_TRUST_CACHE)))
+
+
+def _clear_settings():
+    _settings_for.cache_clear()
+
+
+settings.cache_clear = _clear_settings      # every caller's reset still works
 
 
 @lru_cache(maxsize=None)
@@ -1020,24 +1039,22 @@ _ENDS = re.compile(r"""[.!?;:]["')\]*_`]*\s*$""")
 _LINE_MEANINGFUL = re.compile(r"""\s*(?:[-*+]\s|#|>|\||\d+[.)]\s|```|$)""")
 _NO_JOIN_FROM = re.compile(r"""\s*(?:#|\||```|$)""")   # a bullet's continuation is still its sentence
 
-settings.cache_clear = _settings_for.cache_clear   # every caller's reset still works
-
 
 def unwrap(txt):
     """`txt` with hard wraps inside a sentence joined by a space. Linear: a joined
     line is kept as its segments and joined once, and only its tail is tested for an
     ending, because rebuilding and re-searching the whole line on every wrap made one
     unpunctuated 200 KB file cost seconds inside the write hook."""
-    out = []                                # each line as its segments
+    out, joinable = [], False               # each line as its segments; may the last take a wrap
     for ln in txt.split("\n"):
-        cur = out[-1] if out else None
-        if (cur is not None and (len(cur) > 1 or cur[0].strip())
-                and not _ENDS.search(_tail(cur)) and not _NO_JOIN_FROM.match(cur[0])
+        if (joinable and not _ENDS.search(_tail(out[-1]))
                 and ln.strip() and not _LINE_MEANINGFUL.match(ln)):
-            cur[-1] = cur[-1].rstrip()
-            cur.append(" " + ln.strip())
+            out[-1][-1] = out[-1][-1].rstrip()
+            out[-1].append(" " + ln.strip())
         else:
             out.append([ln])
+            # decided once per line: its start never changes as wraps join onto it
+            joinable = bool(ln.strip()) and not _NO_JOIN_FROM.match(ln)
     return "\n".join("".join(c) for c in out)
 
 
@@ -1234,17 +1251,20 @@ def _regular(p):
     return stat.S_ISREG(st.st_mode) and st.st_nlink == 1
 
 
-def open_safe(path, binary=False):
-    """`open` for a corpus file, checked on the descriptor that is read: refused
-    unless it is a regular file of one link under MAX_FILE_BYTES, so a swap between
-    the walk's check and this read gains nothing. Raises OSError on refusal."""
+def open_safe(path, binary=False, newline=None, max_bytes=MAX_FILE_BYTES):
+    """`open` for a file a store controls, checked on the descriptor that is read:
+    refused unless it is a regular file of one link under `max_bytes` (None for no
+    cap), so a swap between the walk's check and this read gains nothing, and a FIFO
+    never blocks it. `newline=""` for a CSV; the default translates CRLF as
+    `read_text` did. Raises OSError on refusal."""
     fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > MAX_FILE_BYTES:
-            raise OSError(f"{path}: not a plain file under {MAX_FILE_BYTES} bytes")
+        if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+                or (max_bytes is not None and st.st_size > max_bytes)):
+            raise OSError(f"{path}: not a plain file" + (f" under {max_bytes} bytes" if max_bytes else ""))
         return (os.fdopen(fd, "rb") if binary
-                else os.fdopen(fd, "r", newline="", errors="ignore", encoding="utf-8"))
+                else os.fdopen(fd, "r", newline=newline, errors="ignore", encoding="utf-8"))
     except BaseException:
         os.close(fd)
         raise
@@ -1262,6 +1282,31 @@ def read_or_empty(path):
         return read_safe(path)
     except OSError:
         return ""
+
+
+def skipped_files(root):
+    """Files the walk passes over in one store, as (path, why): a symlink, a hard link,
+    something not a file, or one past MAX_FILE_BYTES. For `doctor`, so a skip is
+    reported once rather than reading as a store that holds nothing there."""
+    out = []
+    for d, names in _corpus_dirs(root):
+        for n in names:
+            if not (fnmatch.fnmatch(n, "*.md") or fnmatch.fnmatch(n, "*.csv")):
+                continue
+            p = d / n
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                out.append((p, "a symlink"))
+            elif not stat.S_ISREG(st.st_mode):
+                out.append((p, "not a plain file"))
+            elif st.st_nlink != 1:
+                out.append((p, "a hard link"))
+            elif st.st_size > MAX_FILE_BYTES:
+                out.append((p, f"over {MAX_FILE_BYTES // (1024 * 1024)} MB"))
+    return out
 
 
 def _walk_files(root, pattern="*.md"):
@@ -1336,7 +1381,7 @@ def _own_csv_sources(root):
         if not m.is_file() or not trusted(root):
             return []
         try:
-            entries = json.loads(m.read_text())
+            entries = json.loads(read_safe(m))
         except (json.JSONDecodeError, OSError):
             return []
     out = []
@@ -1359,7 +1404,7 @@ def csv_rows(root):
     out = []
     for pth, textcol, labelcol in csv_sources(root):
         try:
-            with open_safe(pth) as fh:
+            with open_safe(pth, newline="") as fh:
                 for r in _csv.DictReader(fh):
                     t = (r.get(textcol) or "").strip()
                     if not t:
@@ -1639,7 +1684,7 @@ def _column_values(path, column):
     """Set of a column's values, or None where the column is absent."""
     import csv as _csv
     try:
-        with open(path, newline="", errors="ignore") as fh:
+        with open_safe(path, newline="") as fh:
             rd = _csv.DictReader(fh)
             if column not in (rd.fieldnames or []):
                 return None
@@ -2235,6 +2280,8 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
             print(f"index: memfind.py not found beside memscan.py; run  locket index {top}")
         except RuntimeError as e:
             print(f"index: not built ({e}); run  locket index {top}  once an embedder answers")
+        except OSError as e:
+            print(f"index: not built, the cache could not be written ({e})")
         return 0
     # A host store or a project memory is listed on sight and takes no registry
     # row; a manifest there is optional config (sources, exclusions), kept if
@@ -2297,6 +2344,8 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
         print(f"index: memfind.py not found beside memscan.py; run  locket index {d}")
     except RuntimeError as e:
         print(f"index: not built ({e}); run  locket index {d}  once an embedder answers")
+    except OSError as e:
+        print(f"index: not built, the cache could not be written ({e})")
     return 0
 
 
@@ -2339,7 +2388,7 @@ def scaffold_ledgers(d, name):
     man = dict(_read_manifest(d))
     # ⚠ `_read_manifest` reads an unparseable file as {}, and writing that back
     # would erase every key the user had; refuse instead
-    if not man and m.is_file() and m.read_text(errors="ignore").strip():
+    if not man and m.is_file() and read_or_empty(m).strip():
         print(f"{m} does not parse; fix it (`locket schema {d}`) before adding ledgers", file=sys.stderr)
         return 1
     sources = man.get("sources") or []
@@ -2814,7 +2863,7 @@ def fixture_trust():
     `yes` is assumed, so behaviour tests read as before. The trust boundary
     itself is tested in tests/test_trust.py against the real check."""
     g = globals()
-    real_trusted, real_confirms, real_registry = g["trusted"], g["human_confirms"], g["REGISTRY"]
+    real_trusted, real_confirms, real_registry = g["trusted"], g["person_confirms"], g["REGISTRY"]
     tmp = Path(tempfile.gettempdir()).resolve()
     scratch = Path(tempfile.mkdtemp(prefix="locket-selftest-registry-"))
 
@@ -2823,13 +2872,13 @@ def fixture_trust():
         return p == tmp or tmp in p.parents or real_trusted(d)
 
     # a registration the suite makes lands in a scratch registry, never the live one
-    g["trusted"], g["human_confirms"] = fixture_trusted, (lambda _d: True)
+    g["trusted"], g["person_confirms"] = fixture_trusted, (lambda *_a: True)
     if real_registry == HOME / ".locket" / "corpora.json":
         g["REGISTRY"] = scratch / "corpora.json"
     try:
         yield
     finally:
-        g["trusted"], g["human_confirms"], g["REGISTRY"] = real_trusted, real_confirms, real_registry
+        g["trusted"], g["person_confirms"], g["REGISTRY"] = real_trusted, real_confirms, real_registry
         import shutil
         shutil.rmtree(scratch, ignore_errors=True)
 
@@ -5516,7 +5565,7 @@ def check_ledger_text(schema, text, header=None):
 
 def _ledger_header(path):
     try:
-        with open(path, newline="", errors="ignore") as fh:
+        with open_safe(path, newline="") as fh:
             rows = _csv_rows_of(fh.read(4096))
     except OSError:
         return None
@@ -5760,7 +5809,12 @@ def cmd_ledgers(root):
         return 0
     bad = 0
     for p, schema, glob in files:
-        body = read_or_empty(p)
+        try:
+            body = read_safe(p)
+        except OSError as e:
+            print(f"{corpus_key(root, p)}  schema {glob!r}  NOT READ: {e}")
+            bad += 1
+            continue
         findings = check_ledger_text(schema, body)
         rows = max(len(_csv_rows_of(body)) - 1, 0)
         print(f"{corpus_key(root, p)}  schema {glob!r}  {rows} rows, {len(findings)} findings")
@@ -6715,6 +6769,8 @@ def _replace_atomic(path, data, prefix):
     try:
         with os.fdopen(fd, "wb" if isinstance(data, bytes) else "w") as out:
             out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -7373,6 +7429,36 @@ def gate_status():
     return "\n".join(lines) if lines else "no known host home found; CLI modes only"
 
 
+CONFIG_REFUSAL = ("This write edits {name}, configuration that decides what Locket does in {store}: "
+                  "trigger rows that refuse tool calls, ledger schemas, files read from elsewhere. "
+                  "A person edits it by hand; an agent does not, so a README cannot reconfigure "
+                  "a store through you. Tell the user what you would change and why.")
+
+
+def store_config(path):
+    """(store, name) when `path` is a file that configures a store Locket acts on: a
+    manifest, a legacy sources file, or a rows file, in a trusted store or a host
+    store; else None. Decidable from the path, so the gate on it may block."""
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    if len(str(p)) > PATH_MAX:
+        return None
+    names = {MANIFEST, OLD_MANIFEST, LEGACY_MANIFEST, "triggers.json"}
+    d = p.parent
+    if p.name in names and (trusted(d) or d in set(HOST_STORES.values())):
+        return d, p.name
+    phys = _phys_root_of(d)
+    if phys is not None:
+        rows = _read_manifest(phys).get("triggers")
+        if isinstance(rows, str) and rows:
+            target = Path(rows).expanduser()
+            target = target if target.is_absolute() else phys / target
+            if _same(target, p):
+                return phys, p.name
+    return None
+
+
 REGISTRY_REFUSAL = ("This write edits Locket's trust registry, {reg}. Trust is a person's act at a "
                     "terminal: ask the user to run  locket trust <dir>  (or  locket untrust <dir>).")
 
@@ -7420,6 +7506,9 @@ def hook_mode(payload):
     path = str(ti.get("file_path", ""))
     if path and is_registry(path):
         return emit(payload, REGISTRY_REFUSAL.format(reg=REGISTRY), True, "hook")
+    cfg = store_config(path) if path else None
+    if cfg is not None:
+        return emit(payload, CONFIG_REFUSAL.format(name=cfg[1], store=cfg[0]), True, "hook")
     if path.lower().endswith(".csv"):  # a ledger row: schema, decidable, may block
         try:
             msg, blocking = ledger_decision(path, ti)
@@ -7507,7 +7596,8 @@ def _hook_entry(mode):
                 health_error("bashguard", "decision", e)
                 return 0
             return emit(payload, msg, blocking, mode)
-        if ".locket/corpora.json" in command or str(REGISTRY) in command:
+        bare = re.sub(r"""['"\\]""", "", command)
+        if (".locket" in bare and "corpora.json" in bare) or str(REGISTRY) in bare:
             # a shell command naming the registry: whether it writes is not decidable
             # from the text, so this warns where the Write/Edit gate refuses
             return emit(payload, REGISTRY_REFUSAL.format(reg=REGISTRY), False, mode)

@@ -21,6 +21,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import memscan  # noqa: E402
+import _settings  # noqa: E402
 
 __version__ = "0.11.12"                          # the one home: pyproject.toml and the formula's test read it
 
@@ -245,7 +246,7 @@ def _merge_json(path, merge):
     beside it. A file that does not parse is left untouched: rewriting it would
     drop whatever the parse missed."""
     try:
-        data = json.loads(path.read_text()) if path.is_file() else {}
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     except (OSError, json.JSONDecodeError, ValueError) as e:
         print(f"{path}: not valid JSON ({e}); left untouched. Fix it and rerun")
         return 1
@@ -259,8 +260,7 @@ def _merge_json(path, merge):
         shutil.copy2(path, bak)
     else:
         bak = None
-    import _settings                        # whole or not at all, and a symlinked file keeps its link
-    _settings.write_json(path, data)
+    _settings.write_json(path, data)       # whole or not at all, and a symlinked file keeps its link
     print(f"edited {path}: added {', '.join(added)}" + (f"; copy at {bak}" if bak else ""))
     return 0
 
@@ -628,7 +628,6 @@ def cmd_uninstall(argv):
     print(f"  the scripts:  rm {' '.join(str(HERE / s) for s in SCRIPTS if (HERE / s).exists())} "
           f"{HERE / 'INSTALL-locket.md' if (HERE / 'INSTALL-locket.md').exists() else ''}".rstrip())
     print("  an editor `json.schemas` entry pointing at ~/.locket/locket.schema.json, if you added one")
-    import _settings
     if isinstance(_settings.load(check=False)[0].get("locket"), dict):
         print(f"  Locket's embedder overrides: the \"locket\" section of {_settings.path()}")
     if others:
@@ -1209,6 +1208,17 @@ def cmd_doctor():
         row("fail", "stores", "none found", "locket init <folder of markdown>")
     # A host store or a project memory is a store by convention and needs no manifest.
     conventional = set(memscan._raw_corpora().values())
+    skipped = []
+    for r in set(stores.values()):
+        try:
+            skipped += memscan.skipped_files(r)
+        except OSError:
+            continue
+    if skipped:
+        shown = "; ".join(f"{p} ({why})" for p, why in skipped[:4]) + (
+            f"; and {len(skipped) - 4} more" if len(skipped) > 4 else "")
+        row("warn", "skipped", f"{len(skipped)} store files are never read: {shown}",
+            "replace a link with the file itself, or split a file past the cap")
     try:
         loose = memscan.untrusted_stores()
     except Exception as e:                  # a failed scan is reported, never read as "none found"
@@ -1228,7 +1238,6 @@ def cmd_doctor():
 
     import configure
     import _embed
-    import _settings
     cfg_data, cfg_problems = _settings.load()
     cfg_path = _settings.path()
     legacy = configure._legacy_path()

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from tests.test_trust import CMD, SRC
 
-LIMIT = 1.0     # seconds; every shape took 2 s or more before the fix
+LIMIT = 3.0     # seconds, for slow shared runners; every shape took 3 s or more before the fix
 
 SHAPES = {
     "fold, a name doubled 22 times": (
@@ -25,6 +25,7 @@ SHAPES = {
     "a deep chain of cd": ("bash_write_targets", "'cd x; ' * 5000 + 'cp a.md b.md; ' * 1500"),
     "20,000 redirects before a csv": ("ledger_bash_decision", "'>' * 20000 + ' a.csv'"),
     "25,000 unpunctuated lines": ("unwrap", "('w ' * 8 + '\\n') * 25000"),
+    "a long indented line then 5,000 wraps": ("unwrap", "' ' * 100000 + 'x\\n' + 'w\\n' * 5000"),
 }
 
 

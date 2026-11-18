@@ -148,7 +148,9 @@ def cache_paths(root):
 def _write_cache(root, flat, meta):
     """Both cache files, each by atomic rename into a 0700 directory that is no
     symlink. The JSON carries the vector file's byte length and goes second, so a
-    write cut between the two is a mismatch `_read_vectors` refuses."""
+    write cut between the two is a mismatch `_read_vectors` refuses: the vectors end
+    in a random token the JSON names, so new vectors never pair with old text even
+    when the count is unchanged."""
     d = cache_dir(root)
     d.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -158,10 +160,10 @@ def _write_cache(root, flat, meta):
     st = os.lstat(d)
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
         raise RuntimeError(f"refusing the cache directory {d}: not a directory this user owns")
-    blob = flat.tobytes()
+    token = os.urandom(TOKEN_BYTES)
     meta_p, vec_p = cache_paths(root)
-    memscan._replace_atomic(vec_p, blob, ".index.vec.")
-    memscan._replace_atomic(meta_p, json.dumps({**meta, "vec_bytes": len(blob)}), ".index.json.")
+    memscan._replace_atomic(vec_p, flat.tobytes() + token, ".index.vec.")
+    memscan._replace_atomic(meta_p, json.dumps({**meta, "token": token.hex()}), ".index.json.")
 
 
 def _normalise(vecs):
@@ -204,7 +206,7 @@ def build_index(root, quiet=False):
                 old_items = [tuple(i) for i in m["items"]]
                 old_dim = m["dim"]
                 old_fp = m.get("fingerprint", {})
-                old_flat = _read_vectors(vec_p, len(old_items), old_dim)
+                old_flat = _read_vectors(vec_p, len(old_items), old_dim, m.get("token"))
         except (KeyError, ValueError, TypeError, OSError):
             old_items, old_flat = [], None            # unreadable cache: start over
 
@@ -317,36 +319,46 @@ def load_index(root, quiet=False):
             m = _read_meta(meta)
             if (m.get("model") == tag(resolve_backend()[0])
                     and m.get("fingerprint") == corpus_fingerprint(root)):
-                return [tuple(i) for i in m["items"]], _read_vectors(vec, len(m["items"]), m["dim"]), m["dim"]
+                return ([tuple(i) for i in m["items"]],
+                        _read_vectors(vec, len(m["items"]), m["dim"], m.get("token")), m["dim"])
         except (KeyError, ValueError, TypeError, OSError):
             pass                                       # damaged cache: rebuild below
     return build_index(root, quiet=quiet)
 
 
+TOKEN_BYTES = 16
+
+
 def _read_meta(path):
     """The cache's JSON half; raises ValueError or OSError on a damaged one."""
-    data = json.loads(Path(path).read_text())
+    data = json.loads(_read_text(path))
     if not isinstance(data, dict):
         raise ValueError("cache metadata is not an object")
     return data
 
 
-def _read_vectors(path, n, dim):
+def _read_text(path):
+    with memscan.open_safe(path, max_bytes=None) as f:
+        return f.read()
+
+
+def _read_vectors(path, n, dim, token):
     """The cached vectors, refused unless there are exactly n of length dim: a write cut
     short by a kill leaves a file that frombytes reads without complaint, and every
     score after the cut would be off misaligned floats. Read from one descriptor
     opened without following a link, checked regular and sized before a byte is read,
     and straight into the array, so the vectors are held once, not twice."""
-    if not isinstance(dim, int) or dim <= 0 or not isinstance(n, int):
+    if not isinstance(dim, int) or dim <= 0 or not isinstance(n, int) or not isinstance(token, str):
         raise ValueError(f"vector cache shape {n} x {dim}")
     flat = array.array("f")
-    want = n * dim * flat.itemsize
-    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    with os.fdopen(fd, "rb") as f:
-        st = os.fstat(f.fileno())
-        if not stat.S_ISREG(st.st_mode) or st.st_size != want:
-            raise ValueError(f"vector cache is {st.st_size} bytes, expected {want}")
+    want = n * dim * flat.itemsize + TOKEN_BYTES
+    with memscan.open_safe(path, binary=True, max_bytes=None) as f:
+        size = os.fstat(f.fileno()).st_size
+        if size != want:
+            raise ValueError(f"vector cache is {size} bytes, expected {want}")
         flat.fromfile(f, n * dim)
+        if f.read(TOKEN_BYTES).hex() != token:
+            raise ValueError("vector cache belongs to another build of the index")
     return flat
 
 
@@ -365,10 +377,10 @@ def load_cached(root):
         # (`rank` pins the backend from the tag), so no embedder is probed here.
         if m.get("model") not in (tag("ollama"), tag("onnx")):
             return None
-        flat = _read_vectors(vec, len(m["items"]), m["dim"])
+        flat = _read_vectors(vec, len(m["items"]), m["dim"], m.get("token"))
         stale = m.get("fingerprint") != corpus_fingerprint(root)
         return [tuple(i) for i in m["items"]], flat, m["dim"], stale
-    except (json.JSONDecodeError, KeyError, ValueError, OSError):
+    except (KeyError, ValueError, TypeError, OSError):
         return None
 
 
@@ -880,8 +892,8 @@ def main(argv):
     print(f"corpus: {root}")
     rows = rank(statement, root, top=top)
     for c, f, s in rows:
-        print(f"[{c:.3f}] {f}")
-        print(f"        {s[:190]}")
+        print(f"[{c:.3f}] {memscan.relay(f, 160)}")
+        print(f"        {memscan.relay(s, 190)}")
     if LAST_RANK_MODE == "lexical":
         print("\nWORD OVERLAP ONLY: no embedder could be reached, so this ranking cannot see a "
               "paraphrase and a silent result is not evidence the corpus is silent.\n"

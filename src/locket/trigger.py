@@ -114,13 +114,31 @@ def load(path):
 
 
 def _haystack(tool_input, fields):
-    """The text a row's patterns run over, cut at memscan.MAX_SCAN: cut, never skipped,
-    so padding a call past the cap cannot slip it past a row."""
     if fields:
-        text = " ".join(str(tool_input.get(f, "")) for f in fields)
-    else:
-        text = " ".join(v for v in tool_input.values() if isinstance(v, str))
-    return text[:memscan.MAX_SCAN]
+        return " ".join(str(tool_input.get(f, "")) for f in fields)
+    return " ".join(v for v in tool_input.values() if isinstance(v, str))
+
+
+OVERLAP = 4096          # a match no longer than this is found across a window boundary
+MAX_WINDOWS = 16        # 1 MB of a call read, at most
+
+
+def _search(pattern, text, flags=0, unread=True):
+    """`re.search` over `text`, never over more than memscan.MAX_SCAN at once: a long
+    call is read in overlapping windows, so padding cannot push the matching part out
+    of view. Past MAX_WINDOWS the rest is unread and answers `unread`: True for a
+    row's content, so an oversized call fires the row, False for its escape hatch,
+    so padding never stands in for the escape."""
+    if len(text) <= memscan.MAX_SCAN:
+        return re.search(pattern, text, flags) is not None
+    step = memscan.MAX_SCAN - OVERLAP
+    for i in range(MAX_WINDOWS):
+        start = i * step
+        if start >= len(text):
+            return False
+        if re.search(pattern, text[start:start + memscan.MAX_SCAN], flags):
+            return True
+    return unread
 
 
 def _transcript_has(path, pattern):
@@ -196,9 +214,9 @@ def matches(row, tools, cwd, tool_input, seen=lambda pattern: False):
     if row.get("cwd") and not re.search(row["cwd"], cwd):
         return False
     hay = _haystack(tool_input, row.get("fields"))
-    if not re.search(row["content"], hay, re.IGNORECASE if row.get("ignorecase") else 0):
+    if not _search(row["content"], hay, re.IGNORECASE if row.get("ignorecase") else 0):
         return False
-    if row.get("unless") and re.search(row["unless"], hay):
+    if row.get("unless") and _search(row["unless"], hay, unread=False):
         return False
     return not (row.get("unless_transcript") and seen(row["unless_transcript"]))
 

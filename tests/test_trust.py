@@ -139,8 +139,11 @@ class TrustNeedsAPerson(Scratch):
         import select
         pid, fd = pty.fork()
         if pid == 0:                                    # child: the person's terminal session
-            os.chdir(self.clone)
-            os.execvpe(CMD[0], [*CMD, "trust", str(self.clone)], self.env)
+            try:
+                os.chdir(self.clone)
+                os.execvpe(CMD[0], [*CMD, "trust", str(self.clone)], self.env)
+            finally:
+                os._exit(127)                           # never fall back into the test runner
         out = b""
         sent = False
         while True:
@@ -162,8 +165,10 @@ class TrustNeedsAPerson(Scratch):
         self.assertTrue(self.registered(), out.decode(errors="replace"))
 
     def test_untrust_withdraws_by_identity(self):
+        variant = str(self.clone).upper()
+        if not Path(variant).exists():
+            self.skipTest("case-sensitive filesystem")
         self.trust(self.clone)
-        variant = str(self.clone).upper() if Path(str(self.clone).upper()).exists() else str(self.clone)
         r = self.run_locket("untrust", variant)
         self.assertIn("row removed", r.stdout, r.stderr)
         self.assertFalse(self.registered())
@@ -174,6 +179,58 @@ class TrustNeedsAPerson(Scratch):
         if not variant.exists():
             self.skipTest("case-sensitive filesystem")
         r = self.run_locket("hook", payload=self.write(variant, '{"corpora": ["/"]}'))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+
+class ConfigIsAPersonsToWrite(Scratch):
+    def test_manifest_write_into_a_trusted_store_is_refused(self):
+        mem = self.home / ".claude" / "projects" / "-x" / "memory"     # trusted by convention
+        mem.mkdir(parents=True)
+        r = self.run_locket("hook", payload=self.write(mem / "locket.json",
+                                                       json.dumps({"triggers": str(self.clone / "t.json")})))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_host_triggers_write_is_refused(self):
+        r = self.run_locket("hook", payload=self.write(self.home / ".claude" / "triggers.json", '{"rows": []}'))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_named_rows_file_write_is_refused(self):
+        self.trust(self.clone)
+        (self.clone / "locket.json").write_text(json.dumps({"triggers": "rules/rows.json"}))
+        (self.clone / "rules").mkdir()
+        (self.clone / "rules" / "rows.json").write_text('{"rows": []}')
+        r = self.run_locket("hook", payload=self.write(self.clone / "rules" / "rows.json", '{"rows": []}'))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_json_elsewhere_is_not_refused(self):
+        self.trust(self.clone)
+        r = self.run_locket("hook", payload=self.write(self.clone / "package.json", "{}"))
+        self.assertEqual(r.returncode, 0, "the control: an ordinary JSON file passes")
+
+    def test_remote_embedder_host_needs_a_person(self):
+        r = self.run_locket("configure", "embedder", "--ollama-host", "http://attacker.example:11434", "--no-check")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        cfg = self.home / ".panoply" / "config.json"
+        self.assertFalse(cfg.exists() and "attacker.example" in cfg.read_text())
+
+    def test_loopback_embedder_host_is_set(self):
+        r = self.run_locket("configure", "embedder", "--ollama-host", "http://127.0.0.1:11434", "--no-check")
+        self.assertEqual(r.returncode, 0, "the control: this machine's own host needs no one: " + r.stderr)
+
+
+class TriggerPadding(Scratch):
+    def plant(self):
+        (self.home / ".claude" / "triggers.json").write_text(json.dumps({"rows": [
+            {"id": "rm", "tools": "Bash", "content": "rm -rf", "block": True, "question": "Refused."}]}))
+
+    def test_padding_before_the_match_still_fires(self):
+        self.plant()
+        r = self.run_locket("trigger", payload=self.bash("x" * 70000 + "; rm -rf ~"))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_padding_around_the_match_still_fires(self):
+        self.plant()
+        r = self.run_locket("trigger", payload=self.bash("x" * 40000 + " rm -rf ~ " + "x" * 40000))
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
 

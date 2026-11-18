@@ -150,7 +150,7 @@ def _index_state():
             continue
         meta = memfind.cache_paths(root)[0]
         try:
-            model = json.loads(meta.read_text(encoding="utf-8")).get("model")
+            model = memfind._read_meta(meta).get("model")
         except (OSError, ValueError, AttributeError):   # unreadable, not JSON, or not an object
             model = None
         model = model if isinstance(model, str) else None
@@ -187,6 +187,19 @@ def show():
     return 1 if findings else 0
 
 
+def _loopback(url):
+    """Whether `url` names this machine, so embedding through it sends nothing away."""
+    import ipaddress
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _set_embed(args):
     keys = ("model", "ollama_host", "venv", "autostart")
     clearing = {k for k in keys if getattr(args, k) == "default"}
@@ -207,6 +220,17 @@ def _set_embed(args):
     if "ollama_host" in changes and not changes["ollama_host"].startswith(("http://", "https://")):
         print(f"--ollama-host needs a scheme, e.g. http://{changes['ollama_host']}", file=sys.stderr)
         return 2
+    if "ollama_host" in changes and not args.dry_run and not _loopback(changes["ollama_host"]):
+        # every text Locket embeds goes to this host, memory included: a person decides that
+        import memscan
+        if not memscan.person_confirms(
+                f"Send every text Locket embeds, your memory files included, to {changes['ollama_host']}?",
+                ["Only a machine you control should receive it; an agent cannot set this for you."],
+                "send it there"):
+            print(f"not written: an ollama host off this machine is set by a person at a terminal. "
+                  f"Run it yourself:  locket configure embedder --ollama-host {changes['ollama_host']}",
+                  file=sys.stderr)
+            return 1
     if "model" in changes and not args.no_check:
         # ask ollama before taking the lock, against the host the new settings would use
         new = _settings.edit(_settings.load(check=False)[0], "embed", changes, clearing, args.reset,
