@@ -323,11 +323,9 @@ def _settings_for(root, _trust_key):
     """
     m = trust.read_manifest(root)
     members, excluded = _own_walk(root, m)
-    # A host store whose files are not this apparatus's: Hermes's MEMORY.md is
-    # the whole memory, not an index over topic files, and Codex writes its
-    # memories/ itself, so neither inherits the index exemption. A manifest
-    # there still wins.
-    if root is not None and Path(root) in (paths.PATHS.host_stores.get("hermes"), paths.PATHS.host_stores.get("codex")):
+    # A host store whose files are not this apparatus's inherits none of the defaults
+    # below (`hosts.FOREIGN`); a manifest there still wins.
+    if hosts.foreign(root):
         m = {"index_files": [], "ledger_surfaces": [], "holding_spaces": [], **m}
     out = {}
     # `members`: the top-level directories that ARE corpus, everything else under

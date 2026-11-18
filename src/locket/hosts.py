@@ -5,6 +5,7 @@ installs its own `Paths` moves the host with it. Nothing here copies a location 
 """
 from pathlib import Path
 
+import fsio
 import paths
 
 
@@ -31,11 +32,24 @@ def codex():
 
 
 def name_of(root):
-    """The host-store name whose home is `root`, or None."""
+    """The host-store name whose home is `root`, or None: by spelling first, then by
+    inode, so a home reached through a symlink or `/private` keeps its members and
+    exclusions, as trust already matches it."""
     if root is None:
         return None
-    root = Path(root)
-    return next((k for k, v in paths.PATHS.host_stores.items() if Path(v) == root), None)
+    root, homes = Path(root), paths.PATHS.host_stores.items()
+    return next((k for k, v in homes if Path(v) == root), None) or next(
+        (k for k, v in homes if Path(v).is_dir() and fsio.same(v, root)), None)
+
+
+def is_host(root):
+    """Whether `root` is a host's home."""
+    return name_of(root) is not None
+
+
+def foreign(root):
+    """Whether `root` is the home of a host whose files are not this apparatus's."""
+    return name_of(root) in FOREIGN
 
 
 # What counts as corpus INSIDE a host's core directory, keyed by host-store name. The
@@ -50,6 +64,10 @@ HOST_MEMBERS = {
     "hermes": {"memories"},
     "codex": {"memories"},
 }
+# Hosts whose memory is not laid out as this apparatus lays it out: Hermes's MEMORY.md is
+# the whole memory, not an index over topic files, and Codex writes its memories/ itself,
+# so neither inherits the index, ledger and holding-space defaults.
+FOREIGN = {"hermes", "codex"}
 # Host state that lives INSIDE a member and is excluded whatever a manifest says:
 # Claude Code mirrors the account's synced skills into `skills/synced/<bucket>/`, a
 # verbatim copy of the live skill bodies, so every skill paired against itself at 1.00
