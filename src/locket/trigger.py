@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 
 import hosts
+import fsio
 import memscan
 
 TRIGGERS = "triggers.json"
@@ -172,15 +173,12 @@ def _session_has(db, session_id, pattern):
     if not session_id or not pattern or not Path(db).is_file():
         return False
     try:
-        import sqlite3
         rx = re.compile(pattern)
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
-        try:
-            rows = con.execute("select content, tool_calls from messages where session_id=?",
-                               (session_id,)).fetchall()
-        finally:
-            con.close()
-    except Exception:
+    except re.error:
+        return False
+    rows = fsio.sqlite_rows(db, "select content, tool_calls from messages where session_id=?",
+                               (session_id,))
+    if rows is None:
         return False
     return any(isinstance(v, str) and rx.search(v) for r in rows for v in r)
 

@@ -4,7 +4,9 @@ invisible characters.
 """
 import os
 import stat
+import contextlib
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 
@@ -147,3 +149,26 @@ def _replace_atomic(path, data, prefix, mode=None):
         except OSError:
             pass
         raise
+
+
+@contextlib.contextmanager
+def sqlite_ro(db, timeout=1.0):
+    """A read-only connection to the SQLite file `db`, closed on exit. The path is
+    percent-quoted into the URI, so a `?` or `#` in it cannot pass as a URI parameter."""
+    import sqlite3
+    con = sqlite3.connect("file:" + urllib.parse.quote(str(db)) + "?mode=ro", uri=True, timeout=timeout)
+    try:
+        yield con
+    finally:
+        con.close()
+
+
+def sqlite_rows(db, sql, params=(), timeout=1.0):
+    """Every row `sql` returns from `db` opened read-only, or None on any failure: no
+    sqlite3 in this Python, no file, a lock, a missing table, a drifted schema. Never
+    raises, because its callers run inside hooks, where a raise lets a write through."""
+    try:
+        with sqlite_ro(db, timeout) as con:
+            return con.execute(sql, params).fetchall()
+    except Exception:
+        return None

@@ -54,7 +54,7 @@ import paths
 from fsio import (  # noqa: F401  (re-exported)
     MAX_FILE_BYTES, MAX_SCAN, MAX_STORE_BYTES, MAX_STORE_FILES, PATH_MAX, SafeOut,
     _inode, _regular, _replace_atomic, _same, open_safe, read_or_empty, read_safe,
-    relay,
+    relay, sqlite_rows,
 )
 # A per-corpus manifest, optional. Its presence makes ANY directory a corpus for
 # the write-time gate and for a literal path, so a memory store on a host this
@@ -345,20 +345,9 @@ def session_dirs():
         if cwd:
             out.add(cwd)
     db = hosts.hermes() / "state.db"
-    try:
-        import sqlite3
-    except ImportError:                     # a Python built without it reads no Hermes record
-        return out
     if db.is_file():
-        try:
-            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
-            try:
-                out.update(r[0] for r in con.execute(
-                    "SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL AND cwd != ''"))
-            finally:
-                con.close()
-        except sqlite3.Error:
-            pass
+        out.update(r[0] for r in sqlite_rows(
+            db, "SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL AND cwd != ''") or ())
     return out
 
 
@@ -3209,17 +3198,10 @@ def memfind_asked_db(db_path, session_id):
     """
     if not session_id or not Path(db_path).is_file():
         return True
-    try:
-        import sqlite3
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
-        try:
-            rows = con.execute(
-                "select tool_calls from messages where session_id=? "
-                "and (tool_calls like ? or tool_calls like ?)",
-                (session_id, "%memfind%", "%locket%")).fetchall()
-        finally:
-            con.close()
-    except Exception:                        # locked, missing table, schema drift
+    rows = sqlite_rows(db_path, "select tool_calls from messages where session_id=? "
+                                "and (tool_calls like ? or tool_calls like ?)",
+                       (session_id, "%memfind%", "%locket%"))
+    if rows is None:                         # locked, missing table, schema drift
         return True
     for (raw,) in rows:
         try:
@@ -5531,15 +5513,9 @@ def hermes_shown(session_id, message, since, db=None):
     if not session_id or not db.is_file():
         return None
     head = message[:300]            # stored JSON-encoded, so it is read back through json
-    try:
-        import sqlite3
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
-        try:
-            rows = con.execute("select content from messages where session_id=? and role='tool' "
-                               "and timestamp>=?", (session_id, since - 1)).fetchall()
-        finally:
-            con.close()
-    except Exception:                        # locked, missing table, schema drift
+    rows = sqlite_rows(db, "select content from messages where session_id=? and role='tool' "
+                           "and timestamp>=?", (session_id, since - 1))
+    if rows is None:                         # locked, missing table, schema drift
         return None
     for (content,) in rows:
         if not isinstance(content, str):

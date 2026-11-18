@@ -27,6 +27,7 @@ point at a source somewhere else; a missing source is skipped with a line saying
 import csv
 import datetime as dt
 import glob
+import io
 import json
 import os
 import sqlite3
@@ -36,6 +37,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+import fsio
 import hosts
 import paths
 
@@ -190,8 +192,7 @@ def read_hermes(db, notes=None):
     cols = {"input_tokens": "input", "cache_write_tokens": "cache_write", "cache_read_tokens": "cache_read",
             "output_tokens": "output", "reasoning_tokens": "reasoning", "api_call_count": "responses"}
     try:
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-        try:
+        with fsio.sqlite_ro(db, timeout=5.0) as con:
             have = {r[1] for r in con.execute("PRAGMA table_info(sessions)")}
             per_model = {r[1] for r in con.execute("PRAGMA table_info(session_model_usage)")}
             if "started_at" not in have:
@@ -210,8 +211,6 @@ def read_hermes(db, notes=None):
                 r["_sessions"].add(v.get("id"))
                 for c in use:
                     r[cols[c]] += v[c] or 0
-        finally:
-            con.close()
     except sqlite3.Error as e:
         if notes is not None:
             notes.append(f"hermes: {db} unreadable ({e}); skipped")
@@ -272,12 +271,11 @@ def record(claude=None, hermes=None, full=False, ledger=None, quiet=False):
     rows = merge(old, [r for r in claude_rows if not since_day or r["date"] >= since_day], since_day)
     rows = fold(merge(rows, hermes_rows), today)
     ledger.parent.mkdir(parents=True, exist_ok=True)
-    tmp = ledger.with_suffix(".csv.tmp")
-    with open(tmp, "w", newline="") as fh:
-        w = csv.DictWriter(fh, FIELDS)
-        w.writeheader()
-        w.writerows(rows)
-    os.replace(tmp, ledger)
+    buf = io.StringIO(newline="")
+    w = csv.DictWriter(buf, FIELDS)
+    w.writeheader()
+    w.writerows(rows)
+    fsio._replace_atomic(ledger, buf.getvalue(), ".usage-")
     if not quiet:
         for n in notes:
             print(n, file=sys.stderr)
