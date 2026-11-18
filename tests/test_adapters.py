@@ -2,9 +2,11 @@
 import contextlib
 import io
 import json
+import os
 import sqlite3
 import time
 import unittest
+from unittest import mock
 
 from tests.harness import StoreCase
 
@@ -180,6 +182,42 @@ class Codex(StoreCase):
         assert gate.memfind_asked(str(asked)), "a Codex shell call that RUNS locket find discharges"
         assert not gate.memfind_asked(str(named)), "a call that names it, or a result quoting it, does not"
         assert gate.memfind_asked(str(argv)), "the older shell tool's argv form is read through bash -lc"
+
+
+class Uninstall(StoreCase):
+    COUNCIL = False
+
+    def test_desktop_keeps_an_entry_it_did_not_write(self):
+        from adapters import desktop
+        cfg = self.tmp / "claude_desktop_config.json"
+        theirs = {"mcpServers": {"locket": {"command": "/opt/x/run", "args": ["--mine"]}}, "note": "café"}
+        cfg.write_text(json.dumps(theirs, ensure_ascii=False))
+        with mock.patch.object(desktop, "CONFIG", cfg):
+            r = desktop.removal()
+        self.assertEqual((r.shown, r.apply), ([], None))
+        self.assertTrue(r.left and "left as it is" in r.left[0], r.left)
+
+    def test_desktop_removes_its_own_entry_whole(self):
+        from adapters import desktop
+        cfg = self.tmp / "claude_desktop_config.json"
+        ours = {"mcpServers": {"locket": {"command": "/opt/homebrew/bin/locket", "args": ["mcp"]},
+                               "other": {"command": "x"}}, "note": "café"}
+        cfg.write_text(json.dumps(ours, ensure_ascii=False))
+        with mock.patch.object(desktop, "CONFIG", cfg), contextlib.redirect_stdout(io.StringIO()):
+            r = desktop.removal()
+            r.apply()
+        self.assertEqual(json.loads(cfg.read_text()), {"mcpServers": {"other": {"command": "x"}}, "note": "café"})
+        self.assertIn("café", cfg.read_text(), "non-ASCII escaped on the way out")
+
+    def test_install_leaves_another_tools_link(self):
+        import install
+        bin_ = self.tmp / "bin"; bin_.mkdir()
+        other = self.tmp / "other-tool"; other.write_text("#!/bin/sh\n")
+        (bin_ / "locket").symlink_to(other)
+        with mock.patch.object(install, "BIN", bin_), contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = install._install_link()
+        self.assertEqual(rc, 1, out.getvalue())
+        self.assertEqual(os.readlink(bin_ / "locket"), str(other))
 
 
 if __name__ == "__main__":

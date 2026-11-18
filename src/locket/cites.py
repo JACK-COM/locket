@@ -22,7 +22,7 @@ import trust
 # mode is blind to: `audit` compares claims to claims, the write-time gate
 # scores novelty, `memfind` ranks semantics, and not one of them opens the cited
 # file. So a citation is correct for exactly one commit and then decays in
-# silence. Measured on a production corpus 2026-08-17: of 54 citations,
+# silence. On one production corpus, of 54 citations,
 # roughly one in eight had drifted, one pointed past EOF and one named a script
 # deleted six weeks earlier.
 CITE = re.compile(
@@ -154,7 +154,7 @@ def code_index(roots):
         for top, n in sorted(sizes.items()):
             if n > LOUD_SUBTREE:
                 print(f"note: walked {n} directories under {Path(base) / top}; if it is host "
-                      "state rather than code, it belongs in memscan.CLAUDE_SKIP", file=sys.stderr)
+                      "state rather than code, it belongs in cites.CLAUDE_SKIP", file=sys.stderr)
     return idx
 
 
@@ -172,9 +172,7 @@ def enclosing_scope(lines, n):
     # ⚠ A line at column 0 is at MODULE level and has no enclosing scope. Walking
     # back from it finds the last def in the file and reports a constant as
     # living inside an unrelated function, which is the exact wrong-citation
-    # failure this mode exists to catch. Caught 2026-08-17 attributing
-    # `CURRENT_CURATION_STANDARD` (globals.py:125) to `_read_version` (:41), and
-    # it nearly got two CORRECT memory citations "fixed".
+    # failure this mode exists to catch, and it gets correct citations "fixed".
     if indent == 0:
         stripped = line.lstrip()
         return name(stripped) if stripped.startswith(

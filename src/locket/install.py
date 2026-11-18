@@ -52,6 +52,15 @@ def ours(link):
     return t is not None and (t.parent == HERE or not t.exists())
 
 
+def rewrite_json(path, data, label):
+    """Replace a host's JSON config with `data` after uninstall took Locket's entries out:
+    a copy beside it first, then written whole or not at all, non-ASCII kept as written."""
+    bak = path.with_suffix(".json.locket-uninstall.bak")
+    shutil.copy2(path, bak)
+    _settings.write_json(path, data)
+    print(f"edited {path} ({label}; copy at {bak})")
+
+
 class Removal(NamedTuple):
     """What uninstall does to one host's config: `shown` as (kind, what) lines before it
     asks, `apply` to run once it may (None when there is nothing to edit), `left` the
@@ -141,10 +150,10 @@ def _install_link():
     if link.is_symlink() or link.exists():
         if link_target(link) == me:
             print(f"link: {link} -> {me} (already)")
-        elif ours(link) or link.is_symlink():
+        elif ours(link) or (link_target(link) or Path()).name == "locket.py":
             link.unlink(); link.symlink_to(me); print(f"link: {link} -> {me} (replaced)")
         else:
-            print(f"link: {link} exists and is not a symlink; leaving it. Remove it and rerun.")
+            print(f"link: {link} exists and is not Locket's; leaving it. Remove it and rerun.")
             return 1
     else:
         link.symlink_to(me); print(f"link: {link} -> {me}")

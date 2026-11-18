@@ -147,7 +147,8 @@ def bash_write_decision(command, cwd, autonomous=False):
     return None, False
 
 
-_CONFIG_WORD = re.compile(r"[^\s;&|<>()]*(?:locket\.json|memfind\.json|reference-sources\.json|triggers\.json)\b")
+_CONFIG_WORD = re.compile(r"[^\s;&|<>()]*(?:" + "|".join(re.escape(n) for n in gate.CONFIG_NAMES) + r")\b",
+                          re.IGNORECASE)
 
 
 _TRUST_VERB = re.compile(r"\b(?:locket|memscan(?:\.py)?|locket\.py)\s+(?:trust|untrust|forget)\b")
@@ -225,7 +226,7 @@ def _registry(sh):
     # agent task needs the file, and a write to it would grant trust.
     b = sh.bare
     if (".locket" in b and ("corpora.json" in b or "config.json" in b)) \
-            or (".panoply" in b and "config.json" in b) or str(paths.PATHS.registry) in b:
+            or (".panoply" in b and "config.json" in b) or any(str(p) in b for p in gate.registry_paths()):
         return gate.REGISTRY_REFUSAL.format(reg=paths.PATHS.registry), True
     return None
 

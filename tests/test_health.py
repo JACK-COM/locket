@@ -143,5 +143,20 @@ class HookHealth(StoreCase):
         _hook_health(self.tmp)
 
 
+class TriggerHealth(StoreCase):
+    COUNCIL = False
+
+    def test_a_trigger_hook_that_raises_is_counted(self):
+        import io
+        import trigger
+        d = self.tmp / "hook-health"
+        with paths.use(paths.PATHS.replace(health_dir=d)), \
+                mock.patch.object(trigger, "fire", side_effect=KeyError("x")):
+            self.assertEqual(trigger.hook(io.StringIO('{"hook_event_name": "PreToolUse"}')), 0)
+            rec, problems = health.health_report()
+        self.assertEqual(rec["verbs"]["trigger"]["errors"], 1, rec)
+        self.assertTrue(any("KeyError in fire" in p for p in problems), problems)
+
+
 if __name__ == "__main__":
     unittest.main()

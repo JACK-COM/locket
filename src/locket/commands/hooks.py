@@ -59,7 +59,10 @@ def _search():
 
 def _entry(verb, fn):
     """`run` for a write-time hook: its run recorded, so one a host abandoned or whose
-    catch-all swallowed an error shows in `locket doctor`."""
+    catch-all swallowed an error shows in `locket doctor`. A verb outside
+    `health.HEALTH_VERBS` would be counted under `?`."""
+    assert verb in health.HEALTH_VERBS, verb
+
     def run(rest):
         with health.HookRun(verb):
             return fn()

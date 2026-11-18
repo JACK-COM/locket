@@ -2,7 +2,6 @@
 MCP server (`locket_mcp.py`) in Desktop's own config."""
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -28,6 +27,16 @@ def merge_server(data):
     return ["mcpServers.locket"]
 
 
+def ours(entry):
+    """Whether a `mcpServers.locket` entry runs Locket's server, as install writes it or
+    `locket help install` gives it: an entry a person pointed elsewhere is theirs to keep."""
+    if not isinstance(entry, dict):
+        return False
+    args = [str(a) for a in entry.get("args") or []]
+    return ((Path(str(entry.get("command", ""))).name == "locket" and args == ["mcp"])
+            or any(Path(a).name == "locket_mcp.py" for a in args))
+
+
 FLAG = "--desktop"
 
 
@@ -42,21 +51,23 @@ def register():
 
 
 def removal():
-    listed = False
+    entry = None
     if CONFIG and CONFIG.is_file():
         try:
-            listed = "locket" in (json.loads(CONFIG.read_text()).get("mcpServers") or {})
-        except (OSError, json.JSONDecodeError, ValueError):
-            listed = False
+            entry = (json.loads(CONFIG.read_text()).get("mcpServers") or {}).get("locket")
+        except (OSError, json.JSONDecodeError, ValueError, AttributeError):
+            entry = None
+    if entry is None:
+        return install.Removal([], None, [])
+    if not ours(entry):
+        return install.Removal([], None, [f"{CONFIG}: mcpServers.locket runs something else; left as it is"])
 
     def apply():
-        assert CONFIG is not None           # `listed` is False without one, so apply is never built
-        bak = CONFIG.with_suffix(".json.locket-uninstall.bak")
-        shutil.copy2(CONFIG, bak)
-        data = json.loads(CONFIG.read_text()); data["mcpServers"].pop("locket", None)
-        CONFIG.write_text(json.dumps(data, indent=2) + "\n")
-        print(f"edited {CONFIG} (mcpServers.locket removed; copy at {bak})")
-    return install.Removal([("mcp", f"{CONFIG}: mcpServers.locket")] if listed else [], apply if listed else None, [])
+        assert CONFIG is not None           # `entry` is None without one, so apply is never built
+        data = json.loads(CONFIG.read_text())
+        data["mcpServers"].pop("locket", None)
+        install.rewrite_json(CONFIG, data, "mcpServers.locket removed")
+    return install.Removal([("mcp", f"{CONFIG}: mcpServers.locket")], apply, [])
 
 
 def checks(m, row):

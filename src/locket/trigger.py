@@ -34,6 +34,7 @@ from pathlib import Path
 
 import hosts
 import fsio
+import health
 import manifest
 import adapters
 import corpora
@@ -304,17 +305,19 @@ def hook(stdin=None, host=None):
     exit 2 for a block. On Hermes a prompt's context is stdout JSON, and a tool call is
     answered through `adapters.emit`, which refuses it once for a row that does not block.
     Any failure exits 0, because a hook that breaks the tool it guards is worse than none."""
-    try:
-        payload = json.load(stdin or sys.stdin)
-        if not isinstance(payload, dict):
+    with health.HookRun("trigger"):
+        try:
+            payload = json.load(stdin or sys.stdin)
+            if not isinstance(payload, dict):
+                return 0
+            payload = _host_payload(payload)
+            message, block = fire(payload, host)
+        except Exception as e:
+            health.health_error("trigger", "fire", e)
             return 0
-        payload = _host_payload(payload)
-        message, block = fire(payload, host)
-    except Exception:
-        return 0
-    if not message:
-        return 0
-    return adapters.sender(payload).trigger_reply(payload, message, block, host)
+        if not message:
+            return 0
+        return adapters.sender(payload).trigger_reply(payload, message, block, host)
 
 
 def findings(root):

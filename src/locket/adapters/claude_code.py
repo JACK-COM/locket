@@ -204,7 +204,7 @@ def dead_hooks(config):
     Codex hooks.json that cannot run. Each command's program must exist, and each is run on a
     payload that matches nothing, which must exit 0 or 2 without a traceback. `usage hook`
     is checked for its program only, because running it would write the ledger. ⚠ Checking only the verbs
-    `install` registers let a dead SessionEnd entry report ok (Tercius letter 2026-09-23)."""
+    `install` registers let a dead SessionEnd entry report ok."""
     import subprocess, tempfile
     try:
         events = json.loads(config.read_text()).get("hooks") or {}
@@ -265,10 +265,7 @@ def file_removal(path):
     found, rest = locket_entries(path) if path.is_file() else ([], None)
 
     def apply():
-        bak = path.with_suffix(".json.locket-uninstall.bak")
-        shutil.copy2(path, bak)
-        path.write_text(json.dumps(rest, indent=2) + "\n")
-        print(f"edited {path} ({len(found)} hook entries removed; copy at {bak})")
+        install.rewrite_json(path, rest, f"{len(found)} hook entries removed")
     return install.Removal([("hook", f"{path}: {h}") for h in found],
                            apply if found and rest is not None else None, [])
 

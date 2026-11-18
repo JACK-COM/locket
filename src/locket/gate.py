@@ -148,8 +148,7 @@ def dated_series_pair(a, b):
     repeated null. Where the content is genuinely identical, collapse the entries
     to one line carrying a count and a last-seen date and update it in place; an
     in-place Edit never reaches the scorer at all. Run-length encoding is the fix
-    for a repeated NOTHING, and this is the fix for repeated SOMETHINGS (Peer
-    ruling 2026-08-16).
+    for a repeated NOTHING, and this is the fix for repeated SOMETHINGS.
     """
     da, db = set(ISO_DATE.findall(a)), set(ISO_DATE.findall(b))
     return bool(da) and bool(db) and not (da & db)
@@ -530,6 +529,11 @@ CONFIG_REFUSAL = ("This write edits {name}, configuration that decides what Lock
                   "a store through you. Tell the user what you would change and why.")
 
 
+# The files that configure a store: a write to one in a trusted store is refused, by the
+# write tools here and by bashguard in the shell.
+CONFIG_NAMES = (manifest.MANIFEST, manifest.OLD_MANIFEST, manifest.LEGACY_MANIFEST, manifest.TRIGGERS)
+
+
 def store_config(path):
     """(store, name) when `path` is a file that configures a store Locket acts on: a
     manifest, a legacy sources file, or a rows file, in a trusted store or a host
@@ -539,7 +543,7 @@ def store_config(path):
         p = Path.cwd() / p
     if len(str(p)) > fsio.PATH_MAX:
         return None
-    names = {n.lower() for n in (manifest.MANIFEST, manifest.OLD_MANIFEST, manifest.LEGACY_MANIFEST, "triggers.json")}
+    names = {n.lower() for n in CONFIG_NAMES}
     for q in (p, Path(os.path.realpath(p))):  # by name on a case-insensitive disk, and through a link
         d = q.parent
         if q.name.lower() in names and (trust.trusted(d) or d in set(paths.PATHS.host_stores.values())):
@@ -557,14 +561,19 @@ REGISTRY_REFUSAL = ("This touches Locket's trust registry or embedder settings (
                     "locket untrust <dir>  or  locket configure embedder ...  themselves.")
 
 
+def registry_paths():
+    """The files no agent may write: the trust registry, Locket's config, and the
+    Panoply settings that name the embedder host."""
+    return [paths.PATHS.registry, Path(os.environ.get("PANOPLY_CONFIG", str(paths.HOME / ".panoply" / "config.json"))),
+            paths.PATHS.state / "config.json"]
+
+
 def is_registry(path):
     """Whether `path` names a file that decides what Locket trusts or where it sends
     text: the trust registry, or the Panoply settings that name the embedder host.
     By identity, so a case variant or a link is the same file; decidable, so it may block."""
-    guarded = [paths.PATHS.registry, Path(os.environ.get("PANOPLY_CONFIG", str(paths.HOME / ".panoply" / "config.json"))),
-               paths.PATHS.state / "config.json"]
     try:
-        return any(fsio.same(path, g) for g in guarded)
+        return any(fsio.same(path, g) for g in registry_paths())
     except (OSError, RuntimeError, ValueError):
         return False
 

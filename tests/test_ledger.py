@@ -211,5 +211,21 @@ class Ledgers(StoreCase):
         (led / manifest.MANIFEST).write_text("{}\n"); corpora.clear_settings()
 
 
+class OversizedField(StoreCase):
+    def test_a_field_past_the_csv_limit_blocks(self):
+        """The csv reader raises on a field past its limit; read as an error, the write
+        landed with no cap checked, so it is a finding instead."""
+        led = (self.tmp / "proj").resolve(); led.mkdir()
+        (led / manifest.MANIFEST).write_text("{}\n"); corpora.clear_settings()
+        hist = led / "HISTORY-Proj-Sessions.csv"
+        hdr = "date,title,summary,area,repo,commit_hash,issue,pr\n"
+        hist.write_text(hdr)
+        row = f'2026-09-20,t,"{"s" * 140000}",,,,,\n'
+        msg, blocking = ledger.ledger_decision(str(hist), {"content": hdr + row})
+        self.assertTrue(blocking and "does not parse as CSV" in msg, msg)
+        msg, blocking = ledger.ledger_decision(str(hist), {"old_string": "x", "new_string": row})
+        self.assertTrue(blocking, msg)
+
+
 if __name__ == "__main__":
     unittest.main()

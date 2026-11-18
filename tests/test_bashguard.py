@@ -2,11 +2,13 @@
 import os
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.harness import StoreCase
 
 import bashguard  # noqa: E402
 import hosts  # noqa: E402
+import manifest  # noqa: E402
 import paths  # noqa: E402
 
 
@@ -216,6 +218,24 @@ class BashGuard(StoreCase):
             assert bw("cat > README.md")[1], "a .md written into a corpus dir is a corpus write"
             assert bw("cat > README.md", cwd="/Users/x/some-repo") == (None, False), \
                 "the same command outside a corpus must stay silent"
+
+
+class Registry(StoreCase):
+    COUNCIL = False
+
+    def test_a_moved_settings_file_is_still_refused(self):
+        """`PANOPLY_CONFIG` moves the embedder settings; the shell refusal follows it,
+        as the write tools' does."""
+        moved = self.tmp / "elsewhere" / "panoply-settings.json"
+        with mock.patch.dict(os.environ, PANOPLY_CONFIG=str(moved)):
+            msg, blocking = bashguard.decide(f"cat {moved}", str(self.tmp))
+        self.assertTrue(blocking and msg, msg)
+
+    def test_a_config_name_in_any_case_is_read(self):
+        store = (self.tmp / "s").resolve(); store.mkdir()
+        (store / manifest.MANIFEST).write_text("{}\n")
+        msg, blocking = bashguard.decide(f"echo x > {store / manifest.MANIFEST.upper()}", str(self.tmp))
+        self.assertTrue(blocking, msg)
 
 
 if __name__ == "__main__":

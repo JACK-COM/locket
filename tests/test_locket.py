@@ -289,7 +289,8 @@ class LocketFrontEnd(unittest.TestCase):
         listed = {v.name for v in cli.VERBS if not v.hidden}
         self.assertEqual(set(cli.parser()[1].choices), listed)
         self.assertEqual(set(install.HOOK_VERBS), set(hooks.ENTRIES))
-        self.assertTrue(set(health.HEALTH_VERBS) <= set(hooks.ENTRIES))
+        # the trigger hook is a listed verb whose `hook` counts its own runs
+        self.assertTrue(set(health.HEALTH_VERBS) <= set(hooks.ENTRIES) | {"trigger"})
         mcp_names = [v.mcp.name or f"locket_{v.name}" for v in cli.VERBS if v.mcp]
         self.assertTrue(set(mcp_names) <= set(locket_mcp.TOOLS), "a verb's tool is not served")
 

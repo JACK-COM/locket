@@ -18,7 +18,7 @@ import paths
 # Both surfaces are bounded by construction (RULINGS.csv on Area=substrate): a run's
 # marker lives only while the run does, so the directory is empty at rest and capped,
 # and the counters are one record per known hook verb, rewritten in place.
-HEALTH_VERBS = ("hook", "bashguard", "grepassist")
+HEALTH_VERBS = ("hook", "bashguard", "grepassist", "trigger")
 
 
 HEALTH_MARKER_CAP = 256          # past this the oldest count as abandoned: that many live hooks is a fault

@@ -4,7 +4,9 @@ by row, and a registered source's new rows scored against the prose of its store
 A schema violation blocks, because whether a row fits its ledger is decidable from the
 row; a source row that restates a claim warns, because whether a fact is new is not.
 """
+import csv
 import fnmatch
+import io
 import re
 from collections import Counter
 from pathlib import Path, PurePosixPath
@@ -130,8 +132,12 @@ def check_ledger_rows(schema: dict, header: list[str], rows: list[list[str]], fi
 
 
 def csv_rows_of(text: str) -> list[list[str]]:
-    import csv as _csv, io as _io
-    return list(_csv.reader(_io.StringIO(text)))
+    """The rows of CSV `text`. Raises ValueError on text the reader refuses, a field past
+    `csv.field_size_limit()` among them, so the caller decides rather than a catch-all."""
+    try:
+        return list(csv.reader(io.StringIO(text)))
+    except csv.Error as e:
+        raise ValueError(f"does not parse as CSV ({e})") from e
 
 
 def check_ledger_text(schema: dict, text: str, header: Optional[list[str]] = None) -> list[str]:
@@ -139,7 +145,10 @@ def check_ledger_text(schema: dict, text: str, header: Optional[list[str]] = Non
     (an Edit fragment, a heredoc); a line whose field count differs from the
     header's is not a row and is skipped, since a fragment can cut a row. Without
     it, the first line is the header (a whole-file Write, the sweep)."""
-    rows = csv_rows_of(text)
+    try:
+        rows = csv_rows_of(text)
+    except ValueError as e:             # one oversized field must block, not pass unchecked
+        return [f"the text {e}"]
     if header is None:
         if not rows:
             return []
@@ -153,7 +162,7 @@ def ledger_header(path: fsio.StrPath) -> Optional[list[str]]:
     try:
         with fsio.open_safe(path, newline="") as fh:
             rows = csv_rows_of(fh.read(4096))
-    except OSError:
+    except (OSError, ValueError):
         return None
     return rows[0] if rows else None
 

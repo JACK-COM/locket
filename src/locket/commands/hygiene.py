@@ -371,7 +371,10 @@ def cmd_ledgers(root):
             bad += 1
             continue
         findings = ledger.check_ledger_text(schema, body)
-        rows = max(len(ledger.csv_rows_of(body)) - 1, 0)
+        try:
+            rows = max(len(ledger.csv_rows_of(body)) - 1, 0)
+        except ValueError:
+            rows = 0
         out.append(f"{corpora.corpus_key(root, p)}  schema {glob!r}  {rows} rows, {len(findings)} findings")
         for f in findings:
             out.append(f"  {f}")
