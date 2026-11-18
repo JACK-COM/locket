@@ -1814,19 +1814,14 @@ class MemscanBehaviour(unittest.TestCase):
         with fixture_env():
             _selftest_inner()
 
-    def test_a_script_run_loads_one_copy(self):
-        """Run as a script, memscan is __main__; memfind's `import memscan` must reach
-        that module, not load a second copy with caches of its own."""
+    def test_memfind_loads_no_memscan(self):
+        """memfind reads the layers below memscan and never loads it, so a script run of
+        memscan, which is `__main__`, cannot meet a second copy with caches of its own."""
         import subprocess
-        prog = ("import runpy, sys\n"
-                f"sys.path.insert(0, {str(SRC)!r}); sys.argv = ['memscan.py', '--help']\n"
-                f"try:\n    runpy.run_path({str(SRC / 'memscan.py')!r}, run_name='__main__')\n"
-                "except SystemExit:\n    pass\n"
-                "import memfind\n"
-                "print(memfind.memscan.__name__)\n")
+        prog = (f"import sys; sys.path.insert(0, {str(SRC)!r})\n"
+                "import memfind\nprint('memscan' in sys.modules)\n")
         r = subprocess.run([sys.executable, "-c", prog], capture_output=True, text=True, timeout=60)
-        self.assertEqual(r.stdout.strip().splitlines()[-1], "__main__", r.stderr)
-
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "False", r.stderr)
 
 if __name__ == "__main__":
     unittest.main()

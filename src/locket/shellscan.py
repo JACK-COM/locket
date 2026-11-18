@@ -3,9 +3,9 @@ quoted or commented, by offset into the command.
 
 One scanner for every guard that reads a command. A guard that takes a line bash runs
 for heredoc body never sees that line, so the scanner errs toward code: a `<<` opens a
-heredoc only where its delimiter is a plain word (`[\w.-]+` once quotes are removed),
-so a shift or a pattern the scanner does not model (`a[1<<2]=3`, `${x//<<a/b}`)
-leaves the next lines read as code. A construct it does not model at all (a `case`
+heredoc only where its delimiter is a plain word (letters, digits, `_`, `.` and `-`
+once quotes are removed), so a shift or a pattern the scanner does not model
+(`a[1<<2]=3`, `${x//<<a/b}`) leaves the next lines read as code. A construct it does not model at all (a `case`
 pattern's `)` inside `$(...)`, a `((` bash re-reads as two subshells) does the same.
 `tests/test_shellscan.py` checks every reader against bash itself.
 """

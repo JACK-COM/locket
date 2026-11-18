@@ -44,7 +44,11 @@ from operator import mul
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import memscan
+import claims
+import corpora
+import corpus
+import fsio
+import manifest
 import paths
 
 import _embed  # noqa: E402  (panoply-lib's embedder ladder, a generated copy beside this file)
@@ -89,11 +93,11 @@ sys.modules[__name__].__class__ = _Module
 
 # ---------------------------------------------------------------- index
 
-MANIFEST = memscan.LEGACY_MANIFEST
-# One reader for the registered CSVs, and it lives in memscan so that the audit
+MANIFEST = manifest.LEGACY_MANIFEST
+# One reader for the registered CSVs, and it lives in corpus so that the audit
 # and the write-time gate see the same rows this index does.
-csv_sources = memscan.csv_sources
-csv_rows = memscan.csv_rows
+csv_sources = corpus.csv_sources
+csv_rows = corpus.csv_rows
 
 
 def _is_row(label):
@@ -111,22 +115,22 @@ def corpus_fingerprint(root):
     # Keyed by corpus-relative path, never basename: a store with depth holds
     # many SKILL.md and MEMORY.md, and a basename key silently overwrote them,
     # leaving stale detection blind to every file but the last of each name.
-    rs = memscan.roots_of(root)
-    fp = {memscan.corpus_key(root, p, rs): [p.stat().st_mtime_ns, p.stat().st_size]
-          for p in sorted(memscan.md_files(root))}
+    rs = corpora.roots_of(root)
+    fp = {corpora.corpus_key(root, p, rs): [p.stat().st_mtime_ns, p.stat().st_size]
+          for p in sorted(corpus.md_files(root))}
     # The registered CSVs and the manifest naming them, so editing either one, or
     # adding a source, invalidates the index exactly as editing a memory file does.
     for pth, _, _ in csv_sources(root):
         fp[pth.name] = [pth.stat().st_mtime_ns, pth.stat().st_size]
     for r in rs:                                # a joined store's manifest counts too
-        for name in (MANIFEST, memscan.MANIFEST, memscan.OLD_MANIFEST):
+        for name in (MANIFEST, manifest.MANIFEST, manifest.OLD_MANIFEST):
             man = Path(r) / name
             if man.exists():
-                fp[memscan.corpus_key(root, man, rs)] = [man.stat().st_mtime_ns, man.stat().st_size]
+                fp[corpora.corpus_key(root, man, rs)] = [man.stat().st_mtime_ns, man.stat().st_size]
     # The splitter's version: a change to how a file becomes claims re-embeds
     # every file once, where the per-file reuse below would keep stale claims
     # under an unchanged file forever.
-    fp["__claims__"] = memscan.CLAIMS_VERSION
+    fp["__claims__"] = claims.CLAIMS_VERSION
     return fp
 
 
@@ -161,8 +165,8 @@ def _write_cache(root, flat, meta):
         raise RuntimeError(f"refusing the cache directory {d}: not a directory this user owns")
     token = os.urandom(TOKEN_BYTES)
     meta_p, vec_p = cache_paths(root)
-    memscan._replace_atomic(vec_p, flat.tobytes() + token, ".index.vec.")
-    memscan._replace_atomic(meta_p, json.dumps({**meta, "token": token.hex()}), ".index.json.")
+    fsio._replace_atomic(vec_p, flat.tobytes() + token, ".index.vec.")
+    fsio._replace_atomic(meta_p, json.dumps({**meta, "token": token.hex()}), ".index.json.")
 
 
 def _normalise(vecs):
@@ -189,8 +193,8 @@ def build_index(root, quiet=False):
     # with the `|` markers gone, `unwrap` joins every table row into one line,
     # a 4000-row table becomes one claim (and the join is quadratic), so the
     # table vanishes from the index and a large one hangs the build.
-    docs = memscan.corpus(root, csv=False)   # rows are indexed below as their own units
-    per_file = {name: [s for s, _ in memscan.claims(body)]
+    docs = corpus.corpus(root, csv=False)   # rows are indexed below as their own units
+    per_file = {name: [s for s, _ in claims.claims(body)]
                 for name, body in sorted(docs.items())}
     if not any(per_file.values()):
         raise RuntimeError(f"no claims found in {root}")
@@ -280,7 +284,7 @@ def build_index(root, quiet=False):
         "fingerprint": fp, "items": items,
     })
     if not quiet:
-        under = sum(1 for body in docs.values() for _ in memscan.unclaimed(body))
+        under = sum(1 for body in docs.values() for _ in claims.unclaimed(body))
         # A claim past the cap is embedded on its first EMBED_CHARS characters and
         # is nearly always a strip artifact (a fused table, a list without stops),
         # so the count is printed with the file: what the index cannot see.
@@ -288,7 +292,7 @@ def build_index(root, quiet=False):
         print(f"indexed {len(items)} claims from {len(per_file)} files in "
               f"{time.time()-t:.0f}s  (dim {dim}; {reused} reused, "
               f"{fresh_files} file(s) re-embedded; {under} sentences under the "
-              f"{memscan.MIN_TOKENS}-token floor formed no claim)", file=sys.stderr)
+              f"{claims.MIN_TOKENS}-token floor formed no claim)", file=sys.stderr)
         if capped:
             print(f"  {len(capped)} claim(s) over {_embed.EMBED_CHARS} characters, embedded on their "
                   f"first {_embed.EMBED_CHARS}: " + ", ".join(sorted({n for n, _ in capped})), file=sys.stderr)
@@ -337,7 +341,7 @@ def _read_meta(path):
 
 
 def _read_text(path):
-    with memscan.open_safe(path, max_bytes=None) as f:
+    with fsio.open_safe(path, max_bytes=None) as f:
         return f.read()
 
 
@@ -351,7 +355,7 @@ def _read_vectors(path, n, dim, token):
         raise ValueError(f"vector cache shape {n} x {dim}")
     flat = array.array("f")
     want = n * dim * flat.itemsize + TOKEN_BYTES
-    with memscan.open_safe(path, binary=True, max_bytes=None) as f:
+    with fsio.open_safe(path, binary=True, max_bytes=None) as f:
         size = os.fstat(f.fileno()).st_size
         if size != want:
             raise ValueError(f"vector cache is {size} bytes, expected {want}")
@@ -399,13 +403,13 @@ def lexical_rank(statement, root, top=5, per_file=True, items=None):
     semantically; a query word no claim holds stays in that divisor, because its
     absence is evidence the fact is new."""
     if items is None:
-        items = [(name, s) for name, body in sorted(memscan.corpus(root, csv=False).items())
-                 for s, _ in memscan.claims(body)]              # already stripped
+        items = [(name, s) for name, body in sorted(corpus.corpus(root, csv=False).items())
+                 for s, _ in claims.claims(body)]              # already stripped
         items += csv_rows(root)
-    q = memscan.tokens(statement)
+    q = claims.tokens(statement)
     if not q:
         return []
-    toks = [memscan.tokens(s) for _, s in items]
+    toks = [claims.tokens(s) for _, s in items]
     n = len(toks)
     avgdl = (sum(map(len, toks)) / n) if n else 1.0
     df = dict.fromkeys(q, 0)
@@ -552,7 +556,7 @@ def siblings(root, top=30, quiet=False, idx=None):
     # everything it lists. True, and useless as a merge signal. Which files are
     # indexes is the store's own manifest's to say: on a store where MEMORY.md is
     # the whole continuity record, a fixed name list threw out a third of it.
-    index_files = memscan.settings(root)["index_files"]
+    index_files = corpora.settings(root)["index_files"]
     names = sorted(f for f in cent if Path(f).name not in index_files)
     pairs = []
     for a in range(len(names)):
@@ -678,8 +682,8 @@ def main(argv):
         # Every corpus in turn, for the user whose memory is one global store
         # and who should not need this tool's vocabulary to ask it a question.
         rc = 0
-        for k, v in sorted(memscan.all_corpora().items()):
-            if not memscan.has_content(v, csv=False):   # the index builds from markdown only
+        for k, v in sorted(corpora.all_corpora().items()):
+            if not corpus.has_content(v, csv=False):   # the index builds from markdown only
                 continue
             print(f"== {k}")
             try:
@@ -689,7 +693,7 @@ def main(argv):
             print()
         return rc
     if argv[1] == "--index":
-        root = memscan.resolve(argv[2]) if len(argv) > 2 else memscan.corpus_here(os.getcwd())
+        root = corpus.resolve(argv[2]) if len(argv) > 2 else corpora.corpus_here(os.getcwd())
         if root is None:
             print("no corpus for this directory; name one, or make one with  locket init <dir>",
                   file=sys.stderr); return 1
@@ -698,7 +702,7 @@ def main(argv):
         rest, top = argv[2:], 30
         if "-n" in rest:
             j = rest.index("-n"); top = int(rest[j + 1]); rest = rest[:j] + rest[j + 2:]
-        root = memscan.resolve(rest[0]) if rest else memscan.corpus_here(os.getcwd())
+        root = corpus.resolve(rest[0]) if rest else corpora.corpus_here(os.getcwd())
         if root is None:
             print("no corpus for this directory; name one", file=sys.stderr); return 1
         print(f"corpus: {root}")
@@ -715,15 +719,15 @@ def main(argv):
     top = 5
     if "-n" in rest:
         j = rest.index("-n"); top = int(rest[j + 1]); rest = rest[:j] + rest[j + 2:]
-    root = memscan.resolve(rest[0]) if rest else memscan.corpus_here(os.getcwd())
+    root = corpus.resolve(rest[0]) if rest else corpora.corpus_here(os.getcwd())
     if root is None:
         print("no corpus for this directory; name one", file=sys.stderr)
         return 1
     print(f"corpus: {root}")
     rows = rank(statement, root, top=top)
     for c, f, s in rows:
-        print(f"[{c:.3f}] {memscan.relay(f, 160)}")
-        print(f"        {memscan.relay(s, 190)}")
+        print(f"[{c:.3f}] {fsio.relay(f, 160)}")
+        print(f"        {fsio.relay(s, 190)}")
     if LAST_RANK_MODE == "lexical":
         print("\nWORD OVERLAP ONLY: no embedder could be reached, so this ranking cannot see a "
               "paraphrase and a silent result is not evidence the corpus is silent.\n"
