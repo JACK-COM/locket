@@ -14,10 +14,18 @@ from unittest import mock
 from tests.harness import SRC, fixture_env
 
 import memscan as ms  # noqa: E402
+import cites  # noqa: E402
 import grepassist  # noqa: E402
 import hosts  # noqa: E402
 import ledger  # noqa: E402
 import paths  # noqa: E402
+from commands import hygiene, overlap, stores  # noqa: E402
+
+
+def _shown(report):
+    """Print a report as the CLI does and return its finding count."""
+    report.show()
+    return report.count
 
 
 def _hook_health(fixture):
@@ -167,13 +175,13 @@ def _selftest_inner():
     }
     wrapped = ("- first item that wraps\n  onto a second line\n  and onto a third\n"
                "- second item that wraps\n  onto a second line\n  and a third line too\n")
-    assert list(ms._prose_paras(wrapped)) == [], "a hard-wrapped list is a list, not a paragraph"
+    assert list(hygiene._prose_paras(wrapped)) == [], "a hard-wrapped list is a list, not a paragraph"
     lazy = "- one item\ncontinued without indentation\nand still the item\n"
-    assert list(ms._prose_paras(lazy)) == [], "a lazy continuation belongs to its item"
+    assert list(hygiene._prose_paras(lazy)) == [], "a lazy continuation belongs to its item"
     headed = "# Heading\nProse follows the heading directly.\nMore prose.\nAnd more.\n"
-    assert list(ms._prose_paras(headed)) == [len(headed.split())], "a heading opens no run"
+    assert list(hygiene._prose_paras(headed)) == [len(headed.split())], "a heading opens no run"
     indented = "    Indented prose under no marker\n    is still prose.\n"
-    assert list(ms._prose_paras(indented)) == [len(indented.split())], "indentation alone is not a list"
+    assert list(hygiene._prose_paras(indented)) == [len(indented.split())], "indentation alone is not a list"
 
     # §5 dated history clauses: the shapes loaded-whole files carry, not only `Update <date>`.
     # Positive control is SELF.md's stack form; the negatives are scoped dates §1 permits,
@@ -242,7 +250,7 @@ def _selftest_inner():
         (two / store / ms.MANIFEST).write_text("{}\n")
         for f, body in files.items():
             (two / store / f).write_text(body)
-    _, _, _, cross = ms.across_pairs({"alpha": two / "alpha", "beta": two / "beta"})
+    _, _, _, cross = overlap.across_pairs({"alpha": two / "alpha", "beta": two / "beta"})
     assert {(a.split("::")[0], b.split("::")[0]) for _, a, b, _, _ in cross} == {("alpha", "beta")}, cross
     # alpha/m holds both of beta/o's shared sentences, alpha/n holds one: three pairs
     assert len(cross) == 3, [(a, b) for _, a, b, _, _ in cross]
@@ -254,11 +262,11 @@ def _selftest_inner():
     (two / "alpha" / "m.md").write_text(docs["a.md"] + "\n" + spread)
     (two / "beta" / "o.md").write_text(docs["a.md"] + "\n" + spread)
     stores3 = {"alpha": two / "alpha", "beta": two / "beta", "gamma": two / "gamma"}
-    _, _, _, cross3 = ms.across_pairs(stores3)
+    _, _, _, cross3 = overlap.across_pairs(stores3)
     assert any("gamma::g.md" in (a, b) for _, a, b, _, _ in cross3), "propagated sentence must survive"
     for f in ("q.md", "r.md"):
         (two / "alpha" / f).write_text(spread)
-    _, _, _, cross4 = ms.across_pairs(stores3)
+    _, _, _, cross4 = overlap.across_pairs(stores3)
     assert not any("gamma::g.md" in (a, b) for _, a, b, _, _ in cross4), "furniture in one store is filtered"
     # a CSV registered by two manifests is ONE file: it never pairs against
     # itself, and a store's own restatement of a row is that store's audit, not
@@ -273,12 +281,12 @@ def _selftest_inner():
     (two / "beta" / "o.md").write_text(docs["a.md"] + "\n" + row)
     (two / "alpha" / "SHORT_TERM.md").write_text(docs["a.md"].split("\n")[0])
     ms.settings.cache_clear()
-    union5, _, _, cross5 = ms.across_pairs(stores3)
+    union5, _, _, cross5 = overlap.across_pairs(stores3)
     assert "alpha+beta::shared.csv#locket" in union5, sorted(union5)
     assert not any("shared.csv" in a or "shared.csv" in b for _, a, b, _, _ in cross5), \
         "a shared CSV pairs against neither itself nor a holder's own restatement"
     assert any({a, b} == {"alpha::m.md", "beta::o.md"} for _, a, b, _, _ in cross5), "md pairs still fire"
-    grad = ms.graduated_across(cross5, stores3)
+    grad = overlap.graduated_across(cross5, stores3)
     assert [(a, b) for _, a, b, _, _ in grad] == [("alpha::SHORT_TERM.md", "beta::o.md")], grad
     (two / "alpha" / "SHORT_TERM.md").unlink()
     # a manifest directory inside a store is a store of its own: the outer walker
@@ -418,6 +426,13 @@ def _selftest_inner():
     cidx = ms.code_index([(home / "rules", frozenset())])
     assert ms.resolve_citation("ui/app/y.py", 1, cidx)[0] == "ok", "an abbreviated repository root read as missing"
     assert ms.resolve_citation("ui/y.py", 1, cidx)[0] == "missing", "a two-part path matched a stranger's folder"
+    # The mode end to end: defects counted, every citation listed, the scope named.
+    cited = {("x.py", 3): {"m.md"}, ("x.py", 9): {"m.md"}, ("gone.py", 1): {"n.md"}}
+    with mock.patch.object(cites, "citations", return_value=cited), \
+            mock.patch.object(cites, "code_roots", return_value=[(home / "rules", frozenset())]):
+        r = hygiene.cmd_cites(home)
+    assert r.count == 2 and "gone.py:1  FILE NOT FOUND" in r.text and "x.py:9  PAST EOF" in r.text \
+        and "3 distinct path:line citations across 2 memory files" in r.text, r.text
     # A member path is entered only if every component would be: `memory/archive`
     # stays provenance even when a manifest names it as a member.
     hosts.HOST_MEMBERS["home"] = {"memory", "rules", "memory/archive"}; ms.settings.cache_clear()
@@ -1080,7 +1095,7 @@ def _selftest_inner():
         shutil.rmtree(fake, ignore_errors=True); ms.settings.cache_clear()
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        ms.cmd_budget(store)
+        hygiene.cmd_budget(store).show()
     assert "Largest" not in out.getvalue() and "bytes" not in out.getvalue(), \
         f"a store under budget printed an empty table: {out.getvalue()}"
     # --- init --ledgers: the built-in ledgers, header only, two registered as sources
@@ -1142,7 +1157,7 @@ def _selftest_inner():
     (store / "sub" / "MEMORY.md").write_text("- [T](t.md) the target\n- [G](gone.md) removed\n")
     (store / ms.MANIFEST).write_text(json.dumps({"excluded_dirs": ["old"], "index_files": ["MEMORY.md"]}))
     ms.settings.cache_clear()
-    ih = {h[1]: h[4].exists() for h in ms.index_hooks(store)}
+    ih = {h[1]: h[4].exists() for h in hygiene.index_hooks(store)}
     assert ih == {"sub/t.md": True, "sub/gone.md": False}, ih
     shutil.rmtree(store / "sub")
 
@@ -1184,12 +1199,12 @@ def _selftest_inner():
         "See `OTHER.csv` (query `Area=cost`) for the rest.\n"
         "Never query `RULES.csv` on `Zone=cost`, which is the old column.\n"
         "The file `RULES.csv` holds `Area=cost` rows, but this sentence is not a pointer.\n")
-    st = {(x[1], x[2], x[3]): x[4] for x in ms.csv_pointers(store)}
+    st = {(x[1], x[2], x[3]): x[4] for x in hygiene.csv_pointers(store)}
     assert st[("RULES.csv", "Area", "cost")] == "ok", st
     assert st[("RULES.csv", "Area", "dev-loop|frontend")] == "DANGLING frontend", st
     assert st[("OTHER.csv", "Area", "cost")] == "UNREGISTERED", st
     assert st[("RULES.csv", "Zone", "cost")] == "NO COLUMN", st
-    assert len(ms.csv_pointers(store)) == 4, "a mention without the word query is not a pointer"
+    assert len(hygiene.csv_pointers(store)) == 4, "a mention without the word query is not a pointer"
 
     # --- graduated: a holding-space claim that a durable source now holds -------
     import contextlib, io
@@ -1207,7 +1222,7 @@ def _selftest_inner():
         "entry one\nGate: a third instance where the watcher ordering bites on a freshly built sheet.\n")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        n = ms.cmd_graduated(store)
+        n = _shown(overlap.cmd_graduated(store))
     txt = buf.getvalue()
     assert n == 1 and "INBOX.md" in txt and "RULES.csv#dev-loop" in txt, txt
     body = txt.split("\n\n", 1)[1]
@@ -1217,7 +1232,7 @@ def _selftest_inner():
     (store / "INBOX.md").unlink(); (store / "QUEUE.md").unlink()
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        assert ms.cmd_graduated(store) == 0
+        assert _shown(overlap.cmd_graduated(store)) == 0
     assert "none of the configured holding spaces" in buf.getvalue(), \
         "a clean run still says what it was scored against"
     (store / ms.MANIFEST).write_text("{not json")
@@ -1325,9 +1340,9 @@ def _selftest_inner():
         (vault / ms.MANIFEST).unlink(); ms.settings.cache_clear()
         assert vault not in ms.all_corpora().values() and ms.registry_stale() == [vault], \
             "a registered path whose manifest is gone is reported, never enumerated"
-        assert any("is gone" in l for l in ms.corpora_lines()), ms.corpora_lines()
+        assert any("is gone" in l for l in stores.corpora_lines()), stores.corpora_lines()
         assert ms.forget(vault) and not ms.forget(vault) and ms.registry() == [], "forget drops the row once"
-        assert not any("is gone" in l for l in ms.corpora_lines())
+        assert not any("is gone" in l for l in stores.corpora_lines())
         with contextlib.redirect_stderr(io.StringIO()):
             assert ms.cmd_init(vault / "one.md", index=False) == 1, "a file is not a corpus"
         hostlike = (d / "hostlike").resolve(); hostlike.mkdir()
@@ -1391,7 +1406,7 @@ def _selftest_inner():
         assert "SHORT.md" not in ms.settings(kid)["ledger_surfaces"], "and never downward"
         assert st["whole_read_exempt"] == {"IMPL.md"} and ms.settings(kid)["whole_read_exempt"] == set(), \
             "the size-sweep exemption is a name-set like the others: read, unioned upward, never down"
-        assert not ms.dangling(par).get("topic_one") and ms.dangling(par).get("topic_two"), \
+        assert not hygiene.dangling(par).get("topic_one") and hygiene.dangling(par).get("topic_two"), \
             "a wikilink into the joined store resolves; a missing one still dangles"
         (kid / "HISTORY-Kid-Sessions.csv").write_text("date,title,summary,area,repo,commit_hash,issue,pr\n")
         assert ms.session_ledger(par) == kid / "HISTORY-Kid-Sessions.csv" == ms.session_ledger(kid), \
@@ -1400,14 +1415,14 @@ def _selftest_inner():
         (par / "feedback_named_one.md").write_text(
             "---\nname: named-one\ndescription: x\n---\n\nA body line with name: not-this.\n"
             "Links to [[named-one]] and [[not-this]].\n")
-        dl = ms.dangling(par)
+        dl = hygiene.dangling(par)
         assert "named-one" not in dl and "not-this" in dl, \
             "a link resolves by the frontmatter name, never by a `name:` in the body"
         (par / "feedback_named_one.md").unlink()
         assert any("superseded" in " ".join(ts) for _, _, ts in ms.archived_claims(par).items), \
             "provenance is read from the joined store's archive too"
-        assert any(s[4] == "ok" for s in ms.csv_pointers(par)), ms.csv_pointers(par)
-        assert any("[1 joined store]" in l for l in ms.corpora_lines()), ms.corpora_lines()
+        assert any(s[4] == "ok" for s in hygiene.csv_pointers(par)), hygiene.csv_pointers(par)
+        assert any("[1 joined store]" in l for l in stores.corpora_lines()), stores.corpora_lines()
         # refusals: unknown parent, self, a store nesting on disk, a cycle
         for bad in ("nobody", "kid"):
             with contextlib.redirect_stderr(io.StringIO()):
@@ -1552,7 +1567,7 @@ def _selftest_inner():
     assert blocking and "slug is required" in msg and "note is 21 characters" in msg, msg
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        n = ms.cmd_ledgers(led)
+        n = _shown(hygiene.cmd_ledgers(led))
     assert n == 1 and "2 ledger(s) checked, 1 finding(s)" in buf.getvalue(), buf.getvalue()
     (led / ms.MANIFEST).write_text("{}\n"); ms.settings.cache_clear()
     assert "@@" not in ms.usage() and "caps title ≤90" in ms.usage(), "the help renders the built-ins from the constant"
@@ -1589,7 +1604,7 @@ def _selftest_inner():
     ms.settings.cache_clear(); hist.write_text(hdr + ok)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        n = ms.cmd_ledgers(led)
+        n = _shown(hygiene.cmd_ledgers(led))
     assert n == 0 and "1 ledger(s) checked, 0 finding(s)" in buf.getvalue(), buf.getvalue()
     (led / ms.MANIFEST).write_text("{}\n"); ms.settings.cache_clear(); hist.write_text(hdr + good)
     # rulings and claims: one glob covers the single-store and the project name
@@ -1619,7 +1634,7 @@ def _selftest_inner():
     try:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            n = ms.cmd_ledgers(led)
+            n = _shown(hygiene.cmd_ledgers(led))
         assert "declared CSV(s) past the" in buf.getvalue() and "never split it" in buf.getvalue(), buf.getvalue()
         assert n >= 1, "a ledger past the size reading counted as clean"
     finally:
@@ -1639,7 +1654,7 @@ def _selftest_inner():
     (led / "archive" / "RULINGS.csv").write_text(rh + rul.replace(",pricing,", ",Pricing,"))
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        n = ms.cmd_ledgers(led)
+        n = _shown(hygiene.cmd_ledgers(led))
     assert n == 1 and "memory/RULINGS.csv" in buf.getvalue() and "archive/" not in buf.getvalue(), buf.getvalue()
     (led / "memory" / "RULINGS.csv").unlink(); (led / "archive" / "RULINGS.csv").unlink()
     (led / ms.MANIFEST).write_text("{}\n"); ms.settings.cache_clear()

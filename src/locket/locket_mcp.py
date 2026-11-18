@@ -32,6 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import adapters
+from commands import hygiene, overlap, stores
 import memscan
 import memfind
 
@@ -49,29 +50,31 @@ def _store(name):
         if root is None:
             raise ValueError(f"no memory store matches {name!r}; call locket_corpora")
         return root
-    stores = {k: v for k, v in memscan.all_corpora().items() if memscan.md_files(v)}
-    if len(stores) == 1:
-        return next(iter(stores.values()))
+    found = {k: v for k, v in memscan.all_corpora().items() if memscan.md_files(v)}
+    if len(found) == 1:
+        return next(iter(found.values()))
     raise ValueError("more than one memory store here; name one: "
-                     + ", ".join(sorted(stores)) + ", or 'all'")
+                     + ", ".join(sorted(found)) + ", or 'all'")
 
 
-def _capture(fn, *a, **kw):
+def _text(report):
+    """A report as the text the CLI prints, through the same SafeOut filter, so store
+    text never reaches the model raw."""
     buf = io.StringIO()
-    with contextlib.redirect_stdout(memscan.SafeOut(buf)):
-        fn(*a, **kw)
+    if report.lines:
+        memscan.SafeOut(buf).write(report.text + "\n")
     return buf.getvalue()
 
 
 def _over_stores(name, fn):
-    """Run a CLI-shaped mode over one store or, for 'all', every store with files."""
+    """A report mode over one store or, for 'all', every store with files."""
     if name == "all":
         out = []
         for k, v in sorted(memscan.all_corpora().items()):
             if memscan.md_files(v):
-                out.append(f"== {k}\n" + _capture(fn, v))
+                out.append(f"== {k}\n" + _text(fn(v)))
         return "\n".join(out) or "no memory stores with markdown files found"
-    return _capture(fn, _store(name))
+    return _text(fn(_store(name)))
 
 
 # ---------------------------------------------------------------- tools
@@ -79,7 +82,7 @@ def _over_stores(name, fn):
 def t_corpora(args):
     # The same counts `audit` reports, from the same function the CLI prints:
     # a listing that counted markdown alone read as a half-indexed store.
-    return "\n".join(memscan.corpora_lines(60)) or "no memory stores found on this machine"
+    return "\n".join(stores.corpora_lines(60)) or "no memory stores found on this machine"
 
 
 def t_init(args):
@@ -130,7 +133,7 @@ def t_find(args):
 def t_across(args):
     """Claim pairs whose two sides sit in different stores, over every store on
     the machine at once. The one check no single store can run on itself."""
-    return _capture(memscan.cmd_across) or "no memory stores with markdown files found"
+    return _text(overlap.cmd_across()) or "no memory stores with markdown files found"
 
 
 def t_check_before_write(args):
@@ -167,30 +170,30 @@ def t_check_before_write(args):
 
 
 def t_audit(args):
-    return _over_stores(args.get("store"), memscan.cmd_audit)
+    return _over_stores(args.get("store"), overlap.cmd_audit)
 
 
 def t_dupes(args):
     files = args.get("files") or None
     if isinstance(files, str):              # a bare string would be matched as a substring
         files = [files]
-    return _over_stores(args.get("store"), lambda r: memscan.cmd_dupes(r, files=files))
+    return _over_stores(args.get("store"), lambda r: overlap.cmd_dupes(r, files=files))
 
 
 def t_budget(args):
-    return _over_stores(args.get("store"), memscan.cmd_budget)
+    return _over_stores(args.get("store"), hygiene.cmd_budget)
 
 
 def t_graduated(args):
-    return _over_stores(args.get("store"), memscan.cmd_graduated)
+    return _over_stores(args.get("store"), overlap.cmd_graduated)
 
 
 def t_links(args):
-    return _over_stores(args.get("store"), memscan.cmd_links)
+    return _over_stores(args.get("store"), hygiene.cmd_links)
 
 
 def t_pointers(args):
-    return _over_stores(args.get("store"), memscan.cmd_pointers)
+    return _over_stores(args.get("store"), hygiene.cmd_pointers)
 
 
 def t_siblings(args):

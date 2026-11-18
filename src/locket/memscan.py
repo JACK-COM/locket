@@ -39,10 +39,10 @@ import os
 import re
 import shlex
 import sys
-from collections import Counter, defaultdict
 from pathlib import Path
 
 import paths
+from commands import hygiene, overlap, stores
 from scaffold import (  # noqa: F401  (re-exported)
     LEDGER_FILES, cmd_init, cmd_schema, migrate, scaffold_ledgers,
 )
@@ -55,7 +55,6 @@ from adapters.codex import parse_patch  # noqa: F401  (re-exported)
 from adapters.hermes import ONCE_NOTE, refuse_once  # noqa: F401  (re-exported)
 import bashguard
 import grepassist
-import ledger
 from grepassist import grep_assist, grep_words, prose_like  # noqa: F401  (re-exported)
 from shellwrites import (  # noqa: F401  (re-exported)
     BASH_WRITE, BASH_WRITE_STARTS, bash_write_targets, write_matches,
@@ -120,587 +119,7 @@ from gate import (  # noqa: F401  (re-exported)
 )
 
 
-def index_hooks(root):
-    """(index key, target key, title, hook text, target path) for every index line
-    with a target, in every member directory and joined store. A target resolves
-    beside its index file, never at the root: a composite store's `memory/MEMORY.md`
-    points into `memory/`."""
-    out = []
-    index_files = settings(root)["index_files"]
-    rs = roots_of(root)
-    for p in md_files(root):
-        if p.name not in index_files:
-            continue
-        for line in read_or_empty(p).splitlines():
-            m = IDX_LINE.match(line)
-            if m:
-                hook = m.group("hook").lstrip(" —-").strip()
-                if hook:
-                    t = p.parent / m.group("target")
-                    out.append((corpus_key(root, p, rs), corpus_key(root, t, rs), m.group("title"), hook, t))
-    return out
-
-
-def front_name(txt):
-    """The top-level `name:` in a file's frontmatter, or None. Read only inside the
-    opening block, so a `name:` line in the body never counts."""
-    if not txt.startswith("---\n"):
-        return None
-    end = txt.find("\n---", 3)
-    m = re.search(r"^name:[ \t]*['\"]?([^'\"\n]+?)['\"]?[ \t]*$", txt[4:end] if end != -1 else "", re.M)
-    return m.group(1) if m else None
-
-
-def dangling(root):
-    """{target: [files]} for every wikilink resolving to no file. A target resolves
-    by file stem or by the frontmatter `name:`, which is Claude Code's auto-memory
-    convention (`[[verify-end-to-end]]` -> `feedback_verify_end_to_end.md`)."""
-    files = set()
-    texts = {p: read_or_empty(p) for p in md_files(root)}
-    for p, txt in texts.items():
-        files.add(p.stem.replace("-", "_"))
-        name = front_name(txt)
-        if name:
-            files.add(name.replace("-", "_"))
-    out = defaultdict(list)
-    for p, txt in texts.items():
-        for t in LINK.findall(txt):
-            if t.replace("-", "_") not in files:
-                out[t].append(p.name)
-    return out
-
-
-# A pointer at CSV ROWS: the file in backticks, the word `query` within the same
-# clause, and a `Column=value|value` filter in backticks. A row has no stable ID,
-# so this is the `[[wikilink]]` of a ruling, and it is checkable: the CSV must be
-# registered, the column must exist, and every value must match at least one row,
-# so that retiring a ruling exposes every passage that depended on it.
-QUERY_PTR = re.compile(r"`([^`\s]+\.csv)`[^`\n]{0,40}`([A-Za-z_][\w -]*?)=([^`]+)`")
-
-
-def _column_values(path, column):
-    """Set of a column's values, or None where the column is absent."""
-    import csv as _csv
-    try:
-        with open_safe(path, newline="") as fh:
-            rd = _csv.DictReader(fh)
-            if column not in (rd.fieldnames or []):
-                return None
-            return {(r.get(column) or "").strip() for r in rd}
-    except (OSError, _csv.Error):
-        return None
-
-
-def csv_pointers(root):
-    """[(file, csv, column, values, status)] for every query pointer in the corpus.
-    Status is `ok`, `UNREGISTERED` (no such CSV in the manifest), `NO COLUMN`, or
-    `DANGLING <values>` naming the filter values no row carries."""
-    sources = {p.name: p for p, _, _ in csv_sources(root)}
-    cache, out = {}, []
-    for p in md_files(root):
-        txt = read_or_empty(p)
-        for m in QUERY_PTR.finditer(txt):
-            if not re.search(r"\bquery\b", txt[max(0, m.start() - 60):m.end()], re.I):
-                continue
-            name, col, vals = m.group(1), m.group(2).strip(), m.group(3)
-            if name not in sources:
-                out.append((p.name, name, col, vals, "UNREGISTERED"))
-                continue
-            if (name, col) not in cache:
-                cache[(name, col)] = _column_values(sources[name], col)
-            have = cache[(name, col)]
-            if have is None:
-                out.append((p.name, name, col, vals, "NO COLUMN"))
-                continue
-            missing = [v.strip() for v in vals.split("|") if v.strip() and v.strip() not in have]
-            out.append((p.name, name, col, vals, f"DANGLING {'|'.join(missing)}" if missing else "ok"))
-    return out
-
-
 # ---------------------------------------------------------------- entry points
-
-def _filter_pairs(pairs, store=lambda f: ""):
-    """(kept, dropped): the pairs with boilerplate (a sentence in three or more
-    files of ONE store) and pointer-only sentences removed. One filter shared by
-    `audit`, `graduated` and `across`, so no two modes disagree about what a
-    pair is. `store` names the store a file belongs to; `across` passes the
-    union prefix so that a sentence propagated to three stores, one file each,
-    is the finding and not furniture. Counted over `store::file` keys it was
-    three files and vanished, while the mode's own closing line promised it
-    would fire forever."""
-    txt_files = defaultdict(set)
-    for _, fa, fb, sa, sb in pairs:
-        txt_files[(store(fa), " ".join(sa.lower().split()))].add(fa)
-        txt_files[(store(fb), " ".join(sb.lower().split()))].add(fb)
-    boiler = {t for (_, t), f in txt_files.items() if len(f) >= 3}
-
-    kept, dropped = [], 0
-    for jac, fa, fb, sa, sb in pairs:
-        # Test BOTH sides: a near-duplicate pair carrying the boilerplate on the
-        # B side only survives a one-sided test.
-        if ({" ".join(sa.lower().split()), " ".join(sb.lower().split())} & boiler
-                or pointer_only(sa) or pointer_only(sb)):
-            dropped += 1
-            continue
-        kept.append((jac, fa, fb, sa, sb))
-    return kept, dropped
-
-
-def _audit_pairs(root, floor=PAIR_FLOOR):
-    """(docs, raw pairs, kept pairs, dropped count) for one corpus."""
-    docs = corpus(root)
-    pairs = cross_file_pairs(docs, floor)
-    kept, dropped = _filter_pairs(pairs)
-    return docs, pairs, kept, dropped
-
-
-def across_pairs(stores, floor=PAIR_FLOOR):
-    """Claim pairs that NO single store holds both sides of.
-
-    `stores` is {name: root}. Every corpus is loaded into one union and paired
-    once, so the cost is one `audit` over the sum of the stores (0.5s over 490
-    files here), and a pair some store's own `audit` already owns is dropped.
-    Returns (union, raw pairs, dropped, cross). The gap this closes: every other
-    check scores a corpus against itself, so a fact written into two stores is
-    invisible to both stores' gates and rots in whichever one stops being
-    maintained.
-
-    A file is one identity however many manifests register it: a markdown file
-    by its resolved path, a CSV pseudo-document by the CSV's resolved path plus
-    its label. Keyed by `<store>::<name>` instead, a ledger registered under
-    `sources` in two stores entered the union twice and paired every row against
-    itself, thirty phantom pairs above the one real one on the first store that
-    shared a ledger; and a rule file restating a row of the ledger it points into
-    printed here too, though the rule store's own `audit` already reports it. A
-    shared file's union key names every holder (`alpha+beta::RULES.csv#x`), so
-    the pair lines say it is shared without a second mechanism. Edge worth
-    knowing: `_filter_pairs` counts furniture per prefix, so a shared file sits
-    in its own bucket rather than in each holder's.
-    """
-    holders, bodies, names = {}, {}, {}
-    for k, root in sorted(stores.items()):
-        rs = roots_of(root)
-        md = {corpus_key(root, p, rs): str(p.resolve()) for p in md_files(root)}
-        csvs = {p.name: str(p.resolve()) for p, _, _ in csv_sources(root)}
-        for name, body in corpus(root).items():
-            if name in md:
-                ident = md[name]
-            elif "#" in name and name.split("#", 1)[0] in csvs:
-                fname, tag = name.split("#", 1)
-                ident = f"{csvs[fname]}#{tag}"
-            else:
-                ident = f"{k}::{name}"
-            holders.setdefault(ident, []).append(k)
-            bodies.setdefault(ident, body)
-            names.setdefault(ident, name)
-    union, owners = {}, {}
-    for ident, ks in holders.items():
-        key = f"{'+'.join(ks)}::{names[ident]}"
-        union[key] = bodies[ident]
-        owners[key] = set(ks)
-    pairs = cross_file_pairs(union, floor)
-    kept, dropped = _filter_pairs(pairs, store=lambda f: f.split("::", 1)[0])
-    cross = [p for p in kept if owners[p[1]].isdisjoint(owners[p[2]])]
-    return union, pairs, dropped, cross
-
-
-def _side_kind(key, stores):
-    """`holding`, `ledger` or `durable` for one side of an `across` pair, read
-    from the manifest of every store holding it; `mixed` where they disagree."""
-    prefix, name = key.split("::", 1)
-    base = Path(name).name
-    kinds = set()
-    for k in prefix.split("+"):
-        s = settings(stores[k])
-        kinds.add("holding" if base in s["holding_spaces"]
-                  else "ledger" if base in s["ledger_surfaces"] else "durable")
-    return kinds.pop() if len(kinds) == 1 else "mixed"
-
-
-def graduated_across(cross, stores):
-    """The `across` pairs with a holding-space side and a durable side, holding
-    side first: an entry promoted into ANOTHER store and never retired.
-    `graduated` scores a holding space against the durable files of its own
-    store, so a promotion that crossed a store boundary is invisible to it, and
-    this is the one place both sides are in hand. Found on the first store that
-    kept its rules in a second corpus: five holding entries whose lessons had
-    moved there weeks before, `graduated` reporting zero and right to."""
-    out = []
-    for jac, fa, fb, sa, sb in cross:
-        ka, kb = _side_kind(fa, stores), _side_kind(fb, stores)
-        if {ka, kb} == {"holding", "durable"}:
-            out.append((jac, fa, fb, sa, sb) if ka == "holding" else (jac, fb, fa, sb, sa))
-    return out
-
-
-def cmd_across(floor=PAIR_FLOOR):
-    stores = {k: v for k, v in all_corpora().items() if md_files(v) or csv_rows(v)}
-    union, pairs, dropped, cross = across_pairs(stores, floor)
-    grad = graduated_across(cross, stores)
-    print(f"{len(stores)} corpora, {len(union)} files; {len(pairs)} raw claim pairs at "
-          f"jaccard {floor}; {dropped} filtered as pointer/boilerplate; "
-          f"{len(cross)} across corpora to read, {len(grad)} with a holding-space side "
-          f"(promoted into another store, never retired; `graduated` scores one store "
-          f"and cannot see these)\n")
-    by = Counter((fa.split("::", 1)[0], fb.split("::", 1)[0]) for _, fa, fb, _, _ in cross)
-    for (a, b), n in by.most_common():
-        print(f"  {n:4d}  {a}  x  {b}")
-    if by:
-        print()
-    tagged = {(fa, fb, sa) for _, fa, fb, sa, _ in grad}
-    for jac, fa, fb, sa, sb in cross:
-        tag = " [holding side: promoted, never retired]" if (fa, fb, sa) in tagged or (fb, fa, sb) in tagged else ""
-        print(f"[{jac:.2f}]{tag} {fa}\n       {fb}\n   A: {relay(sa)}\n   B: {relay(sb)}\n")
-    print("Pairs that currently AGREE, so fork risk rather than divergence: once two copies "
-          "drift apart the jaccard falls and nothing here sees them. A store derived from "
-          "another (a vault distilled from a host's council store) fires here forever once "
-          "registered; read it as expected, never exempt it, and register it, because a "
-          "directory no manifest names is watched by nothing and a lesson promoted into it "
-          "reads exactly like one never promoted. Inside one host the skills, rules and "
-          "agents sit in the council store with the memory, so their restatements are "
-          "`audit`'s to report, not this mode's.")
-    return len(cross)
-
-
-def cmd_audit(root, floor=PAIR_FLOOR):
-    docs, pairs, kept, dropped = _audit_pairs(root, floor)
-    index_files = settings(root)["index_files"]
-    idx_pairs = [p for p in kept if Path(p[1]).name in index_files or Path(p[2]).name in index_files]
-    under = sum(1 for body in docs.values() for _ in unclaimed(body))
-    print(f"{len(docs)} files; {len(pairs)} raw cross-file claim pairs at jaccard {floor}; "
-          f"{dropped} filtered as pointer/boilerplate; {len(kept)} to read "
-          f"({len(idx_pairs)} index-restates-its-target); {under} sentences under the "
-          f"{MIN_TOKENS}-token floor formed no claim and are in nothing above\n")
-    for jac, fa, fb, sa, sb in kept:
-        print(f"[{jac:.2f}] {fa}\n       {fb}\n   A: {relay(sa)}\n   B: {relay(sb)}\n")
-    return len(kept)
-
-
-def cmd_graduated(root, floor=PAIR_FLOOR):
-    """Holding-space claims that a durable file now holds: promoted, never retired.
-
-    A holding space stages an entry until it is promoted or discarded, so an entry
-    whose claim now sits in a durable file or a registered CSV row has graduated
-    and was never retired: retire it, or rewrite it to what is still open. `audit`
-    prints these same pairs among every other kind; this mode keeps only the pairs
-    with exactly one holding side and no ledger side, because a holding-to-holding
-    pair is a ledger restating a gate by design, a ledger entry quoting a gate is
-    chronology doing its job (on the council store those were 20 of 20 hits), and
-    a durable-to-durable pair is `audit`'s. Scores ONE store: an entry promoted
-    into a second store is invisible here and is tagged by `across`, which is
-    the only mode holding both sides.
-
-    Never silent. The scope line prints on a clean run too: a zero from a store
-    with no holding file and a zero from one holding file scored against eleven
-    durable sources are different answers, and a mode that prints nothing when
-    clean cannot tell its reader which one it gave. Informs, never blocks.
-    """
-    sets = settings(root)
-    holding, ledgers = sets["holding_spaces"], sets["ledger_surfaces"]
-    docs, _, kept, _ = _audit_pairs(root, floor)
-    present = sorted(n for n in docs if Path(n).name in holding)
-    durable = [n for n in docs if Path(n).name not in holding and Path(n).name not in ledgers]
-    hits = []
-    for jac, fa, fb, sa, sb in kept:
-        if Path(fa).name in ledgers or Path(fb).name in ledgers:
-            continue
-        ha, hb = Path(fa).name in holding, Path(fb).name in holding
-        if ha != hb:                       # holding side first, so a reader works one file at a time
-            hits.append((jac, fa, fb, sa, sb) if ha else (jac, fb, fa, sb, sa))
-    hits.sort(key=lambda p: (p[1], -p[0]))
-    if not holding:
-        scope = "no holding spaces are configured for this store"
-    elif not present:
-        scope = f"none of the configured holding spaces ({', '.join(sorted(holding))}) is present"
-    else:
-        scope = (f"{len(present)} holding file{'s' if len(present) > 1 else ''} "
-                 f"({', '.join(present)}) against {len(durable)} durable sources, ledgers excluded")
-    print(f"{len(hits)} holding-space claims also held by a durable file; {scope}\n")
-    for jac, fh, fd, sh, sd in hits:
-        print(f"[{jac:.2f}] {fh}\n       {fd}\n   holding: {relay(sh)}\n   durable: {relay(sd)}\n")
-    return len(hits)
-
-
-def corpora_lines(width=70):
-    """One line per store: markdown files plus registered CSV rows, the same
-    sources `audit` counts. The CLI and the MCP server both print this, because
-    a listing that counted markdown alone read as a half-indexed store beside an
-    audit that counted six."""
-    out = []
-    for k, v in sorted(all_corpora().items()):
-        rows = len(csv_rows(v))
-        joined = len(roots_of(v)) - 1
-        out.append(f"  {k:{width}s} {len(md_files(v)):4d} files"
-                   + (f" + {rows} csv rows" if rows else "")
-                   + (f"  [{joined} joined store{'s' if joined > 1 else ''}]" if joined else ""))
-    for p in registry_stale():
-        out.append(f"  {str(p):{width}s} registered, but its {MANIFEST} is gone; "
-                   f"`init` it again to keep it, `forget` it to drop the row")
-    return out
-
-
-def cmd_pointers(root):
-    hooks = index_hooks(root)
-    missing = [(i, t, h) for i, t, _, h, path in hooks if not path.exists()]
-    print(f"{len(hooks)} index lines with a target; {len(missing)} point at a missing file\n")
-    for i, t, h in missing:
-        print(f"  MISSING TARGET  {i} -> {t}  :: {h[:90]}")
-    if missing:
-        print("  (an index line naming a file that was never written, or was removed: write the "
-              "file or cut the line. A [[wikilink]] with no file is `links`' to report.)")
-    for i, t, title, h, _ in hooks:
-        print(f"\n### {i} -> {t}\nTITLE: {title}\nHOOK: {h}")
-    return len(hooks)
-
-
-def cmd_dupes(root, floor=PAIR_FLOOR, files=None):
-    """Repeated claims INSIDE one file. The uniqueness invariant, measured.
-
-    Defaults to the holding spaces, where uniqueness is the rule (Peer ruling
-    2026-08-15); pass `files` to check any other. A ledger is exempt on purpose,
-    since repetition is its shape.
-    """
-    docs = corpus(root)
-    want = files or sorted(settings(root)["holding_spaces"] & set(docs))
-    scope = {k: v for k, v in docs.items() if k in want}
-    if not scope:
-        print(f"no holding space in {root}; name a file to check one directly")
-        return 0
-    # Same ENTRY_TOKENS floor the write-time check uses. A report that flags what
-    # the hook lets through is the drift this instrument exists to prevent.
-    pairs = [p for p in cross_file_pairs(scope, floor, same_file=True)
-             if not pointer_only(p[3]) and len(tokens(p[3])) >= ENTRY_TOKENS]
-    per = Counter(p[1] for p in pairs)
-    print(f"{len(scope)} file(s) checked for repeated entries: " +
-          ", ".join(f"{k} ({per.get(k, 0)})" for k in sorted(scope)) + "\n")
-    for jac, fa, _fb, sa, sb in pairs:
-        print(f"[{jac:.2f}] {fa}\n   A: {relay(sa)}\n   B: {relay(sb)}\n")
-    return len(pairs)
-
-
-ENTRY_BYTES = 10_240       # §5 flag. 3 KB is the one-fact-one-file design target, not this
-                           # number: it sat BELOW the corpus median (211 of 317 files, median
-                           # 4,004 bytes) and so ranked nothing. Re-derive against the median
-                           # before moving it; 10 KB was ~p90.
-UPDATE_CAP = 3             # §5: three or more dated history clauses
-PARA_WORDS = 200           # a paragraph past this is a session narrative, not a fact
-
-
-def _prose_paras(txt):
-    """Word counts of the PROSE blocks only.
-
-    A bullet list, a table or a heading run carries no blank lines, so measuring
-    every block reads a whole index file as one 6,000-word paragraph. The defect
-    this counts is a paragraph nobody can read.
-
-    A NUMBERED list counts as list-ish too. Without that, a 7-item checklist read
-    as one 525-word paragraph and put its file at the top of the [P] table, which
-    is a miscount rather than a finding.
-
-    A line that follows a bullet or numbered item with no blank line between is
-    that item's continuation and is credited to it, indented or not, which is how
-    markdown renders it. Counting marker lines alone read a hard-wrapped 62-line
-    index carrying 16 markers as a 784-word paragraph in a file whose longest
-    real paragraph was 298: the same miscount with item length as the variable.
-    Only a list marker opens a run, so a heading, a table row or a quote line
-    followed by unbroken prose leaves that prose counted.
-    """
-    numbered = re.compile(r"^\d+[.)]\s")
-
-    def opens(l):
-        s = l.lstrip()
-        return s[:2].rstrip() in ("-", "*") or bool(numbered.match(s))
-
-    for block in re.split(r"\n\s*\n", txt):
-        lines = [l for l in block.splitlines() if l.strip()]
-        listish, in_item = 0, False
-        for l in lines:
-            if opens(l):
-                listish, in_item = listish + 1, True
-            elif l.lstrip()[:2].rstrip() in ("|", "#", ">"):
-                listish, in_item = listish + 1, False
-            elif in_item:
-                listish += 1
-        if lines and listish <= len(lines) / 2:
-            yield len(block.split())
-
-
-def cmd_budget(root):
-    """Files breaching an §5 budget: bytes, dated history clauses, longest prose paragraph.
-
-    Every history clause is listed by line, whatever the file's count, because the list
-    is the reconsolidation worklist: a rewrite happens per passage, not per file.
-    """
-    rows, ledgers, history = [], [], {}
-    ledger_names = settings(root)["ledger_surfaces"]
-    rs = roots_of(root)
-    for p in md_files(root):
-        if p.name in ledger_names:           # chronology: length is the design, not a breach
-            ledgers.append(f"{p.stat().st_size // 1024}KB {corpus_key(root, p, rs)}")
-            continue
-        txt = read_or_empty(p)
-        name = corpus_key(root, p, rs)
-        hits = [(i + 1, l.strip()[:110]) for i, l in enumerate(txt.splitlines())
-                if HISTORY_CLAUSE.search(l)]
-        if hits:
-            history[name] = hits
-        rows.append((p.stat().st_size, len(hits), max(list(_prose_paras(txt)) or [0]), name))
-    if ledgers:
-        print("ledgers, exempt (append-only chronology, folded in place, never reconsolidated): "
-              + ", ".join(ledgers) + "\n")
-    flagged = [r for r in sorted(rows, reverse=True)
-               if r[0] > ENTRY_BYTES or r[1] >= UPDATE_CAP or r[2] > PARA_WORDS]
-    b = sum(1 for r in flagged if r[0] > ENTRY_BYTES)
-    u = sum(1 for r in flagged if r[1] >= UPDATE_CAP)
-    w = sum(1 for r in flagged if r[2] > PARA_WORDS)
-    print(f"{len(rows)} files; {len(flagged)} over an §5 budget — "
-          f"{b} past {ENTRY_BYTES // 1024}KB [B], {u} with {UPDATE_CAP}+ update clauses [U], "
-          f"{w} with a {PARA_WORDS}+ word paragraph [P]."
-          + (f" Largest {min(25, len(flagged))}:\n" if flagged else ""))
-    def mark_of(size, upd, para):
-        return "".join(c for c, hit in
-                       (("B", size > ENTRY_BYTES), ("U", upd >= UPDATE_CAP), ("P", para > PARA_WORDS))
-                       if hit)
-
-    if flagged:
-        print(f"  {'bytes':>7} {'upd':>4} {'para':>5}  file")
-    for size, upd, para, name in flagged[:25]:
-        print(f"  {size:7d} {upd:4d} {para:5d}  {name}  [{mark_of(size, upd, para)}]")
-
-    # The table sorts by bytes, so a small file holding one enormous paragraph
-    # never reaches it: a 677-word paragraph in a 10KB file stayed invisible while
-    # a 566-word one in a 28KB file showed. Sort [P] separately as well.
-    shown = {r[3] for r in flagged[:25]}
-    by_para = [r for r in sorted(flagged, key=lambda r: -r[2])
-               if r[2] > PARA_WORDS and r[3] not in shown][:10]
-    if by_para:
-        print("\n  Longest paragraphs not in the table above:")
-        for size, upd, para, name in by_para:
-            print(f"  {size:7d} {upd:4d} {para:5d}  {name}  [{mark_of(size, upd, para)}]")
-    if history:
-        print("\n  Dated history clauses, each a passage to rewrite to what is now true "
-              "(prime-memory-discipline §2), never to append to:")
-        for name, hits in sorted(history.items(), key=lambda kv: -len(kv[1])):
-            print(f"  {name} ({len(hits)})")
-            for ln, text in hits[:8]:
-                print(f"    {ln:5d}  {text}")
-            if len(hits) > 8:
-                print(f"          … {len(hits) - 8} more")
-    return len(flagged)
-
-
-def cmd_links(root):
-    """Dangling links are three different things and only one is a defect.
-
-    RESOLVABLE: written in an older naming convention, pointing at a file that
-    does exist under a type prefix. Real rot; repair these.
-    unresolved: a forward reference to a memory not written yet, which
-    prime-memory-discipline allows, or a pointer to a skill or rule file that was never
-    a memory. Neither is a defect, so neither is reported as one.
-    """
-    d = dangling(root)
-    stems = [p.stem for p in md_files(root)]      # same walker as `dangling`, or
-                                                  # the classifier and the thing it
-                                                  # classifies disagree
-    resolvable, unresolved = {}, {}
-    for t, files in d.items():
-        key = t.replace("-", "_")
-        hits = [f for f in stems if f.endswith("_" + key)]
-        (resolvable if len(hits) == 1 else unresolved)[t] = (hits, files)
-    total = sum(len(v) for v in d.values())
-    print(f"{len(d)} dangling wikilink targets, {total} occurrences: "
-          f"{len(resolvable)} RESOLVABLE, {len(unresolved)} unresolved\n")
-    for t, (hits, files) in sorted(resolvable.items()):
-        print(f"  RESOLVABLE  [[{t}]] -> [[{hits[0]}]]   ({len(set(files))} files)")
-    for t, (hits, files) in sorted(unresolved.items()):
-        why = f"ambiguous {hits}" if hits else "forward reference or non-memory target"
-        print(f"  unresolved  [[{t}]]  {why}   <- {', '.join(sorted(set(files)))}")
-    ptrs = csv_pointers(root)
-    if ptrs:
-        bad = [x for x in ptrs if x[4] != "ok"]
-        print(f"\n{len(ptrs)} CSV query pointers (`file.csv` ... query `Column=value`), "
-              f"{len(ptrs) - len(bad)} resolve, {len(bad)} do not")
-        for f, name, col, vals, status in sorted(bad, key=lambda x: (x[4], x[0])):
-            print(f"  {status:14s} `{name}` query `{col}={vals}`   <- {f}")
-    return len(resolvable) + sum(1 for x in ptrs if x[4] != "ok")
-
-
-def cmd_cites(root, filters=None):
-    """Resolve every `path:line` citation against the code it points at.
-
-    Two findings are decidable here and are printed as defects: a cited file
-    that no longer exists, and a line past the end of one that does. Everything
-    else NEEDS A READER, the same way `pointers` does. This mode can say which
-    function a line sits in; only a reader knows whether that is the function
-    the sentence claimed. So the resolved list prints the enclosing scope beside
-    each citation and stops there.
-
-    The count itself is the headline. Every citation here is a pointer that will
-    break without telling anyone, so the number is debt to convert to symbols,
-    not a score to drive to zero by editing code.
-
-    Two things read as defects and are not. A citation quoted as EVIDENCE that
-    citations rot is a deliberately dead pointer, and this mode cannot tell it
-    from a live one. A bare basename (`aircraft.py:80`, four files deep in three
-    repos) is reported with the match count beside it: the scope shown belongs
-    to whichever file sorted first, which is a guess, and the citation was
-    already ambiguous before this mode read it.
-    """
-    cites = citations(root)
-    if not cites:
-        print("no path:line citations. The corpus cites by symbol.")
-        return 0
-    roots = code_roots(root)
-    if not roots:
-        print("no code tree resolved for this corpus; nothing to check against.")
-        return 0
-    print("searching: " + ", ".join(str(r) for r, _ in roots))
-    idx = code_index(roots)
-
-    defects, resolved = [], []
-    for (path, line), sources in sorted(cites.items()):
-        if filters and not any(f in path for f in filters):
-            continue
-        status, detail = resolve_citation(path, line, idx)
-        who = ", ".join(sorted(sources))
-        if status == "missing":
-            elsewhere = (f" ({detail} file{'s share' if detail != 1 else ' shares'} the name, none at this path)"
-                         if detail else "")
-            defects.append(f"!! {path}:{line}  FILE NOT FOUND{elsewhere}   <- {who}")
-        elif status == "eof":
-            _, length, _ = detail
-            defects.append(f"!! {path}:{line}  PAST EOF (file is {length} lines)   <- {who}")
-        else:
-            _, lines, n_hits = detail
-            scope = enclosing_scope(lines, line) if path.endswith(".py") else None
-            where = scope or lines[line - 1].strip()[:58] or "(blank line)"
-            amb = f"  [{n_hits} files match this name]" if n_hits > 1 else ""
-            resolved.append(f"   {path}:{line}{amb}\n       {where}\n       <- {who}")
-
-    citing = {f for s in cites.values() for f in s}
-    total = len(defects) + len(resolved)
-    s = lambda n, w: f"{n} {w}" + ("" if n == 1 else "s")
-    print(f"\n{s(total, 'distinct path:line citation')} across "
-          f"{s(len(citing), 'memory file')}. {len(defects)} resolve to nothing.")
-    print("Cite the SYMBOL instead: no other mode opens the cited file, so these "
-          "decay in silence.\n")
-    for d in defects:
-        print(d)
-    if defects and resolved:
-        print()
-    for r in resolved:
-        print(r)
-    return len(defects)
-
-
-def cmd_against(root, text, top=3):
-    docs = claim_index(root)
-    ranked = score_against(text, docs)[:top]
-    for combined, best, name, pair in ranked:
-        print(f"[{best:.2f}] {name}")
-        if pair and best >= 0.4:
-            print(f"      existing: {pair[1][:180]}")
-    return ranked
 
 
 # A holding space has its own furniture: "Promotion target if this holds across
@@ -1041,41 +460,6 @@ def usage():
     return USAGE.replace("@@BUILTIN_LEDGERS@@", "\n".join(lines))
 
 
-def cmd_ledgers(root):
-    """Every schema-governed CSV in the corpus, each row checked, then every
-    declared CSV past the size reading. A clean run prints its scope, so a zero
-    says what it was scored against."""
-    schemas = ledger_schemas(root)
-    files = ledger.schema_csvs(root)
-    big = large_csvs(root)
-    if not files and not big:
-        print(f"no schema-governed ledger in {root} (schemas: {', '.join(schemas)})")
-        return 0
-    bad = 0
-    for p, schema, glob in files:
-        try:
-            body = read_safe(p)
-        except OSError as e:
-            print(f"{corpus_key(root, p)}  schema {glob!r}  NOT READ: {e}")
-            bad += 1
-            continue
-        findings = check_ledger_text(schema, body)
-        rows = max(len(_csv_rows_of(body)) - 1, 0)
-        print(f"{corpus_key(root, p)}  schema {glob!r}  {rows} rows, {len(findings)} findings")
-        for f in findings:
-            print(f"  {f}")
-        bad += len(findings)
-    for p, n in big:
-        print(f"{corpus_key(root, p)}  size {n / 1048576:.1f} MB, past the "
-              f"{ledger.CSV_REPORT_BYTES / 1048576:g} MB reading: run `locket doctor` for the write "
-              f"hook's latency on it, and choose a remedy against what it shows; never split it")
-    if big:
-        print(f"{len(big)} declared CSV(s) past the {ledger.CSV_REPORT_BYTES / 1048576:g} MB reading")
-    bad += len(big)
-    print(f"{len(files)} ledger(s) checked, {bad} finding(s)")
-    return bad
-
-
 # ---------------------------------------------------------------------------
 # Host adapters: the hook modes above speak one payload shape, and three hosts
 # produce it. Claude Code's PreToolUse, Codex's PreToolUse and Hermes's
@@ -1204,12 +588,12 @@ def _main_rest(mode, argv):
             return 1 if findings else 0
         return cmd_schema()
     if mode == "corpora":                   # needs no corpus of its own
-        print("\n".join(corpora_lines()))
+        print("\n".join(stores.corpora_lines()))
         return 0
     if mode == "across":                    # every corpus at once, by construction
         # `across all` is what every other Step 5 line teaches; it is not a floor.
         floor = next((float(a) for a in argv[2:3] if re.fullmatch(r"[0-9.]+", a)), PAIR_FLOOR)
-        cmd_across(floor)
+        overlap.cmd_across(floor).show()
         return 0
     if len(argv) > 2 and argv[2] == "all":
         # Every corpus on the machine, one after another. The shape a user with
@@ -1243,23 +627,23 @@ def _main_rest(mode, argv):
         print(f"corpus: {root}"
               f"  [write-time hook: {'ACTIVE' if guarded else 'NOT PROTECTED — audit only'}]")
     if mode == "audit":
-        cmd_audit(root, float(argv[3]) if len(argv) > 3 else PAIR_FLOOR)
+        overlap.cmd_audit(root, float(argv[3]) if len(argv) > 3 else PAIR_FLOOR).show()
     elif mode == "pointers":
-        cmd_pointers(root)
+        hygiene.cmd_pointers(root).show()
     elif mode == "links":
-        cmd_links(root)
+        hygiene.cmd_links(root).show()
     elif mode == "cites":
-        cmd_cites(root, filters=argv[3:] or None)
+        hygiene.cmd_cites(root, filters=argv[3:] or None).show()
     elif mode == "budget":
-        cmd_budget(root)
+        hygiene.cmd_budget(root).show()
     elif mode == "ledgers":
-        cmd_ledgers(root)
+        hygiene.cmd_ledgers(root).show()
     elif mode == "dupes":
-        cmd_dupes(root, files=argv[3:] or None)
+        overlap.cmd_dupes(root, files=argv[3:] or None).show()
     elif mode == "graduated":
-        cmd_graduated(root, float(argv[3]) if len(argv) > 3 else PAIR_FLOOR)
+        overlap.cmd_graduated(root, float(argv[3]) if len(argv) > 3 else PAIR_FLOOR).show()
     elif mode == "against":
-        cmd_against(root, sys.stdin.read())
+        overlap.cmd_against(root, sys.stdin.read()).show()
     else:
         # An unknown mode is usually the corpus argument with the mode omitted.
         print(f"Unknown mode {mode!r}. Did you forget a mode "
