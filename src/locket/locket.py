@@ -9,6 +9,8 @@ of the command itself are verbs here too. The hooks keep calling the two scripts
 by absolute path, which is why this file adds nothing they depend on.
 """
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -21,6 +23,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import memscan  # noqa: E402
+import paths  # noqa: E402
 import _settings  # noqa: E402
 
 __version__ = "0.12.3"                          # the one home: pyproject.toml and the formula's test read it
@@ -146,7 +149,7 @@ VERBS = [
      "locket doctor                        check, including live hook runs abandoned or failed open\n"
      "locket doctor --ack                  check, then mark the hook-health counts shown as seen"),
     ("mcp", "", "serve the checks over MCP on stdio, for a host without hooks", None),
-    ("selftest", "", "both scripts' internal checks", None),
+    ("selftest", "", "check this install end to end on scratch stores", None),
     ("version", "", "print the version (also --version, -V, -v)", None),
     ("help", "find | scan | manifest | trigger | usage | install",
      "the full help of either script, the manifest keys alone, how trigger rows or usage work, "
@@ -353,16 +356,16 @@ def cmd_install(argv=()):
     if rc:
         return rc
     try:
-        memscan.cmd_schema(quiet=True); print(f"schema: {memscan.SCHEMA_FILE}")
+        memscan.cmd_schema(quiet=True); print(f"schema: {paths.PATHS.schema_file}")
     except OSError as e:
         print(f"schema: not written ({e})")
-    stale = memscan.SCHEMA_FILE.parent / "memfind.schema.json"   # the file's name before the rename
+    stale = paths.PATHS.schema_file.parent / "memfind.schema.json"   # the file's name before the rename
     if stale.is_file():
         stale.unlink(); print(f"schema: {stale} removed (older name)")
     for cfg in _editor_settings():
         if "memfind.schema.json" in cfg.read_text(errors="replace"):
             print(f"editor: {cfg} still maps the manifest to memfind.schema.json; change that entry to\n"
-                  f'        {{"fileMatch": ["locket.json", "memfind.json"], "url": "file://{memscan.SCHEMA_FILE}"}}')
+                  f'        {{"fileMatch": ["locket.json", "memfind.json"], "url": "file://{paths.PATHS.schema_file}"}}')
     print(_embedder_line())
     if "--hooks" in argv:
         rc |= _merge_json(memscan.CLAUDE / "settings.json", _add_claude_hooks)
@@ -520,7 +523,7 @@ def _hermes_hooks(text):
 def cmd_uninstall(argv):
     yes, purge, dry = "--yes" in argv, "--purge" in argv, "--dry-run" in argv
     links = [BIN / n for n in LINKS if (BIN / n).is_symlink() and _ours(BIN / n)]
-    locket_dir = memscan.REGISTRY.parent
+    locket_dir = paths.PATHS.state
     caches = _caches()
     manifests = _manifests()
     settings = memscan.CLAUDE / "settings.json"
@@ -539,7 +542,6 @@ def cmd_uninstall(argv):
 
     # the embedder venv every Panoply piece shares goes only with the last piece on PATH;
     # an older install made it inside ~/.locket, the rest in ~/.panoply
-    import contextlib
     import _embed
     import configure
     configure.apply()                       # a configured venv is the one in use
@@ -549,8 +551,7 @@ def cmd_uninstall(argv):
     # nothing reads it, and it goes with ~/.locket
     keep = venv.is_dir() and venv == _embed.VENV and shared != venv
     # the usage ledger holds days no source can give back, so only --purge takes it
-    import usage
-    ledger = usage.LEDGER if usage.LEDGER.is_file() and usage.LEDGER.parent == locket_dir and not purge else None
+    ledger = paths.PATHS.usage_ledger if paths.PATHS.usage_ledger.is_file() and paths.PATHS.usage_ledger.parent == locket_dir and not purge else None
     spare = [p for p in (venv if keep else None, ledger) if p]
     print("uninstall will remove:")
     for l in links:
@@ -662,7 +663,7 @@ def cmd_status():
     print(f"scripts: {HERE}")
     print(f"on PATH: {'yes' if str(BIN) in os.environ.get('PATH', '').split(os.pathsep) else 'no'}")
     print(f"system: {_system_line()}")
-    print(f"registry: {memscan.REGISTRY} ({len(memscan.registry())} added with `locket init`; "
+    print(f"registry: {paths.PATHS.registry} ({len(memscan.registry())} added with `locket init`; "
           f"host memory folders are found without it)")
     print(_embedder_line())
     n = len(memscan.all_corpora())
@@ -778,13 +779,41 @@ def _script_in(cmd):
     return None
 
 
+def _smoke():
+    """This install, end to end on scratch stores: the write hook fires through this
+    memscan.py on a write repeating a stored paragraph, and an audit finds a repeated
+    pair. None when both hold, else what broke. The behaviour suites are the
+    repository's tests/, which a package does not ship."""
+    import tempfile
+    live = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'memscan.py'))} hook"
+    fired = _probe_hook(live)
+    if fired is not True:
+        return f"the write hook did not fire through {HERE / 'memscan.py'}: {fired or 'it was silent'}"
+    with tempfile.TemporaryDirectory() as t:
+        store = Path(t) / "store"
+        store.mkdir()
+        for name in ("one.md", "two.md"):
+            (store / name).write_text(_PROBE + "\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            try:
+                rc = memscan.main(["memscan.py", "audit", str(store)])
+            except (Exception, SystemExit) as e:   # a crash or an exit is the finding, named
+                return f"audit raised {type(e).__name__}: {e}"
+        if rc:
+            return f"audit exited {rc}: {(buf.getvalue().strip().splitlines() or ['no output'])[-1]}"
+        if "two.md" not in buf.getvalue():
+            return "an audit of two files holding one paragraph found no pair"
+    return None
+
+
 def _probe_hook(cmd, codex=False):
     """Run a registered `hook` command on a write that must fire: a new file in a
     throwaway store repeating a paragraph the store already holds. True when it
     answered, False when it was silent, a string when it failed to run. For Codex
     the write arrives as the patch Codex sends, so the probe crosses the parser."""
     import tempfile
-    base = memscan.REGISTRY.parent
+    base = paths.PATHS.state
     base.mkdir(parents=True, exist_ok=True)
     store = Path(tempfile.mkdtemp(prefix="doctor-probe-", dir=base))
     try:
@@ -875,7 +904,7 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
     body = ("Locket doctor latency probe " + os.urandom(6).hex() + ": a novel paragraph that "
             "names no fact any store holds, long enough to pass the net-new floor of the "
             "write gate and reach its meaning-ranked question. ") * 2
-    hosts = {Path(p) for p in memscan.HOST_STORES.values()}
+    hosts = {Path(p) for p in paths.PATHS.host_stores.values()}
     worst = opened = None
     # A probe killed at its timeout must not count as a live run the host abandoned, so each
     # probe keeps its own health record; an error in it is a hook that failed open quickly.
@@ -1094,62 +1123,6 @@ def _profile_trust_gap(codex_home, lapsed):
     return gap
 
 
-def _selftest_uninstall():
-    """`uninstall --yes` in throwaway homes, in a child process because Locket's paths are
-    fixed from HOME at import: the shared venv goes only with the last piece on PATH, at
-    either location, and an older ~/.locket/venv beside ~/.panoply/venv goes with ~/.locket."""
-    import subprocess, tempfile
-    cases = (  # venvs made, another piece on PATH, venvs that must survive
-        ((".panoply/venv",), False, ()),
-        ((".panoply/venv",), True, (".panoply/venv",)),
-        ((".locket/venv",), False, ()),
-        ((".locket/venv",), True, (".locket/venv",)),
-        ((".panoply/venv", ".locket/venv"), True, (".panoply/venv",)),
-    )
-    for made, other, kept in cases:
-        with tempfile.TemporaryDirectory() as t:
-            h = Path(t)
-            for v in made:
-                (h / v).mkdir(parents=True)
-            (h / "bin").mkdir()
-            if other:
-                (h / "bin/grille").write_text("#!/bin/sh\n")
-                (h / "bin/grille").chmod(0o755)
-            r = subprocess.run([sys.executable, str(HERE / "locket.py"), "uninstall", "--yes"],
-                               env={"HOME": t, "PATH": str(h / "bin")}, capture_output=True, text=True)
-            left = tuple(v for v in (".panoply/venv", ".locket/venv") if (h / v).is_dir())
-            assert r.returncode == 0 and left == kept, \
-                f"made {made}, grille on PATH {other}: left {left}, expected {kept}\n{r.stdout}{r.stderr}"
-            assert kept or not (h / ".panoply").exists(), "an empty ~/.panoply outlived its venv"
-    with tempfile.TemporaryDirectory() as t:     # doctor runs to its summary, rows file and all
-        (Path(t) / ".claude").mkdir()
-        (Path(t) / ".claude/triggers.json").write_text('{"rows": []}\n')
-        r = subprocess.run([sys.executable, str(HERE / "locket.py"), "doctor"], capture_output=True, text=True,
-                           env={"HOME": t, "PATH": "/usr/bin:/bin", "MEMFIND_NO_AUTOSTART": "1"})
-        assert " checks: " in r.stdout and "Traceback" not in r.stderr, f"doctor did not finish:\n{r.stderr[-600:]}"
-        assert "triggers" in r.stdout, "doctor skipped a host rows file"
-        assert "usage" in r.stdout and "never recorded" in r.stdout, "doctor skipped the usage row"
-    run = lambda t, *a: subprocess.run([sys.executable, str(HERE / "locket.py"), *a], capture_output=True, text=True,
-                                       env={"HOME": t, "PATH": "/usr/bin:/bin", "MEMFIND_NO_AUTOSTART": "1"})
-    for purge in (False, True):     # the ledger survives uninstall, the SessionEnd hook does not
-        with tempfile.TemporaryDirectory() as t:
-            (Path(t) / ".claude").mkdir()
-            (Path(t) / ".locket").mkdir()
-            (Path(t) / ".locket/usage.csv").write_text("date\n")
-            (Path(t) / ".panoply").mkdir()
-            (Path(t) / ".panoply/config.json").write_text('{"locket": {"embed": {"model": "m"}}}')
-            r = run(t, "install", "--hooks")
-            hooks = json.loads((Path(t) / ".claude/settings.json").read_text())["hooks"]
-            assert _event_command(hooks.get("SessionEnd"), "usage hook"), f"install registered no usage hook:\n{r.stdout}"
-            r = run(t, "uninstall", "--yes", *(["--purge"] if purge else []))
-            hooks = json.loads((Path(t) / ".claude/settings.json").read_text())["hooks"]
-            assert not _event_command(hooks.get("SessionEnd"), "usage hook"), "uninstall left the usage hook"
-            assert (Path(t) / ".locket/usage.csv").is_file() != purge, \
-                f"uninstall {'kept' if purge else 'removed'} the usage ledger with purge={purge}\n{r.stdout}{r.stderr}"
-            assert 'the "locket" section of' in r.stdout and (Path(t) / ".panoply/config.json").is_file(), \
-                f"uninstall did not name, or removed, Locket's settings section\n{r.stdout}"
-
-
 def _probe_trigger(cmd, hermes=False):
     """Run a registered `trigger` command against a throwaway home whose host store holds
     one row the payload matches. True when the row's question came back, False when the
@@ -1178,7 +1151,6 @@ def cmd_doctor():
     """Every install step a machine can check, one line each, with the command
     that fixes a failure. Exit 1 when anything fails; a warning is a rung
     missing that Locket works without."""
-    import contextlib, io
     rows = []
 
     def row(level, what, detail, fix=None):
@@ -1187,14 +1159,9 @@ def cmd_doctor():
     w = shutil.which("locket")
     row("ok", "command", w) if w else row("fail", "command", "`locket` is not on PATH", "locket install")
 
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-        try:
-            rc = memscan.main(["memscan.py", "selftest"])
-        except Exception as e:              # an assertion names the broken check
-            rc, _ = 1, buf.write(f"{type(e).__name__}: {e}")
-    last = (buf.getvalue().strip().splitlines() or ["no output"])[-1]
-    row("ok", "selftest", last) if rc == 0 else row("fail", "selftest", last[:160], "locket selftest")
+    broken = _smoke()
+    row("ok", "selftest", "the write hook fires and an audit finds a pair") if broken is None \
+        else row("fail", "selftest", broken[:160], "locket selftest")
 
     stores = memscan.all_corpora()
     full = []
@@ -1473,14 +1440,13 @@ def cmd_doctor():
                     f"run it by hand: {_trigger_command(events.get('PreToolUse'))}")
 
     import time
-    import usage
     if memscan.CLAUDE.is_dir():
         try:
             events = (json.loads(settings.read_text()).get("hooks") or {}) if settings.is_file() else {}
             registered = _event_command(events.get(CLAUDE_USAGE[0]), CLAUDE_USAGE[1])
         except (OSError, json.JSONDecodeError, ValueError, AttributeError):
             registered = None
-        age = (time.time() - usage.LEDGER.stat().st_mtime) / 86400 if usage.LEDGER.is_file() else None
+        age = (time.time() - paths.PATHS.usage_ledger.stat().st_mtime) / 86400 if paths.PATHS.usage_ledger.is_file() else None
         seen = "never recorded" if age is None else f"last recorded {age:.1f} days ago"
         stale = registered and (p := _script_in(registered)) and not p.is_file()
         if stale:
@@ -1531,8 +1497,8 @@ def cmd_doctor():
             row("fail", "desktop server", f"names a missing file: {', '.join(gone)}", "locket install --desktop") \
                 if gone else row("ok", "desktop server", "registered; restart Claude Desktop after a change")
 
-    if not memscan.SCHEMA_FILE.is_file():
-        row("warn", "schema", f"{memscan.SCHEMA_FILE} not written; editors get no manifest hints", "locket schema")
+    if not paths.PATHS.schema_file.is_file():
+        row("warn", "schema", f"{paths.PATHS.schema_file} not written; editors get no manifest hints", "locket schema")
 
     old = [n for n in LINKS[1:] if (BIN / n).is_symlink() and _ours(BIN / n)]
     if old:
@@ -1563,222 +1529,6 @@ def _wants_help(verb, rest):
     if {"-h", "--help"} & set(rest):
         return True
     return "help" in (rest[1:] if verb == "find" else rest) and not Path("help").exists()
-
-
-def _selftest_all():
-    """Every selftest, with hook health pointed at a throwaway directory for the whole run,
-    so a hook a test spawns never writes the live record; restored on the way out."""
-    import tempfile
-    before = os.environ.get("LOCKET_HEALTH_DIR")
-    with tempfile.TemporaryDirectory() as t, memscan.fixture_trust():
-        os.environ["LOCKET_HEALTH_DIR"] = str(Path(t) / "hook-health")
-        try:
-            return _selftest_body()
-        finally:
-            if before is None:
-                os.environ.pop("LOCKET_HEALTH_DIR", None)
-            else:
-                os.environ["LOCKET_HEALTH_DIR"] = before
-
-
-def _selftest_body():
-    rc = memscan.main(["memscan.py", "selftest"])
-    if not rc:                          # doctor's probe: fires on a live hook, silent on a dead one
-        live = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'memscan.py'))} hook"
-        assert _probe_hook(live) is True, "doctor's probe does not fire through this memscan.py"
-        import tempfile
-        with tempfile.TemporaryDirectory() as t:
-            cfg = Path(t) / "settings.json"
-            py = shlex.quote(sys.executable)
-            cfg.write_text(json.dumps({"hooks": {
-                "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command",
-                    "command": f"{py} {shlex.quote(str(HERE / 'locket.py'))} bashguard"}]}],
-                "SessionEnd": [{"hooks": [{"type": "command", "command": "/nonexistent/bin/locket usage hook"}]}],
-                "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{py} /nonexistent/memscan.py trigger"}]}],
-            }}))
-            dead = {ev for ev, _c, _w in _dead_hooks(cfg)}
-            assert dead == {"SessionEnd", "UserPromptSubmit"}, \
-                f"doctor misread which entries are dead: {_dead_hooks(cfg)}"
-        assert _probe_hook("true") is False, "doctor's probe reads a silent command as firing"
-        # doctor's latency check: each entry's own timeout, the default where it names none,
-        # a timeout reported as a fail, an empty store skipped, the grepassist log kept out
-        with tempfile.TemporaryDirectory() as t:
-            cfg = Path(t) / "settings.json"
-            cfg.write_text(json.dumps({"hooks": {"PreToolUse": [
-                {"matcher": "Write|Edit", "hooks": [{"type": "command", "timeout": 7.5,
-                                                     "command": "/opt/x/bin/locket hook"}]},
-                {"matcher": "Grep|Bash", "hooks": [{"type": "command", "command": "/opt/x/bin/locket grepassist"}]},
-                {"matcher": "Bash", "hooks": [{"type": "command", "timeout": True,
-                                               "command": "/opt/x/bin/locket bashguard"}]}]}}))
-            assert _hook_timeout(cfg, "hook") == 7.5, _hook_entries(cfg)
-            assert _hook_timeout(cfg, "grepassist") == CLAUDE_HOOK_DEFAULT_TIMEOUT
-            assert _hook_timeout(cfg, "bashguard") == CLAUDE_HOOK_DEFAULT_TIMEOUT, "a bool is not a timeout"
-            for bad in (0, -5, float("inf"), 10 ** 400, "10"):
-                assert _usable_timeout(bad) == CLAUDE_HOOK_DEFAULT_TIMEOUT, f"{bad!r} read as a timeout"
-            assert _usable_timeout(1e9) == 600.0, "a huge timeout leaves doctor unbounded"
-            assert _registered_hooks(cfg)["hook"] == "/opt/x/bin/locket hook"
-            cfg.write_text("{not json")
-            assert _registered_hooks(cfg) is None and _hook_timeout(cfg, "hook") == CLAUDE_HOOK_DEFAULT_TIMEOUT
-            full, empty = Path(t) / "full", Path(t) / "empty"
-            full.mkdir(); empty.mkdir()
-            (full / "a.md").write_text("A fact the latency probe never reads.\n")
-            # the csv probe: sizes list each declared CSV once with its text column (None for a
-            # schema-only ledger, which doctor never times); the probe is a schema-clean Edit whose
-            # old_string is the whole last record; crashes, blocks and unfaithful files are named
-            rh = "Ruling,Category,Area,Date\n"
-            ref = full / "REF.csv"
-            ref.write_text(rh + '"A row the probe copies.",product,pricing,2026-09-26\n'
-                           + '"A ruling quoted\nover two lines.",product,pricing,2026-09-27\n')
-            (full / memscan.MANIFEST).write_text(json.dumps(
-                {"sources": [{"path": "REF.csv", "text": "Ruling", "label": "Area"}]}))
-            (full / "RULINGS.csv").write_text(rh)
-            sizes = _declared_sizes({"empty": empty, "full": full, "again": full}, ["empty", "full", "again"])
-            assert sorted((x[1].name, x[2]) for x in sizes) == [("REF.csv", "Ruling"), ("RULINGS.csv", None)], sizes
-            target = [x for x in sizes if x[2]][0]
-            seen = Path(t) / "payload.json"
-            secs, problem, why = _csv_hook_latency(f"cat > {shlex.quote(str(seen))}", target, 5)
-            assert secs < 5 and problem is None and why is None, (secs, problem, why)
-            ti = json.loads(seen.read_text())["tool_input"]
-            assert ti["old_string"] == '"A ruling quoted\nover two lines.",product,pricing,2026-09-27', \
-                f"old_string is not the whole multiline last record: {ti['old_string']!r}"
-            assert "latency probe" in ti["new_string"] and ",pricing,2026-09-27" in ti["new_string"], ti
-            assert _csv_hook_latency("sleep 3", target, 1)[0] == 1.0, "a csv probe past the timeout is not at the limit"
-            _s, problem, _w = _csv_hook_latency("exit 1", target, 5)
-            assert problem and "crashed" in problem, f"a hook that crashed fast read as a fast hook: {problem}"
-            _s, problem, _w = _csv_hook_latency("exit 2", target, 5)
-            assert problem and "blocked" in problem, f"a hook that blocked the probe read as a fast hook: {problem}"
-            dup = '"Same row.",product,pricing,2026-09-26\n'
-            ref.write_text(rh + dup + dup)
-            assert _csv_hook_latency("true", target, 5)[2] == "its last row also appears earlier in the file"
-            ref.write_text(rh)
-            assert _csv_hook_latency("true", target, 5)[2] == "it holds no row to model the probe on"
-            ref.write_text(rh + '"Short row.",product\n')
-            assert "field count" in _csv_hook_latency("true", target, 5)[2], "a ragged last row was probed"
-            for f in (ref, full / "RULINGS.csv", full / memscan.MANIFEST):
-                f.unlink()
-            memscan.settings.cache_clear()
-            assert _hook_latency("true", {"empty": empty}, 5) == (None, None), "an empty store is timed"
-            fast, _o = _hook_latency("true", {"empty": empty, "full": full}, 5)
-            assert fast and fast[0] == "full" and fast[1] < 5, fast
-            slow, _o = _hook_latency("sleep 3", {"full": full}, 1)
-            assert slow == ("full", 1.0), f"a hook past its timeout is not reported at the limit: {slow}"
-            once = Path(t) / "warmed"
-            cold, _o = _hook_latency(f"[ -e {shlex.quote(str(once))} ] || {{ touch {shlex.quote(str(once))}; sleep 2.4; }}",
-                                     {"full": full}, 4)
-            assert cold[1] < 2, f"a one-time cold start was reported as the store's latency: {cold}"
-            steady, _o = _hook_latency("sleep 2.4", {"full": full}, 4)
-            assert 2.3 < steady[1] < 4, f"a store slow on every run was hidden by the retry: {steady}"
-            once.unlink()
-            worse, _o = _hook_latency(f"[ -e {shlex.quote(str(once))} ] && sleep 9 || {{ touch {shlex.quote(str(once))}; sleep 2.4; }}",
-                                      {"full": full}, 4)
-            assert worse[1] == 4.0, f"a retry that timed out was hidden by the faster first run: {worse}"
-            quiet, _o = _hook_latency(f'[ "$LOCKET_GREPASSIST_LOG" = {shlex.quote(os.devnull)} ] || sleep 3',
-                                  {"full": full}, 1, "grepassist")
-            assert quiet[1] < 1, "the grepassist probe writes to the real log"
-            swallow = (f"{py} -c " + shlex.quote(f"import sys; sys.path.insert(0, {str(HERE)!r}); import memscan; "
-                                                 "memscan.health_error('hook', 'lexical', ValueError())"))
-            _w, opened = _hook_latency(swallow, {"full": full}, 5)
-            assert opened and opened[0] == "full" and "ValueError in lexical" in opened[1], \
-                f"a hook that fails open quickly passed doctor's latency check: {opened}"
-            crash = f"{py} -c " + shlex.quote("raise SystemExit(1)")
-            _w, opened = _hook_latency(crash, {"full": full}, 5)
-            assert opened and "crashed" in opened[1], f"a crashing hook passed: {opened}"
-            hang = (f"{py} -c " + shlex.quote(f"import sys, time; sys.path.insert(0, {str(HERE)!r}); import memscan\n"
-                                              "with memscan.HookRun('hook'): time.sleep(5)"))
-            worst, opened = _hook_latency(hang, {"full": full}, 1)
-            assert worst == ("full", 1.0) and opened is None, \
-                f"a probe killed at its timeout read as failing open: {worst} {opened}"
-        assert _probe_hook(live, codex=True) is True, \
-            "doctor's Codex probe does not fire through a patch into this memscan.py"
-        merged = _add_codex_hooks({})
-        assert "usage (SessionEnd)" not in merged and {"hook", "bashguard", "grepassist"} <= set(merged), merged
-        data = {}
-        _add_codex_hooks(data)
-        assert _add_codex_hooks(data) == [], "a second --codex added its hooks again"
-        assert "SessionEnd" not in data["hooks"], "Codex got the usage recorder, which cannot read its sessions"
-        hk = lambda key, cmd, st: {"key": key, "command": cmd, "trustStatus": st}
-        reply = {"id": 2, "result": {"data": [{"cwd": "/x", "warnings": [], "errors": [], "hooks": [
-            hk("/c/hooks.json:pre_tool_use:0:0", "/opt/homebrew/bin/locket hook", "trusted"),
-            hk("/c/hooks.json:pre_tool_use:1:0", "/opt/homebrew/bin/locket bashguard", "modified"),
-            hk("/c/hooks.json:pre_tool_use:2:0", "/usr/bin/other-tool", "untrusted")]}]}}
-        assert _codex_trust_from(reply) == {"/c/hooks.json:pre_tool_use:0:0": "trusted",
-                                            "/c/hooks.json:pre_tool_use:1:0": "modified"}, \
-            "doctor misread hooks/list, or counted a hook that is not Locket's"
-        assert _codex_trust_from({"id": 2, "error": {"code": -32601}}) is None, "an error reply reads as trust"
-        with tempfile.TemporaryDirectory() as t:
-            home = Path(t); k0, k1 = (f"{home}/hooks.json:pre_tool_use:{i}:0" for i in (0, 1))
-            tbl = lambda k: f'[hooks.state."{k}"]\ntrusted_hash = "sha256:00"\n\n'
-            (home / "config.toml").write_text('model = "x"\n\n[hooks.state]\n\n' + tbl(k0))
-            (home / "ollama-launch.config.toml").write_text(tbl(k0) + tbl(k1) + tbl("/elsewhere/hooks.json:x:0:0"))
-            assert _profile_trust_gap(home, [k1]) == {home / "ollama-launch.config.toml": [k1]}, \
-                "the profile trap's gap is misread: only the keys Codex reported lapsed count"
-            assert _profile_trust_gap(home, [k0 + "9"]) == {}, "a lapsed key no profile holds reads as a gap"
-            # _codex_trust against stub servers: one that answers, one that quits on EOF, one that hangs
-            real_path, stub = os.environ["PATH"], home / "codex"
-            os.environ["PATH"] = f"{home}{os.pathsep}{real_path}"
-            answer = {"result": {"data": [{"hooks": [{"key": k0, "command": "locket hook", "trustStatus": "trusted"}]}]}}
-            try:
-                for body, want in (
-                    ("import json,sys\nfor l in sys.stdin:\n m=json.loads(l)\n if m.get('id')==1: print(json.dumps({'id':1,'result':{}}),flush=True)\n"
-                     f" if m.get('id')==2: print(json.dumps({{'id':2,'method':'x'}}),flush=True); print(json.dumps(dict(id=2,**{answer!r})),flush=True)\n",
-                     {k0: "trusted"}),
-                    ("import sys\nsys.stdin.readline()\n", None),
-                    ("import time\ntime.sleep(30)\n", None)):
-                    stub.write_text(f"#!{sys.executable}\n{body}"); stub.chmod(0o755)
-                    got = _codex_trust(timeout=2)
-                    assert got == want, f"_codex_trust read {got!r} from a stub that should give {want!r}"
-            finally:
-                os.environ["PATH"] = real_path
-        live_trigger = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'locket.py'))} trigger"
-        assert _probe_trigger(live_trigger) is True, "doctor's trigger probe does not fire through this locket.py"
-        assert _probe_trigger("true") is False, "doctor's trigger probe reads a silent command as firing"
-        assert _probe_trigger(live_trigger, hermes=True) is True, \
-            "doctor's trigger probe does not fire through this locket.py on Hermes"
-        assert _probe_trigger("echo '[doctor-probe] probe'", hermes=True) is not True, \
-            "doctor's Hermes trigger probe reads a call that was not refused as firing"
-        assert _probe_trigger("exit 2", hermes=True) is False, \
-            "doctor's Hermes trigger probe reads a bare refusal as firing"
-        yaml = ('model: x\nhooks:\n  pre_tool_call:\n    - command: "/opt/homebrew/bin/locket hook"\n'
-                '      matcher:\n        nested: x\n    - command: /opt/homebrew/bin/locket trigger\n'
-                '  pre_llm_call:\n    - command: "/opt/homebrew/bin/locket trigger"\n'
-                'other:\n  pre_tool_call:\n    - command: "locket bashguard"\n')
-        assert _hermes_hooks(yaml) == {"pre_tool_call": ["/opt/homebrew/bin/locket hook",
-                                                         "/opt/homebrew/bin/locket trigger"],
-                                       "pre_llm_call": ["/opt/homebrew/bin/locket trigger"]}, _hermes_hooks(yaml)
-        assert isinstance(_probe_hook(f"{shlex.quote(sys.executable)} /nonexistent/memscan.py hook"), str), \
-            "doctor's probe reads a missing script as firing"
-        import contextlib
-        import io
-        for form in (["audit", "council", "-h"], ["audit", "help"], ["help", "audit"], ["help", "pointers"],
-                     ["dupes", "x", "--help"], ["find", "a statement", "help"]):
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-                code = main(["locket", *form])
-            assert code == 0 and out.getvalue().startswith(f"usage: locket {form[1] if form[0] == 'help' else form[0]}"), \
-                f"`locket {' '.join(form)}` did not print that command's help"
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = main(["locket", "help", "manifest"])
-        assert code == 0 and out.getvalue().startswith("MANIFEST\n") and "\nMODES" not in out.getvalue() \
-            and "belongs_to" in out.getvalue(), "`locket help manifest` is not the MANIFEST section alone"
-        import tempfile
-        here = os.getcwd()
-        with tempfile.TemporaryDirectory() as t:
-            os.chdir(t)
-            try:
-                assert _wants_help("init", ["help"]), "a bare help with nothing named help is not help"
-                os.mkdir("help")
-                assert not _wants_help("init", ["help"]), "a directory named help was read as a help request"
-                assert not _wants_help("hook", ["-h"]) and not _wants_help("find", ["help"]), \
-                    "a hook verb or find's statement was read as a help request"
-            finally:
-                os.chdir(here)
-        _selftest_uninstall()
-        import trigger
-        import usage
-        import configure
-        rc = trigger.selftest() or usage.selftest() or configure.selftest()
-    return rc or _memfind().main(["memfind.py", "--selftest"])
 
 
 def main(argv):
@@ -1825,7 +1575,7 @@ def _main(argv):
             print(doc.read_text()); return 0
         _parser()[0].print_help(); return 0
     if verb.startswith("-"):
-        verb = verb.lstrip("-")               # memfind's own spelling: --index, --siblings, --selftest
+        verb = verb.lstrip("-")               # the dashed spellings: --index, --siblings, --selftest
     if verb == "configure":                 # its own parser: every option carries its own -h text
         import configure
         return configure.main(rest)
@@ -1839,7 +1589,9 @@ def _main(argv):
     if verb in FIND:
         return _memfind().main(["memfind.py", FIND[verb], *rest])
     if verb == "selftest":
-        return _selftest_all()
+        broken = _smoke()
+        print(f"selftest: {broken}" if broken else "selftest ok", file=sys.stderr if broken else sys.stdout)
+        return 1 if broken else 0
 
     if verb == "install":
         return cmd_install(rest)
@@ -1873,7 +1625,7 @@ def _main(argv):
         stale = [c for c in _caches() if c.is_dir() and not c.is_symlink()]
         if stale:
             print(f"index: {len(stale)} caches from before 0.12 are no longer read; the index now lives in "
-                  f"{memscan.REGISTRY.parent / 'cache'}")
+                  f"{paths.PATHS.cache}")
             if memscan.person_confirms(f"Delete these {len(stale)} old caches?", [str(c) for c in stale],
                                        "delete them"):
                 for c in stale:

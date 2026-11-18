@@ -9,7 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.test_trust import CMD, SRC, grant
+from tests.harness import CMD, SRC
+from tests.test_trust import grant
 
 
 class Output(unittest.TestCase):

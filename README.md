@@ -31,4 +31,4 @@ Python 3.9 or later, standard library only. Ranking by meaning uses [ollama](htt
 
 ## Releasing
 
-`make version` (or `version-minor`, `version-major`) computes the next version from `__version__` and hands it to `scripts/release.sh X.Y.Z`, which stamps it, runs the selftests, tags and pushes, then moves the formula in [the tap](https://github.com/JACK-COM/homebrew-panoply) to the new tarball and names any guide page the release has moved past. `make test` runs the selftests alone.
+`make version` (or `version-minor`, `version-major`) computes the next version from `__version__` and hands it to `scripts/release.sh X.Y.Z`, which refuses a module past 800 lines, runs the tests, tags and pushes, then moves the formula in [the tap](https://github.com/JACK-COM/homebrew-panoply) to the new tarball and names any guide page the release has moved past. `make test` runs `tests/` (stdlib `unittest`) and `locket selftest`, the install smoke check a package can run.

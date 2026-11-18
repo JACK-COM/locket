@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.test_trust import CMD, SRC
+from tests.harness import CMD, SRC
 
 LIMIT = 3.0     # seconds, for slow shared runners; every shape took 3 s or more before the fix
 

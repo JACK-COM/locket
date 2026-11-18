@@ -1,22 +1,15 @@
 """The trust boundary, end to end: every case runs the real `locket` in a subprocess
 against a scratch HOME, so the live stores, registry and trigger rows are never read.
-
-LOCKET_CMD names the command under test (default: this checkout's locket.py), and
-LOCKET_SRC the source the in-process probes import. Point both at an older release to
-see each case fail there:  LOCKET_CMD=/opt/homebrew/bin/locket LOCKET_SRC=<its src/locket>
-"""
+`tests/harness.py` names the command and source under test."""
 import json
 import os
-import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-SRC = Path(os.environ.get("LOCKET_SRC", REPO / "src/locket"))     # the in-process probes' source
-CMD = shlex.split(os.environ.get("LOCKET_CMD", f"{sys.executable} {REPO / 'src/locket/locket.py'}"))
+from tests.harness import CMD, SRC
 BAD_RULINGS = "Ruling,Category,Area,Date\nshort,nope,x,not-a-date\n"
 
 

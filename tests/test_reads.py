@@ -10,7 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.test_trust import SRC, grant
+from tests.harness import SRC
+from tests.test_trust import grant
 
 CLAIM = "The harbour gauge at the north pier is read at dawn and at dusk by the night watchman.\n"
 

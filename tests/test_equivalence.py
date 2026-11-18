@@ -2,13 +2,11 @@
 against the 0.11.12 form, kept here as the reference, over random inputs. A speed fix
 that changed an answer would be a correctness bug the bounds tests cannot see."""
 import random
-import sys
 import unittest
 from pathlib import Path
 
-from tests.test_trust import SRC
+import tests.harness  # noqa: F401  (puts the source under test on sys.path)
 
-sys.path.insert(0, str(SRC))
 import memscan  # noqa: E402
 
 CASES = 20000
