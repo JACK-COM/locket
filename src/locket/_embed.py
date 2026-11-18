@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/embed.py (e3886a8) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/embed.py (77b4bdf) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """embed: the embedder ladder the Panoply's pieces share.
 
 Ranks text by meaning on whatever this machine can serve, in order: ollama as it
@@ -461,6 +461,8 @@ def embed(texts, quiet=False, backend=None):
 
 def normalise(vectors):
     """`vectors` as float32 rows scaled to unit length; a zero row stays zero."""
+    if len(vectors) == 0:
+        return np.zeros((0, 0), dtype=np.float32)
     m = np.array(vectors, dtype=np.float32, ndmin=2)
     n = np.linalg.norm(m, axis=1, keepdims=True)
     n[n == 0] = 1.0
@@ -473,13 +475,19 @@ def top_k(scores, k):
     k = min(int(k), s.shape[0])
     if k <= 0:
         return np.empty(0, dtype=np.intp)
-    part = np.argpartition(-s, k - 1)[:k] if k < s.shape[0] else np.arange(s.shape[0])
-    return part[np.lexsort((part, -s[part]))]
+    # argpartition picks arbitrary members of a tie at the k-th score, so every
+    # position holding at least that score is a candidate, then the earliest win
+    kth = s[np.argpartition(-s, k - 1)[k - 1]]
+    cand = np.flatnonzero(s >= kth)
+    return cand[np.lexsort((cand, -s[cand]))][:k]
 
 
 def cosines(query, rows):
     """The cosine of `query` against each of `rows`, which are stored unit length."""
-    return np.asarray(rows, dtype=np.float32) @ normalise(query)[0]
+    rows = np.asarray(rows, dtype=np.float32)
+    if rows.shape[0] == 0:
+        return np.zeros(0, dtype=np.float32)
+    return rows @ normalise(query)[0]
 
 
 def top_pairs(rows, k, block=512):
@@ -527,6 +535,11 @@ def _selftest_vectors():
     assert max(abs(g - w) for g, w in zip(got.tolist(), want)) < 1e-5, "cosines drifted"
     assert top_k([0.2, 0.9, 0.9, 0.1], 3).tolist() == [1, 2, 0], "ties go to the earlier position"
     assert top_k([1.0], 5).tolist() == [0] and top_k([], 2).tolist() == []
+    assert top_k([0.5] * 9, 3).tolist() == [0, 1, 2], "a tie at the k-th score goes to the earliest"
+    same = normalise([[1.0, 2.0, 3.0]] * 12)
+    assert [(i, j) for _, i, j in top_pairs(same, 5, block=4)] == [(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)], \
+        "identical rows must pair in index order"
+    assert normalise([]).shape[0] == 0 and cosines([1.0, 0.0], normalise([])).shape == (0,)
     pairs = sorted(((float(m[i] @ m[j]), i, j) for i in range(24) for j in range(i + 1, 24)),
                    key=lambda t: (-t[0], t[1], t[2]))
     for blk in (1, 5, 512):

@@ -274,9 +274,9 @@ def _own_csv_sources(root):
 CSV_ERRORS = (OSError, _csv.Error, UnicodeDecodeError)
 
 
-def _rows_of(pth, textcol, labelcol):
-    """[(label, text)] for one registered CSV's rows; raises one of CSV_ERRORS."""
-    out = []
+def _rows_of(pth, textcol, labelcol, out):
+    """Append (label, text) for one registered CSV's rows to `out`; raises one of
+    CSV_ERRORS. Into the caller's list, so the rows read before a bad one are kept."""
     with fsio.open_safe(pth, newline="", max_bytes=None) as fh:   # declared CSVs are never capped
         for r in _csv.DictReader(fh):
             t = (r.get(textcol) or "").strip()
@@ -284,7 +284,6 @@ def _rows_of(pth, textcol, labelcol):
                 continue
             tag = (r.get(labelcol) or "").strip() if labelcol else ""
             out.append((f"{pth.name}#{tag}", t))
-    return out
 
 
 def csv_rows(root):
@@ -293,7 +292,7 @@ def csv_rows(root):
     out = []
     for source in csv_sources(root):
         try:
-            out.extend(_rows_of(*source))
+            _rows_of(*source, out)
         except CSV_ERRORS:
             continue
     return out
@@ -352,6 +351,19 @@ def ready_cache_dir(root):
 
 
 CLAIM_CACHE = "claims.json"
+
+
+def _splitter_version():
+    """CLAIMS_VERSION and a digest of claims.py, so a change to the stop list, the token
+    pattern or the strip misses every entry even where nobody bumped the number."""
+    try:
+        digest = hashlib.sha256(Path(claims.__file__).read_bytes()).hexdigest()[:16]
+    except OSError:
+        digest = ""
+    return f"{claims.CLAIMS_VERSION}:{digest}"
+
+
+SPLITTER = _splitter_version()
 # A file modified this recently is never cached: a filesystem keeps mtime at a coarse
 # tick (milliseconds on Linux), so a same-size rewrite inside one tick would leave the
 # old claims standing under an unchanged fingerprint. Git calls this "racily clean".
@@ -364,8 +376,14 @@ def _file_claims(p):
 
 def _csv_claims(pth, textcol, labelcol):
     """[(label, claims)] per row of one registered CSV, rows with no claim kept, so
-    every label `corpus()` would carry is still a file in the index."""
-    return [(label, list(claims.claims(claims.strip(t)))) for label, t in _rows_of(pth, textcol, labelcol)]
+    every label `corpus()` would carry is still a file in the index. A file that
+    stops parsing keeps the rows before the fault, as `csv_rows` does."""
+    rows = []
+    try:
+        _rows_of(pth, textcol, labelcol, rows)
+    except CSV_ERRORS:
+        pass
+    return [(label, list(claims.claims(claims.strip(t)))) for label, t in rows]
 
 
 class ClaimCache:
@@ -384,7 +402,7 @@ class ClaimCache:
         try:
             with fsio.open_safe(self.path, max_bytes=None) as f:
                 data = json.load(f)
-            if data.get("version") == claims.CLAIMS_VERSION and isinstance(data.get("files"), dict):
+            if data.get("version") == SPLITTER and isinstance(data.get("files"), dict):
                 return data["files"]
         except (OSError, ValueError, AttributeError):
             pass
@@ -396,12 +414,15 @@ class ClaimCache:
         st = os.stat(path)                      # before the read: a later write moves it
         fp = [st.st_size, st.st_mtime_ns, st.st_ino]
         hit = self.entries.get(key)
-        if hit and hit[0] == fp:
-            return _decode(hit[1])
+        if isinstance(hit, list) and len(hit) == 2 and hit[0] == fp:
+            try:
+                return _decode(hit[1], rows="\0" in key)       # a CSV's key carries its columns
+            except ValueError:
+                pass                            # a damaged entry is a miss, remade below
         value = make(*args)
         if time.time_ns() - st.st_mtime_ns > RACY_NS:
             self.entries[key], self.dirty = [fp, _encode(value)], True
-        elif hit:
+        elif key in self.entries:
             del self.entries[key]
             self.dirty = True
         return value
@@ -413,7 +434,7 @@ class ClaimCache:
         live = {k: v for k, v in self.entries.items() if os.path.exists(k.split("\0", 1)[0])}
         try:
             ready_cache_dir(self.root)
-            fsio._replace_atomic(self.path, json.dumps({"version": claims.CLAIMS_VERSION, "files": live}),
+            fsio._replace_atomic(self.path, json.dumps({"version": SPLITTER, "files": live}),
                                  ".claims.json.")
             self.entries, self.dirty = live, False
         except (OSError, RuntimeError):
@@ -428,10 +449,22 @@ def _encode(value):
     return [[s, " ".join(sorted(ts))] for s, ts in value]
 
 
-def _decode(value):
-    if value and isinstance(value[0][1], list):
-        return [(label, _decode(cl)) for label, cl in value]
-    return [(s, set(ts.split())) for s, ts in value]
+def _decode(value, rows=False):
+    """`_encode` reversed; raises ValueError on any other shape, so a cache that parses
+    as JSON but is not one this code wrote reads as a miss, never as a crash."""
+    if not isinstance(value, list):
+        raise ValueError("claim cache entry is not a list")
+    out = []
+    for pair in value:
+        if not (isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str)):
+            raise ValueError("claim cache entry is malformed")
+        if rows and isinstance(pair[1], list):
+            out.append((pair[0], _decode(pair[1])))
+        elif not rows and isinstance(pair[1], str):
+            out.append((pair[0], set(pair[1].split())))
+        else:
+            raise ValueError("claim cache entry is malformed")
+    return out
 
 
 _CACHES = {}
@@ -462,7 +495,7 @@ def claim_index(root, csv=True):
             key = "\0".join([str(source[0]), source[1], source[2] or ""])
             try:
                 rows = cache.claims_of(key, source[0], _csv_claims, *source)
-            except CSV_ERRORS:
+            except OSError:
                 continue
             for label, cl in rows:
                 grouped.setdefault(label, []).extend(cl)

@@ -1535,7 +1535,14 @@ def _wants_help(verb, rest):
 def main(argv):
     if not isinstance(sys.stdout, memscan.SafeOut):
         sys.stdout = memscan.SafeOut(sys.stdout)    # nothing a store holds reaches a terminal raw
-    return _main(argv)
+    try:
+        return _main(argv)
+    except ModuleNotFoundError as e:
+        if e.name != "numpy":
+            raise
+        print("locket: numpy is missing, and ranking, configure, doctor and uninstall need it. "
+              "Reinstall (brew reinstall locket) or run: python3 -m pip install numpy", file=sys.stderr)
+        return 1
 
 
 def _main(argv):

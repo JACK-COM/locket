@@ -100,6 +100,31 @@ class ClaimCache(unittest.TestCase):
             self.assertIn("facts.md", self.index_of())
             self.assertIn("facts.md", self.reads)
 
+    def test_a_damaged_entry_under_a_current_fingerprint_is_a_miss(self):
+        self.index_of()
+        path = corpus.cache_dir(self.root) / corpus.CLAIM_CACHE
+        good = json.loads(path.read_text())
+        key = next(k for k in good["files"] if k.endswith("facts.md"))
+        fp = good["files"][key][0]
+        for entry in (5, [fp, "abc"], [fp, [["s", "a b"], ["q"]]], [fp, [["s", 5]]], [fp, [["s", [["t", "u v"]]]]]):
+            data = json.loads(json.dumps(good))
+            data["files"][key] = entry
+            path.write_text(json.dumps(data))
+            self.fresh()
+            self.assertEqual(len(self.index_of()["facts.md"]), 1, entry)
+            self.assertIn("facts.md", self.reads, entry)
+
+    def test_a_csv_that_stops_parsing_keeps_the_rows_before_the_fault(self):
+        rows = self.root / "R.csv"
+        rows.write_text("Ruling,Area\nChock both mains before the tug is disconnected from the nosewheel.,ops\n"
+                        '"' + "x" * 200_000 + '",ops\n')
+        (self.root / manifest.MANIFEST).write_text(json.dumps({
+            "index_files": [], "ledger_surfaces": [],
+            "sources": [{"path": "R.csv", "text": "Ruling", "label": "Area"}]}))
+        corpus.corpora.settings.cache_clear()           # the manifest changed on disk
+        self.assertEqual(len(corpus.csv_rows(self.root)), 1)
+        self.assertEqual(len(self.index_of().get("R.csv#ops", [])), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

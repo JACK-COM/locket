@@ -797,8 +797,8 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
             import memfind
             memfind.build_index(top, quiet=True)
             print(f"index: built for {top}")
-        except ImportError:
-            print(f"index: memfind.py not found beside memscan.py; run  locket index {top}")
+        except ImportError as e:              # memfind.py absent, or numpy, which it needs
+            print(f"index: not built ({e}); run  locket index {top}")
         except RuntimeError as e:
             print(f"index: not built ({e}); run  locket index {top}  once an embedder answers")
         except OSError as e:
@@ -861,8 +861,8 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
         import memfind
         memfind.build_index(d, quiet=True)
         print(f"index: built for {d}")
-    except ImportError:
-        print(f"index: memfind.py not found beside memscan.py; run  locket index {d}")
+    except ImportError as e:              # memfind.py absent, or numpy, which it needs
+        print(f"index: not built ({e}); run  locket index {d}")
     except RuntimeError as e:
         print(f"index: not built ({e}); run  locket index {d}  once an embedder answers")
     except OSError as e:

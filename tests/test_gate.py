@@ -73,6 +73,15 @@ class Decisions(unittest.TestCase):
                                 payload=UNASKED)
         self.assertEqual((d.message, d.blocking), (None, False))
 
+    def test_an_edit_in_a_subdirectory_never_stands_in_for_a_root_file_of_its_name(self):
+        (self.root / "MEMORY.md").write_text(NOVEL * 2)
+        sub = self.root / "sub"
+        sub.mkdir()
+        (sub / "MEMORY.md").write_text("A line about the hangar door schedule, kept short.\n")
+        d = gate.evaluate_write(str(sub / "MEMORY.md"), {"old_string": "A line about the hangar door",
+                                                         "new_string": NOVEL * 3}, payload=ASKED)
+        self.assertTrue(d.message and "MEMORY.md" in d.message, d)
+
     def test_an_append_is_checked_against_the_ledger_header(self):
         hist = self.root / "HISTORY-Proj-Sessions.csv"
         hist.write_text("date,title,summary,area,repo,commit_hash,issue,pr\n2026-09-20,Ok,Fine.,api,x,5ab427a,,\n")
