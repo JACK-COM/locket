@@ -50,6 +50,7 @@ from pathlib import Path, PurePosixPath
 
 import hosts
 import paths
+import shellscan
 
 # The layers below this module, re-exported under the names its remaining code, the
 # front and ~/.claude/hooks already use. Code inside a layer calls `<module>.<name>`,
@@ -84,6 +85,9 @@ from claims import (  # noqa: F401  (re-exported)
     CLAIMS_VERSION, ENTRY_TOKENS, FIRE_FLOOR, IDX_LINE, LINK, MIN_TOKENS, PAIR_FLOOR,
     _ENDS, _LINE_MEANINGFUL, _NO_JOIN_FROM, claims, cross_file_pairs, pointer_only,
     score_against, similar, strip, tokens, unclaimed, unwrap,
+)
+from shellscan import (  # noqa: F401  (re-exported)
+    command_text, shell_code as _shell_code, strip_heredocs as _strip_heredocs,
 )
 from corpus import (  # noqa: F401  (re-exported)
     _archive_md, _own_md, _walk_files, archived_claims, corpus, csv_rows, csv_sources,
@@ -1429,60 +1433,6 @@ def hook_decision(name, tool_input, text, prior, docs, archived=None,
 
 
 ENV_ASSIGN = re.compile(r"[A-Za-z_]\w*=\S*")
-# Shell separators that start a fresh command. A segment boundary is the only
-# place a command name can sit, which is the whole discriminator below.
-SHELL_SPLIT = re.compile(r"\|\||&&|[;|&\n()`]")
-
-
-HEREDOC = re.compile(r"""<<-?\s*['"]?(\w+)['"]?""")
-
-
-_INTERPRETER = re.compile(r"\b(?:python[0-9.]*|node|deno|bun|bash|sh|zsh|dash|fish|perl|ruby|php|osascript|lua)\b")
-
-
-def command_text(command):
-    """`command` as the guards that refuse by name read it: a heredoc body fed to a
-    program that only stores or prints it (`git commit -F -`, `cat > notes`, `gh ...
-    --notes-file -`) is data and dropped, and one fed to an interpreter is code and
-    kept. Release notes that name the trust verb are not a trust command; a Python
-    heredoc that opens a rows file is a write."""
-    out, lines, i = [], command.split("\n"), 0
-    while i < len(lines):
-        out.append(lines[i])
-        m = HEREDOC.search(lines[i])
-        if m:
-            keep = bool(_INTERPRETER.search(lines[i][:m.start()]))
-            delim = m.group(1)
-            i += 1
-            while i < len(lines) and lines[i].strip() != delim:
-                if keep:
-                    out.append(lines[i])
-                i += 1
-        i += 1
-    return "\n".join(out)
-
-
-def _strip_heredocs(command):
-    """`command` with heredoc BODIES removed, openers kept.
-
-    A heredoc body is data the shell feeds to a program, so an invocation quoted
-    inside one is a fixture or a doc example rather than a command. ⚠ Measured on
-    a real transcript: the two false positives surviving the position check were
-    both test fixture strings inside `python3 - <<'PYEOF'` bodies, and one
-    read as command-position because the opening quote attached to the path's
-    first component and left the basename bare.
-    """
-    out, lines, i = [], command.split("\n"), 0
-    while i < len(lines):
-        out.append(lines[i])
-        m = HEREDOC.search(lines[i])
-        if m:
-            delim = m.group(1)
-            i += 1
-            while i < len(lines) and lines[i].strip() != delim:
-                i += 1
-        i += 1
-    return "\n".join(out)
 
 
 def _runs_memfind(command):
@@ -1495,7 +1445,9 @@ def _runs_memfind(command):
     `printf` writing a test fixture that happened to contain the string
     discharged the gate for a whole supervised session, silently.
     """
-    for seg in SHELL_SPLIT.split(_strip_heredocs(command)):
+    view = shellscan.without_bodies(command)
+    for start, end in shellscan.segments(command):
+        seg = view[start:end]
         toks = seg.split()
         i = 0
         while i < len(toks) and ENV_ASSIGN.fullmatch(toks[i]):
@@ -2294,16 +2246,6 @@ def source_row_decision(path, tool_input, prior, append=False):
 
 _QUOTED = re.compile(r"""(?:echo|printf)\s+(?:-[a-zA-Z]+\s+)*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
 _CSV_REDIRECT = re.compile(r"(?:>>?|\btee\s+(?:-a\s+)?)\s*(?P<p>[^\s;&|<>]+\.csv)")
-# a pipeline boundary: a pipe stays inside, because `printf ... | tee -a x.csv` is one write,
-# and so does a backslash-continued newline
-_PIPELINE_END = re.compile(r"\|\||&&|;|(?<!\\)\n")
-
-
-def _pipeline_around(command, start, end):
-    """The text of the pipeline holding command[start:end]."""
-    before = [m.end() for m in _PIPELINE_END.finditer(command, 0, start)]
-    after = _PIPELINE_END.search(command, end)
-    return command[before[-1] if before else 0:after.start() if after else len(command)]
 
 
 def ledger_bash_decision(command, cwd):
@@ -2332,27 +2274,22 @@ def ledger_bash_decision(command, cwd):
     # keyed by resolved path, so two spellings of one ledger share one verdict
     bodies = {c: [] for c in targets}
 
-    def attribute(pipeline, body):
-        for c in {owner.get(m.group("p").strip("'\"")) for m in _CSV_REDIRECT.finditer(pipeline)}:
+    owners = {}                             # pipeline span: the ledgers it redirects into
+
+    def attribute(pos, body):
+        span = shellscan.pipeline_span(command, pos)
+        if span not in owners:
+            owners[span] = {owner.get(m.group("p").strip("'\""))
+                            for m in _CSV_REDIRECT.finditer(shellscan.pipeline_of(command, pos))}
+        for c in owners[span]:
             if c in bodies:
                 bodies[c].append(body)
 
-    lines, i, starts = command.split("\n"), 0, []
-    pos = 0
-    for line in lines:
-        starts.append(pos); pos += len(line) + 1
-    while i < len(lines):
-        m = HEREDOC.search(lines[i])
-        if m:
-            at, delim, body = starts[i], m.group(1), []
-            i += 1
-            while i < len(lines) and lines[i].strip() != delim:
-                body.append(lines[i]); i += 1
-            # the opener's pipeline in the full command, so a redirect on a continued line counts
-            attribute(_pipeline_around(command, at + m.start(), at + m.end()), "\n".join(body))
-        i += 1
+    for d in shellscan.heredocs(command):
+        # the opener's pipeline in the full command, so a redirect on a continued line counts
+        attribute(d.start, d.body(command))
     for m in _QUOTED.finditer(command):
-        attribute(_pipeline_around(command, m.start(), m.end()),
+        attribute(m.start(),
                   (m.group(1) if m.group(1) is not None else m.group(2))
                   .replace("\\n", "\n").replace('\\"', '"'))
     # every target is checked before any warns: an opaque write earlier in the command
@@ -2553,53 +2490,6 @@ def _expand_home(tok):
     return os.path.expanduser(tok) if tok.startswith("~") else tok
 
 
-def _shell_code(command):
-    """`command` with quoted text, heredoc bodies and comments blanked to spaces, every
-    offset kept, so a scan for shell syntax sees only what the shell runs. Quote
-    characters themselves stay, so a quoted argument still reads as one."""
-    out, i, n = list(command), 0, len(command)
-    pending = []                            # heredoc delimiters opened on the current line
-    while i < n:
-        c = command[i]
-        if c in "'\"":
-            j = i + 1
-            while j < n and command[j] != c:
-                j += 2 if c == '"' and command[j] == "\\" else 1
-            for k in range(i + 1, min(j, n)):
-                if command[k] != "\n":
-                    out[k] = " "
-            i = j + 1
-            continue
-        if c == "#" and (i == 0 or command[i - 1] in " \t\n;&|("):
-            while i < n and command[i] != "\n":
-                out[i] = " "
-                i += 1
-            continue
-        if c == "<" and command.startswith("<<", i) and not command.startswith("<<<", i):
-            m = HEREDOC.match(command, i)
-            if m:
-                pending.append((m.group(1), command.startswith("<<-", i)))
-                i = m.end()
-                continue
-        if c == "\n" and pending:
-            i += 1
-            for word, dash in pending:      # blank each body up to its delimiter line
-                while i < n:
-                    end = command.find("\n", i)
-                    end = n if end < 0 else end
-                    line = command[i:end]
-                    if (line.lstrip("\t") if dash else line) == word:
-                        i = end
-                        break
-                    for k in range(i, end):
-                        out[k] = " "
-                    i = end + 1
-            pending = []
-            continue
-        i += 1
-    return "".join(out)
-
-
 # `cd` or `pushd` in command position only; the argument runs to the next separator,
 # so `"$(mktemp -d)"` is one argument
 _CD = re.compile(r"(?:^|(?<=[;&|({]))[ \t]*(cd|pushd|popd)(?=[ \t;&|)\n]|$)(?:[ \t]+([^;&|\n)]*?))?[ \t]*(?=$|[;&|\n)])",
@@ -2632,7 +2522,7 @@ def _cd_timeline(command, cwd):
     `cd`, which starts at `starts[k - 1]`. Built once per command, because resolving
     each path by rescanning the whole command made a long one quadratic."""
     here, times, dirs = cwd, [], [cwd]
-    for m in _CD.finditer(_shell_code(command)):
+    for m in _CD.finditer(shellscan.shell_code(command)):
         if m.group(1) == "popd":
             here = None                          # the stack is not tracked
         else:
@@ -2675,7 +2565,7 @@ def _unlisted_commands(command):
     (BASH_WRITE reads those), a comment, and a `for`/`case` header. A command the
     tokenizer cannot split (an unbalanced quote) yields nothing: that line of shell
     would not run either."""
-    text = _strip_heredocs(command).replace("\\\n", " ").replace("\n", " ; ")
+    text = shellscan.strip_heredocs(command).replace("\\\n", " ").replace("\n", " ; ")
     text = text.replace("\\(", " ").replace("\\)", " ")    # `find … \( -o \)` groups, not subshells
     text = text.replace("`", " ; ")                       # a backtick substitution is its own command
     lex = shlex.shlex(text, posix=True, punctuation_chars=True)
@@ -2746,7 +2636,6 @@ def _unlisted_commands(command):
 # directory in another token, so a token scan both over-fired (two CMP sessions'
 # routine edits) and could not see the directory that decides membership.
 _PY_WORD = re.compile(r"(?<![\w.-])python[\d.]*(?![\w.-])")
-_PY_HEREDOC = re.compile(r"""<<(-?)\s*(['"]?)(\w+)\2""")
 _PY_DASH_C = re.compile(r"""(?<![\w.-])python[\d.]*(?:\s+-[A-Za-z]+)*?\s+-c\s+(?:'([^']*)'|"((?:[^"\\]|\\.)*)")""")
 _HOLE = "\0"                                     # an f-string value that does not fold
 _FOLD_STEPS = 10_000                              # fold calls per program, the whole run
@@ -2802,26 +2691,13 @@ def _python_programs(command):
     the program's: one the shell rewrites first (an unquoted heredoc or a
     double-quoted `-c` holding `$` or a backtick), or a `-c` body the shell splices
     on with `'\\''`, which the match sees only the first piece of."""
-    out, pos, lines = [], 0, command.split("\n")
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        pos += len(line) + 1
-        i += 1
-        m = _PY_HEREDOC.search(line)
-        if not (m and _PY_WORD.search(line[:m.start()])):
-            continue
-        body_start, body = pos, []
-        while i < len(lines):
-            ln = lines[i]
-            i += 1
-            pos += len(ln) + 1
-            if (ln.lstrip("\t") if m.group(1) else ln) == m.group(3):
-                break
-            body.append(ln)
-        src = "\n".join(body)
-        out.append((src, body_start, body_start + len(src),
-                    not m.group(2) and any(c in src for c in "$`")))
+    out = []
+    for d, python in shellscan.fed_to(command, _PY_WORD).items():
+        if python:
+            src = d.body(command)
+            raw = command[d.body_start:d.body_end]
+            end = d.body_start + len(raw) - raw.endswith("\n")
+            out.append((src, d.body_start, end, not d.quoted and any(c in src for c in "$`")))
     for m in _PY_DASH_C.finditer(command):
         g = 1 if m.group(1) is not None else 2
         src = m.group(g)
@@ -3920,7 +3796,7 @@ def _hook_entry(mode):
                 health_error("bashguard", "decision", e)
                 return 0
             return emit(payload, msg, blocking, mode)
-        bare = re.sub(r"""['"\\]""", "", command_text(command))
+        bare = re.sub(r"""['"\\]""", "", shellscan.command_text(command))
         if _TRUST_VERB.search(bare):
             return emit(payload, TRUST_REFUSAL, True, mode)
         cfg = shell_store_config(bare, payload.get("cwd"))

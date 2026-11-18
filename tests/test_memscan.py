@@ -1534,6 +1534,9 @@ def _selftest_inner():
     assert blocking and "date" in msg, "an opaque write first never excuses a readable bad row after it"
     msg, blocking = ms.ledger_bash_decision(f"cat <<'EOF' \\\n  >> {hist}\n{long_row}EOF\n", None)
     assert blocking and "cap 90" in msg, "a redirect on a continued opener line is the same pipeline"
+    for before in ("cat <<<x\n", "echo 'a <<b'\n", "cat <<'E-F'\nx\nE-F\n"):
+        msg, blocking = ms.ledger_bash_decision(f"{before}cat >> {hist} <<'EOF'\n{long_row}EOF\n", None)
+        assert blocking and "cap 90" in msg, f"the ledger heredoc after {before!r} is read: {msg}"
     hist2.unlink()
     # a manifest overrides the built-in for its store, and governs another CSV
     (led / ms.MANIFEST).write_text(json.dumps({"ledgers": [
