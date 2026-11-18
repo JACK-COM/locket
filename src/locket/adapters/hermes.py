@@ -10,6 +10,7 @@ from pathlib import Path
 
 import fsio
 import hosts
+import install
 import ledger
 import paths
 
@@ -170,3 +171,83 @@ def status():
     return ("2e gate on Hermes: " + ("armed (reads state.db by session_id)" if armed else
                                      "UNARMED, state.db not found, so every write passes the question silently")
             + "; a nudge refuses the call once and the same call repeated passes")
+
+
+# The (event, verb) entries Hermes's config.yaml needs. `deliver` is retired and does nothing.
+HOOKS = (("pre_tool_call", "hook"), ("pre_tool_call", "bashguard"), ("pre_tool_call", "grepassist"),
+                ("pre_tool_call", "trigger"), ("pre_llm_call", "trigger"))
+
+
+def locket_lines(path):
+    """`path:line` for every Hermes hook line that runs Locket, by script or command."""
+    try:
+        return [f"{path}:{i}" for i, l in enumerate(path.read_text().splitlines(), 1)
+                if (c := re.search(r"command:\s*(.+?)\s*$", l)) and install.is_locket_hook(c.group(1))]
+    except OSError:
+        return []
+
+
+def config_hooks(text):
+    """{event: [command]} from config.yaml's top-level `hooks:` block, read by indentation
+    in the shape Step 4 prints, so doctor needs no YAML parser."""
+    out, inside, event, depth = {}, False, None, None
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[0].isspace():
+            inside, event, depth = line.rstrip() == "hooks:", None, None
+            continue
+        if not inside:
+            continue
+        indent = len(line) - len(line.lstrip())
+        depth = indent if depth is None else depth
+        if indent == depth and (m := re.fullmatch(r"\s+([\w-]+):\s*", line)):
+            event = m.group(1)
+        elif (c := re.search(r"command:\s*(.+?)\s*$", line)) and event:
+            out.setdefault(event, []).append(c.group(1).strip("'\""))
+    return out
+
+
+# --- install face: config.yaml is edited by hand (`locket help install`, Step 4) ----------
+
+FLAG = None
+
+
+def removal():
+    """Nothing Locket edits; the YAML lines that run it, named for a person to remove."""
+    cfg = hosts.hermes() / "config.yaml"
+    lines = locket_lines(cfg) if cfg.is_file() else []
+    return install.Removal([], None, [f"Hermes hook line {hl}  (YAML; remove the entry by hand)" for hl in lines])
+
+
+def checks(m, row):
+    """Doctor's rows for Hermes: the five config.yaml entries, and its trigger rows firing."""
+    import probes
+    import trigger
+    hermes_cfg = hosts.hermes() / "config.yaml"
+    if hermes_cfg.is_file():
+        events = config_hooks(hermes_cfg.read_text(errors="replace"))
+        missing = [f"{v} on {e}" for e, v in HOOKS
+                   if not any(install.is_locket_hook(c, v) for c in events.get(e, []))]
+        retired = any(install.is_locket_hook(c, "deliver") for cmds in events.values() for c in cmds)
+        if missing:
+            row("warn", "hermes hooks", f"not in config.yaml: {', '.join(missing)}"
+                + ("; `locket deliver` is retired, remove it" if retired else ""), "`locket help install`, Step 4")
+        elif retired:
+            row("warn", "hermes hooks", "`locket deliver` is retired and does nothing", "remove its pre_llm_call entry")
+        else:
+            row("ok", "hermes hooks", "all five registered")
+        cmd = next((c for c in events.get("pre_tool_call", []) if install.is_locket_hook(c, "trigger")), None)
+        hermes_rows = trigger.rows_file(hosts.hermes())
+        problems = trigger.findings(hosts.hermes())
+        if problems:
+            row("fail", "hermes triggers", f"{len(problems)} problem(s) in {hermes_rows}: {problems[0]}",
+                "locket trigger check hermes")
+        elif hermes_rows.is_file() and cmd:
+            probe = probes.probe_trigger(cmd, hermes=True)
+            if probe is True:
+                row("ok", "hermes triggers", f"{hermes_rows} lints clean; the hook refuses a call on a known row")
+            else:
+                row("fail", "hermes triggers", "registered, but the hook " +
+                    ("stayed silent on a known row" if probe is False else f"failed: {probe}"),
+                    f"run it by hand: {cmd}")

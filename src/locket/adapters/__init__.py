@@ -1,21 +1,31 @@
-"""The hook hosts: which one sent a payload, the payload read into Claude Code's shape,
-and a decision delivered the way that host can hear it.
+"""The hosts Locket serves, each one module with two faces.
 
-One module per host, each declaring NAME, `detects(payload)`, `native(payload, tool,
-tool_input)` (its payload into Claude Code's tool names and fields), `deliver(payload,
-msg, blocking, source, db)` (returns the exit code) and `status()` (one doctor line, or
-None where the host is not installed). A new host is one module added to HOSTS.
+The hook face, for every hook host in HOSTS: NAME, `detects(payload)`, `native(payload,
+tool, tool_input)` (its payload into Claude Code's tool names and fields), `deliver(payload,
+msg, blocking, source, db)` (the exit code) and `status()` (one line, or None where the
+host is not installed).
+
+The install face, for every target in TARGETS (the hook hosts and Desktop): FLAG (the
+`locket install` flag, or None where the host's config is edited by hand), `register()`,
+`removal()` (an `install.Removal`) and `checks(m, row)` (its doctor rows). The install
+face imports probes and trigger inside its functions, so a hook never loads them.
+
+A new host is one module added to HOSTS and TARGETS.
 """
 import json
 import sys
 
 import gate
-from adapters import claude_code, codex, hermes
+from adapters import claude_code, codex, desktop, hermes
 
 # Walked in order and the first host that detects a payload owns it; Claude Code,
 # whose shape the others are read into, detects everything and so comes last.
 HOSTS = (hermes, codex, claude_code)
 BY_NAME = {h.NAME: h for h in HOSTS}
+# What `locket install`, `uninstall` and `doctor` walk: every hook host, and Desktop, which
+# runs no hooks and takes the MCP server. Each declares FLAG (its install flag, or None
+# where its config is edited by hand), `register()`, `removal()` and `checks(m, row)`.
+TARGETS = (claude_code, codex, hermes, desktop)
 
 
 def host_of(payload):

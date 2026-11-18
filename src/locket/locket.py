@@ -244,7 +244,7 @@ def _main(argv):
         if which in _parser()[1].choices and which not in ("find", "install", "trigger", "usage", "configure"):
             _parser()[1].choices[which].print_help(); return 0
         if which in ("find", "memfind"):
-            return install._memfind().main(["memfind.py", "--help"])
+            return install.load_memfind().main(["memfind.py", "--help"])
         if which in ("scan", "memscan"):
             return memscan.main(["memscan.py", "--help"])
         if which == "manifest":
@@ -278,11 +278,11 @@ def _main(argv):
         if not rest or rest[0].startswith("-"):
             print('find needs a statement:  locket find "<statement>" [corpus] [-n N]', file=sys.stderr)
             return 1
-        return install._memfind().main(["memfind.py", *rest])
+        return install.load_memfind().main(["memfind.py", *rest])
     if verb in FIND:
-        return install._memfind().main(["memfind.py", FIND[verb], *rest])
+        return install.load_memfind().main(["memfind.py", FIND[verb], *rest])
     if verb == "selftest":
-        broken = probes._smoke()
+        broken = probes.smoke()
         print(f"selftest: {broken}" if broken else "selftest ok", file=sys.stderr if broken else sys.stdout)
         return 1 if broken else 0
 
@@ -315,7 +315,7 @@ def _main(argv):
             print(moved)
         # 0.12: the index lives in ~/.locket/cache, so a cache inside a store is dead weight;
         # every one is offered for deletion at once, and named in one command otherwise
-        stale = [c for c in install._caches() if c.is_dir() and not c.is_symlink()]
+        stale = [c for c in install.caches() if c.is_dir() and not c.is_symlink()]
         if stale:
             print(f"index: {len(stale)} caches from before 0.12 are no longer read; the index now lives in "
                   f"{paths.PATHS.cache}")
@@ -327,7 +327,7 @@ def _main(argv):
             else:
                 print("index: kept them; to delete them all:  rm -r " + " ".join(shlex.quote(str(c)) for c in stale))
         unbuilt = [n for n, r in memscan.all_corpora().items()
-                   if memscan.has_content(r, csv=False) and not install._memfind().cache_paths(r)[0].is_file()]
+                   if memscan.has_content(r, csv=False) and not install.load_memfind().cache_paths(r)[0].is_file()]
         if unbuilt:
             print(f"index: {len(unbuilt)} stores have no index in the new home yet; build them once:  locket index all")
         # 0.12: trust is pinned to a store's configuration; pin the rows that predate it

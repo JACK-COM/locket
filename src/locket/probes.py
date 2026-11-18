@@ -5,7 +5,6 @@ import contextlib
 import io
 import json
 import os
-import re
 import shlex
 import shutil
 import sys
@@ -13,7 +12,6 @@ from pathlib import Path
 
 import corpus
 import health
-import hosts
 import install
 import ledger
 import manifest
@@ -30,111 +28,14 @@ _PROBE = ("The doctor probe paragraph states one durable fact about a harbour: t
           "to the port authority before the next high water.")
 
 
-# Claude Code's timeout for a command hook whose entry names none, in seconds.
-CLAUDE_HOOK_DEFAULT_TIMEOUT = 60
-
-
-def _usable_timeout(t):
-    """A hook entry's timeout in seconds when it is a finite positive number, else the
-    default; capped, so a huge value cannot leave doctor's probe unbounded."""
-    import math
-    try:
-        t = float(t) if isinstance(t, (int, float)) and not isinstance(t, bool) else None
-    except OverflowError:
-        t = None
-    if t is None or not math.isfinite(t) or t <= 0:
-        return CLAUDE_HOOK_DEFAULT_TIMEOUT
-    return min(t, 600.0)
-
-
-def _hook_entries(settings):
-    """{verb: (command, timeout seconds)} for the Locket PreToolUse hooks in a Claude Code
-    settings.json, or None when the file is not readable JSON. An entry naming no usable
-    timeout gets Claude Code's default."""
-    try:
-        data = json.loads(settings.read_text())
-    except (OSError, json.JSONDecodeError, ValueError):
-        return None
-    hooks = data.get("hooks") if isinstance(data, dict) else None
-    pre = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
-    out = {}
-    for e in pre if isinstance(pre, list) else []:
-        for h in (e.get("hooks") or []) if isinstance(e, dict) else []:
-            cmd = str(h.get("command", "")) if isinstance(h, dict) else ""
-            t = _usable_timeout(h.get("timeout") if isinstance(h, dict) else None)
-            for _, verb, _t in install.CLAUDE_HOOKS:
-                if install._is_locket_hook(cmd, verb):
-                    out.setdefault(verb, (cmd, t))
-    return out
-
-
-def _registered_hooks(settings):
-    """{verb: command} for the Locket hooks in a Claude Code settings.json."""
-    entries = _hook_entries(settings)
-    return None if entries is None else {v: c for v, (c, _t) in entries.items()}
-
-
-def _dead_hooks(config):
-    """[(event, command, why)] for every Locket entry in a Claude Code settings.json or a
-    Codex hooks.json that cannot run. Each command's program must exist, and each is run on a
-    payload that matches nothing, which must exit 0 or 2 without a traceback. `usage hook`
-    is checked for its program only, because running it would write the ledger. ⚠ Checking only the verbs
-    `install` registers let a dead SessionEnd entry report ok (Tercius letter 2026-09-23)."""
-    import subprocess, tempfile
-    try:
-        events = json.loads(config.read_text()).get("hooks") or {}
-    except (OSError, ValueError, AttributeError):
-        return []
-    out = []
-    for event, entries in (events.items() if isinstance(events, dict) else []):
-        for e in entries if isinstance(entries, list) else []:
-            for h in (e.get("hooks") or []) if isinstance(e, dict) else []:
-                cmd = str(h.get("command", "")) if isinstance(h, dict) else ""
-                if not install._is_locket_hook(cmd):
-                    continue
-                try:
-                    words = shlex.split(cmd)
-                except ValueError:
-                    out.append((event, cmd, "the command does not parse")); continue
-                script = _script_in(cmd)
-                exe = next((w for w in words if not re.fullmatch(r"\w+=.*", w)), "")   # past `VAR=1`
-                found = (script.is_file() if script else
-                         Path(os.path.expanduser(exe)).is_file() if "/" in exe else shutil.which(exe))
-                if not found:
-                    out.append((event, cmd, f"{script or exe} does not exist")); continue
-                if install._is_locket_hook(cmd, install.CLAUDE_USAGE[1]):   # `usage hook` writes the ledger
-                    continue
-                with tempfile.TemporaryDirectory() as d:
-                    payload = json.dumps({"hook_event_name": event, "cwd": d, "prompt": "",
-                                          "tool_name": "Read", "tool_input": {"file_path": f"{d}/x.txt"}})
-                    try:
-                        r = subprocess.run(cmd, shell=True, input=payload, capture_output=True,
-                                           text=True, timeout=30, cwd=d,
-                                           env=dict(os.environ, LOCKET_HEALTH_DIR=f"{d}/.health"))
-                    except subprocess.TimeoutExpired:
-                        out.append((event, cmd, "timed out after 30s")); continue
-                if r.returncode not in (0, 2) or "Traceback" in r.stderr:
-                    last = (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1]
-                    out.append((event, cmd, last[:120]))
-    return out
-
-
-def _script_in(cmd):
-    """The first path in a hook command that names a .py file, or None."""
-    for tok in cmd.split():
-        if tok.endswith(".py"):
-            return Path(os.path.expanduser(tok))
-    return None
-
-
-def _smoke():
+def smoke():
     """This install, end to end on scratch stores: the write hook fires through this
     memscan.py on a write repeating a stored paragraph, and an audit finds a repeated
     pair. None when both hold, else what broke. The behaviour suites are the
     repository's tests/, which a package does not ship."""
     import tempfile
     live = f"{shlex.quote(sys.executable)} {shlex.quote(str(install.HERE / 'memscan.py'))} hook"
-    fired = _probe_hook(live)
+    fired = probe_hook(live)
     if fired is not True:
         return f"the write hook did not fire through {install.HERE / 'memscan.py'}: {fired or 'it was silent'}"
     with tempfile.TemporaryDirectory() as t:
@@ -155,7 +56,7 @@ def _smoke():
     return None
 
 
-def _probe_hook(cmd, codex=False):
+def probe_hook(cmd, codex=False):
     """Run a registered `hook` command on a write that must fire: a new file in a
     throwaway store repeating a paragraph the store already holds. True when it
     answered, False when it was silent, a string when it failed to run. For Codex
@@ -208,12 +109,6 @@ def _run_hook(cmd, payload, timeout, **env_extra):
     return r, _time.monotonic() - t0
 
 
-def _hook_timeout(settings, verb):
-    """The timeout, in seconds, Claude Code gives the registered `verb` hook."""
-    entry = (_hook_entries(settings) or {}).get(verb)
-    return entry[1] if entry else CLAUDE_HOOK_DEFAULT_TIMEOUT
-
-
 def _probe_problem(r, record):
     """The first way a probe run failed open, or None: a crash (an exit other than 0 or
     2, or a traceback) or an error the hook's catch-all swallowed into its health record.
@@ -225,7 +120,7 @@ def _probe_problem(r, record):
     return problems[0] if problems else None
 
 
-def _hook_latency(cmd, stores, limit, verb="hook"):
+def hook_latency(cmd, stores, limit, verb="hook"):
     """(worst, opened): `worst` is (store, seconds) for the slowest REAL store, `opened` is
     (store, problem) for the first store whose probe failed open, and either may be None.
     It times a registered hook against its
@@ -238,7 +133,7 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
     exits, and a probe that crashes outright counts too. A probe killed at the limit is a
     timeout, reported by `worst`, never a failure to open.
 
-    ⚠ `_probe_hook` proves the hook fires on a throwaway store of one file, and a store that
+    ⚠ `probe_hook` proves the hook fires on a throwaway store of one file, and a store that
     small cannot show a walk that scales with the host tree: the hook once took 25-35 s on
     the council store against a 10 s timeout while the probe reported ok and every real
     write landed unchecked. Only the real stores can show this.
@@ -293,7 +188,7 @@ def _hook_latency(cmd, stores, limit, verb="hook"):
     return worst, opened
 
 
-def _declared_sizes(stores, names):
+def declared_sizes(stores, names):
     """[(store name, path, text column or None, bytes)] for every declared CSV in the
     named stores, largest first. One walk serves both doctor rows, and a CSV that a
     parent store and its member both declare is listed once."""
@@ -354,9 +249,9 @@ def _csv_probe_edit(path, textcol):
     return ti, None
 
 
-def _csv_hook_latency(cmd, target, limit):
+def csv_hook_latency(cmd, target, limit):
     """(seconds, problem, why not timed) for the write hook on one novel row appended to
-    `target`, a `_declared_sizes` entry that is a registered source. Exactly one of
+    `target`, a `declared_sizes` entry that is a registered source. Exactly one of
     `seconds` and `why` is None; `problem` names a run that failed open or was blocked,
     because a fast run that never reached the scoring is not a fast hook. Nothing is
     written: the hook is PreToolUse and decides on the payload alone.
@@ -387,91 +282,7 @@ def _csv_hook_latency(cmd, target, limit):
     return secs, problem, None
 
 
-def _codex_trust_from(reply):
-    """{key: trustStatus} for the Locket entries in a `hooks/list` reply, or None when it is not one."""
-    try:
-        return {h["key"]: h["trustStatus"] for e in reply["result"]["data"] for h in e["hooks"]
-                if install._is_locket_hook(str(h.get("command", "")))}
-    except (KeyError, TypeError, AttributeError):
-        return None
-
-
-def _codex_trust(timeout=20, version=""):
-    """Codex's own reading of Locket hook trust, from `codex app-server`'s `hooks/list`, or None
-    when Codex is absent or the call fails (the protocol is marked experimental). Codex computes
-    the hash; Locket never does (RULINGS.csv on Area=substrate). The app-server takes no
-    --profile, so this is config.toml's view, which is the one Codex honours. ⚠ The server exits
-    on EOF before answering, so the requests go in one at a time and stdin stays open."""
-    import subprocess, threading
-    exe = shutil.which("codex")
-    if not exe:
-        return None
-    try:
-        p = subprocess.Popen([exe, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
-                             env={**os.environ, "CODEX_HOME": str(hosts.codex())},
-                             start_new_session=True)    # an npm launcher's native child dies with it
-    except OSError:
-        return None
-
-    def kill():
-        try:
-            os.killpg(p.pid, 9) if hasattr(os, "killpg") else p.kill()
-        except OSError:
-            pass
-    timer = threading.Timer(timeout, kill)
-    timer.start()
-
-    def reply_to(i):
-        for line in p.stdout:
-            try:
-                m = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(m, dict) and m.get("id") == i and ("result" in m or "error" in m):
-                return m
-        return None
-    try:
-        for m in ({"id": 1, "method": "initialize", "params": {"clientInfo": {
-                       "name": "locket-doctor", "title": None, "version": version}, "capabilities": None}},
-                  {"method": "initialized"},
-                  {"id": 2, "method": "hooks/list", "params": {"cwds": [str(hosts.codex())]}}):
-            p.stdin.write(json.dumps(m) + "\n"); p.stdin.flush()
-            if m.get("id") == 1 and reply_to(1) is None:
-                return None
-        reply = reply_to(2)
-        return _codex_trust_from(reply) if reply else None
-    except (OSError, ValueError):
-        return None
-    finally:
-        timer.cancel()
-        kill()
-        for f in (p.stdin, p.stdout):
-            try:
-                f.close()
-            except OSError:
-                pass
-        p.wait()
-
-
-def _profile_trust_gap(codex_home, lapsed):
-    """{profile config: [keys]} for the entries Codex reported untrusted (`lapsed`, its own keys)
-    that a profile config (`<name>.config.toml` beside config.toml) holds trust for. codex-cli
-    0.160.0 writes trust given under `--profile` into the profile's file and honours it only from
-    config.toml, so this is trust that lapses on restart. Keys are matched, never hashes."""
-    head = re.compile(r'^\s*\[hooks\.state\."([^"]+)"\]', re.M)
-    gap = {}
-    for f in sorted(codex_home.glob("*.config.toml")):
-        try:
-            held = sorted(set(head.findall(f.read_text())) & set(lapsed))
-        except (OSError, ValueError):
-            continue
-        if held:
-            gap[f] = held
-    return gap
-
-
-def _probe_trigger(cmd, hermes=False):
+def probe_trigger(cmd, hermes=False):
     """Run a registered `trigger` command against a throwaway home whose host store holds
     one row the payload matches. True when the row's question came back, False when the
     command was silent, a string when it failed to run. On Hermes the row refuses the call
