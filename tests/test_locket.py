@@ -11,6 +11,7 @@ from tests.harness import fixture_env
 import locket as lk  # noqa: E402
 import install  # noqa: E402
 import probes  # noqa: E402
+import cli  # noqa: E402
 from adapters import codex, desktop, hermes  # noqa: E402
 from adapters import claude_code  # noqa: E402
 import memscan  # noqa: E402
@@ -253,10 +254,10 @@ def _suite():
     with tempfile.TemporaryDirectory() as t:
         os.chdir(t)
         try:
-            assert lk._wants_help("init", ["help"]), "a bare help with nothing named help is not help"
+            assert cli.wants_help("init", ["help"]), "a bare help with nothing named help is not help"
             os.mkdir("help")
-            assert not lk._wants_help("init", ["help"]), "a directory named help was read as a help request"
-            assert not lk._wants_help("hook", ["-h"]) and not lk._wants_help("find", ["help"]), \
+            assert not cli.wants_help("init", ["help"]), "a directory named help was read as a help request"
+            assert not cli.wants_help("hook", ["-h"]) and not cli.wants_help("find", ["help"]), \
                 "a hook verb or find's statement was read as a help request"
         finally:
             os.chdir(here)
@@ -271,6 +272,23 @@ class LocketFrontEnd(unittest.TestCase):
     def test_front_end(self):
         with fixture_env():
             _suite()
+
+    def test_verb_registry(self):
+        """One declaration per verb: every spelling names one verb, every verb runs, every
+        listed verb has its `-h`, and the hook entries a host config names are the hidden
+        verbs memscan dispatches without the CLI."""
+        from commands import hooks
+        import health
+        import locket_mcp
+        spellings = [n for v in cli.VERBS for n in (v.name, *v.aliases)]
+        self.assertEqual(len(spellings), len(set(spellings)), "two verbs share a name or alias")
+        self.assertEqual([v.name for v in cli.VERBS if v.run is None], [], "a verb with nothing to run")
+        listed = {v.name for v in cli.VERBS if not v.hidden}
+        self.assertEqual(set(cli.parser()[1].choices), listed)
+        self.assertEqual(set(install.HOOK_VERBS), set(hooks.ENTRIES))
+        self.assertTrue(set(health.HEALTH_VERBS) <= set(hooks.ENTRIES))
+        mcp_names = [v.mcp.name or f"locket_{v.name}" for v in cli.VERBS if v.mcp]
+        self.assertTrue(set(mcp_names) <= set(locket_mcp.TOOLS), "a verb's tool is not served")
 
 
 if __name__ == "__main__":

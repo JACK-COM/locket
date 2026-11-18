@@ -16,6 +16,7 @@ from tests.harness import SRC, fixture_env
 import memscan as ms  # noqa: E402
 import cites  # noqa: E402
 import grepassist  # noqa: E402
+import help_text  # noqa: E402
 import hosts  # noqa: E402
 import ledger  # noqa: E402
 import paths  # noqa: E402
@@ -1570,7 +1571,7 @@ def _selftest_inner():
         n = _shown(hygiene.cmd_ledgers(led))
     assert n == 1 and "2 ledger(s) checked, 1 finding(s)" in buf.getvalue(), buf.getvalue()
     (led / ms.MANIFEST).write_text("{}\n"); ms.settings.cache_clear()
-    assert "@@" not in ms.usage() and "caps title ≤90" in ms.usage(), "the help renders the built-ins from the constant"
+    assert "@@" not in help_text.usage() and "caps title ≤90" in help_text.usage(), "the help renders the built-ins from the constant"
     # an entry naming a built-in's glob MERGES onto it: only the keys it names change
     (led / ms.MANIFEST).write_text(json.dumps({"ledgers": [
         {"path": "HISTORY-*-Sessions.csv", "enum": {"area": ["docs", ""]}}]}))

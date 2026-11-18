@@ -1,5 +1,11 @@
 """The shell guard: what a Bash call would do to a memory store that the write gate never
 sees, decided by an ordered chain of rules.
+
+The write gate matches the Write and Edit tools, so a memory file rewritten by a shell
+redirect or a Python heredoc never reaches it and nothing says it did not: a full
+memory-maintenance session wrote every correction through heredocs and tripped the gate
+zero times. This guard is a deliberate carve-out from any session directive preferring
+Bash for file edits, for memory stores only.
 """
 import os
 import re

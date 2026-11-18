@@ -91,6 +91,11 @@ BUCKET_CAP = 400        # a token in more claims than this is not a signal
 MIN_SHARED = 5          # content tokens two claims must actually share
 
 
+# A holding space has its own furniture: "Promotion target if this holds across
+# instances:" is a stem several entries share, not an entry any of them duplicates.
+# The discriminator is SUBSTANCE, not repetition: stems carry 5 to 6 content
+# tokens and genuine duplicate entries carry 10 to 14, while both match the same
+# number of existing claims at or above FIRE_FLOOR once MIN_SHARED is applied.
 ENTRY_TOKENS = 8        # content tokens a line needs to BE an entry, not a stem
 
 

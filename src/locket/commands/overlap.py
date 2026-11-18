@@ -2,6 +2,8 @@
 (across), inside one file (dupes), between a holding space and a durable file
 (graduated), and the files an incoming text already restates (against).
 """
+import re
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -9,7 +11,7 @@ import claims
 import corpora
 import corpus
 import fsio
-from commands import Report
+from commands import Report, Tool, Verb, as_text, corpus_verb, floor_arg, report_tool
 
 
 def _filter_pairs(pairs, store=lambda f: ""):
@@ -252,3 +254,58 @@ def cmd_against(root, text, top=3):
         if pair and best >= 0.4:
             out.append(f"      existing: {pair[1][:180]}")
     return Report(out, len(ranked))
+
+
+def _across(rest):
+    # `across all` is what every other Step 5 line teaches; it is not a floor.
+    floor = next((float(a) for a in rest[:1] if re.fullmatch(r"[0-9.]+", a)), claims.PAIR_FLOOR)
+    cmd_across(floor).show()
+    return 0
+
+
+def _files(args):
+    files = args.get("files") or None
+    return [files] if isinstance(files, str) else files     # a bare string would match as a substring
+
+
+VERBS = (
+    Verb("audit", "[corpus [floor]]", "claim pairs across files that agree: fork risk",
+         "locket audit                          this directory's store\n"
+         "locket audit all                      every store, one after another\n"
+         "locket audit notes 0.7                only pairs at least 0.7 alike (default 0.55, 1.0 is identical)",
+         run=corpus_verb(lambda r, rest: cmd_audit(r, floor_arg(rest, claims.PAIR_FLOOR))),
+         mcp=report_tool("Claims that appear in two files: fork risk, not proof.",
+                         lambda r, a: cmd_audit(r))),
+    Verb("across", "[floor]", "claim pairs split across two stores; always reads every store",
+         "locket across                         pairs at least 0.55 alike\n"
+         "locket across 0.8                     only near-identical pairs",
+         run=_across,
+         mcp=Tool("Claims held by two different stores, over every store on "
+                  "this machine at once. Each store's own checks score it "
+                  "against itself, so a fact written into two stores is "
+                  "invisible to both until this runs. Fork risk, not proof.",
+                  lambda a, s: as_text(cmd_across()) or "no memory stores with markdown files found")),
+    Verb("dupes", "[corpus] [file ...]", "claims repeated inside one file; use on scratch and inbox files",
+         "locket dupes                          the scratch and inbox files the store names\n"
+         "locket dupes council SHORT_TERM.md    one file, named as the store lists it",
+         run=corpus_verb(lambda r, rest: cmd_dupes(r, files=rest or None)),
+         mcp=report_tool("Claims repeated inside one file (holding spaces by default).",
+                         lambda r, a: cmd_dupes(r, files=_files(a)),
+                         files={"type": "array", "items": {"type": "string"},
+                                "description": "File names to check instead of the defaults."})),
+    Verb("graduated", "[corpus [floor]]", "scratch-file entries a permanent file already states: ready to clear",
+         "locket graduated                      this directory's store\n"
+         "locket graduated notes 0.7            only entries at least 0.7 alike (default 0.55)",
+         run=corpus_verb(lambda r, rest: cmd_graduated(r, floor_arg(rest, claims.PAIR_FLOOR))),
+         mcp=report_tool("Holding-space claims a durable file or CSV row now holds: "
+                         "entries promoted and never retired. Prints its scope even "
+                         "when clean. Run with locket_links at session close.",
+                         lambda r, a: cmd_graduated(r))),
+    Verb("against", "[corpus] < text", "rank files by how much of the text on stdin they already state, "
+         "word by word; what the write hook runs",
+         'echo "a sentence" | locket against council\n'
+         "locket against notes < draft.md       a whole draft before it is written",
+         run=corpus_verb(lambda r, rest: cmd_against(r, sys.stdin.read()), header=False)),
+)
+
+SEE = "scan"

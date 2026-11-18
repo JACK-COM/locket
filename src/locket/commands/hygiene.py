@@ -13,7 +13,7 @@ import corpus
 import fsio
 import gate
 import ledger
-from commands import Report
+from commands import Report, Verb, corpus_verb, report_tool
 
 
 def index_hooks(root):
@@ -384,3 +384,26 @@ def cmd_ledgers(root):
     bad += len(big)
     out.append(f"{len(files)} ledger(s) checked, {bad} finding(s)")
     return Report(out, bad)
+
+
+SEE = "scan"
+VERBS = (
+    Verb("ledgers", "[corpus]", "schema-governed CSV rows off their schema, and declared CSVs past 5 MB",
+         "locket ledgers notes", run=corpus_verb(lambda r, rest: cmd_ledgers(r))),
+    Verb("budget", "[corpus]", "files past a byte, history-clause or paragraph budget", "locket budget council",
+         run=corpus_verb(lambda r, rest: cmd_budget(r)),
+         mcp=report_tool("Files past a size, update-clause or paragraph budget.", lambda r, a: cmd_budget(r))),
+    Verb("pointers", "[corpus]", "index lines beside the files they point at, missing targets first; "
+         "needs a reader", "locket pointers council", aliases=("hooks",),
+         run=corpus_verb(lambda r, rest: cmd_pointers(r)),
+         mcp=report_tool("Index lines paired with the files they point at, a "
+                         "missing target first. Whether the write-time gate is "
+                         "armed is locket_status.", lambda r, a: cmd_pointers(r))),
+    Verb("links", "[corpus]", "wikilink targets resolving to no file", "locket links council",
+         run=corpus_verb(lambda r, rest: cmd_links(r)),
+         mcp=report_tool("Wikilinks that resolve to no file.", lambda r, a: cmd_links(r))),
+    Verb("cites", "[corpus] [path ...]", "path:line citations resolved against the code",
+         "locket cites myapp                    every citation in `myapp`\n"
+         "locket cites myapp models.py          only citations of files whose path contains models.py",
+         run=corpus_verb(lambda r, rest: cmd_cites(r, filters=rest or None))),
+)
