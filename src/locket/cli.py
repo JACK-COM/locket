@@ -67,7 +67,7 @@ def parser():
     import argparse
     fmt = argparse.RawDescriptionHelpFormatter
     p = argparse.ArgumentParser(
-        prog="locket", epilog=help_text.EPILOG, formatter_class=fmt,
+        prog="locket", epilog=help_text.EPILOG, formatter_class=fmt, **fsio.PLAIN_HELP,
         description="locket: which memory file already holds this idea, and where a corpus repeats itself.")
     sub = p.add_subparsers(title="commands", metavar="<command>")
     for v in VERBS:

@@ -31,6 +31,22 @@ class Layers(unittest.TestCase):
                     found.append(f"{f.relative_to(SRC)}:{fn.lineno} binds {name}")
         self.assertEqual(found, [], "a local shadows a module the same function reads")
 
+    def test_every_parser_prints_plain_help(self):
+        """From Python 3.14 argparse colours help on a terminal, and SafeOut strips each
+        colour code's ESC, leaving `[1;34m` on screen; every parser passes
+        `**fsio.PLAIN_HELP`, and its subparsers inherit it."""
+        found = []
+        for f in sorted(Path(SRC).rglob("*.py")):
+            if f.name.startswith("_") and f.name != "__init__.py":
+                continue
+            for n in ast.walk(ast.parse(f.read_text())):
+                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                        and n.func.attr == "ArgumentParser"
+                        and not any(k.arg is None and ast.unparse(k.value) == "fsio.PLAIN_HELP"
+                                    for k in n.keywords)):
+                    found.append(f"{f.relative_to(SRC)}:{n.lineno}")
+        self.assertEqual(found, [], "a parser that colours its help on a terminal")
+
     def test_the_hook_path_never_loads_numpy(self):
         """Every hook imports the CLI or memscan before it reads its payload, and numpy
         costs about 60 ms of a hook's budget; a verb family needing the embedder imports

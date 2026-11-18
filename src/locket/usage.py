@@ -394,7 +394,7 @@ def render(s, by="project", top=8):
 
 def main(argv):
     import argparse
-    p = argparse.ArgumentParser(prog="locket usage", description=__doc__.split("\n\n")[0],
+    p = argparse.ArgumentParser(prog="locket usage", **fsio.PLAIN_HELP, description=__doc__.split("\n\n")[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("period", nargs="?", default="week", choices=[*PERIODS, "record"])
     p.add_argument("--by", choices=("project", "model", "day"), default="project")

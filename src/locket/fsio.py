@@ -4,6 +4,7 @@ invisible characters.
 """
 import os
 import stat
+import sys
 import contextlib
 import tempfile
 import urllib.parse
@@ -36,6 +37,11 @@ def relay(text, limit=200, lines=False):
     flat = "".join(" " if unicodedata.category(c) in _INVISIBLE else c for c in str(text)[:limit * 4])
     flat = " ".join(flat.split())
     return flat if len(flat) <= limit else flat[:limit - 1] + "\u2026"
+
+
+# argparse colours help on a terminal from Python 3.14; SafeOut strips the ESC of each
+# colour code and leaves `[1;34m` on screen. Every parser takes this, and its subparsers inherit it.
+PLAIN_HELP: dict = {"color": False} if sys.version_info >= (3, 14) else {}
 
 
 class SafeOut:

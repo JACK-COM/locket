@@ -8,6 +8,7 @@ import os
 import sys
 import textwrap
 
+import fsio
 from commands import Verb
 
 
@@ -215,7 +216,7 @@ def parser():
     import _embed
     fmt = argparse.RawDescriptionHelpFormatter
     p = argparse.ArgumentParser(
-        prog="locket configure", formatter_class=fmt,
+        prog="locket configure", formatter_class=fmt, **fsio.PLAIN_HELP,
         description=_wrap("Show or change Locket's embedder settings, held in ~/.panoply/config.json, the "
                     "settings file every Panoply piece and every Locket process reads (the command line, "
                     "every hook, the MCP server). Run with no arguments to see each setting, where its "
