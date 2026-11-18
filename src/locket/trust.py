@@ -10,6 +10,7 @@ import re
 import shlex
 import sys
 from pathlib import Path
+from typing import Callable, Optional
 
 import fsio
 import hosts
@@ -25,7 +26,7 @@ import paths
 # directory IS a corpus, so a row whose manifest is gone is reported, never
 # trusted. Lives in Locket's state directory, outside every corpus;
 # `LOCKET_REGISTRY` points a test at a scratch one.
-def _registry_data():
+def _registry_data() -> dict:
     try:
         data = json.loads(paths.PATHS.registry.read_text())
     except (OSError, json.JSONDecodeError, ValueError):
@@ -33,14 +34,14 @@ def _registry_data():
     return data if isinstance(data, dict) else {}
 
 
-def registry():
+def registry() -> list[Path]:
     """Registered corpus paths, as `init` wrote them. [] where the file is absent
     or unreadable, so enumeration degrades to the host stores rather than dies."""
     rows = _registry_data().get("corpora")
     return [Path(x) for x in rows if isinstance(x, str)] if isinstance(rows, list) else []
 
 
-def registry_pins():
+def registry_pins() -> dict[str, str]:
     """{registered path: digest of its configuration when a person trusted it}. A row
     with no pin predates pinning and is trusted as it stands until `migrate` pins it."""
     pins = _registry_data().get("pins")
@@ -50,7 +51,7 @@ def registry_pins():
 _DIGESTS: dict[str, tuple] = {}         # store: (stat signature, digest)
 
 
-def config_digest(d):
+def config_digest(d: fsio.StrPath) -> str:
     """sha256 over every file that makes a store act: its manifest, its legacy sources
     file and its rows file, each named, absent ones included. Trust is pinned to it,
     so a `git pull` that adds a block-all row or a source from elsewhere leaves the
@@ -82,10 +83,10 @@ def config_digest(d):
     return h.hexdigest()
 
 
-TRUST_CACHE: dict[tuple, tuple] = {}    # registry state: (host inodes, pinned rows)
+_TRUST_CACHE: dict[tuple, tuple] = {}    # registry state: (host inodes, pinned rows)
 
 
-def trusted_ids():
+def trusted_ids() -> tuple:
     """Inodes of the host stores and every registered path, recomputed only when
     the registry file changes, because the walk asks once per manifest it meets."""
     try:
@@ -94,7 +95,7 @@ def trusted_ids():
     except OSError:
         key = (str(paths.PATHS.registry), None, None)
     key += tuple(str(p) for p in paths.PATHS.host_stores.values())
-    if key not in TRUST_CACHE:
+    if key not in _TRUST_CACHE:
         host_ids = {fsio.inode(p) for p in paths.PATHS.host_stores.values()}
         host_ids.discard(None)
         pins = registry_pins()
@@ -103,12 +104,19 @@ def trusted_ids():
             ident = fsio.inode(p)
             if ident is not None:
                 rows[ident] = pins.get(str(p))
-        TRUST_CACHE.clear()
-        TRUST_CACHE[key] = (host_ids, rows)
-    return TRUST_CACHE[key]
+        _TRUST_CACHE.clear()
+        _TRUST_CACHE[key] = (host_ids, rows)
+    return _TRUST_CACHE[key]
 
 
-def trusted(d):
+def registry_key() -> tuple:
+    """The registry's state as `trusted_ids` last read it, refreshed first: a cache
+    keyed on it is stale once a store is trusted or untrusted in another process."""
+    trusted_ids()
+    return next(iter(_TRUST_CACHE))
+
+
+def trusted(d: fsio.StrPath) -> bool:
     """Whether directory `d` may act as a store: a host store, Claude Code's
     `projects/<slug>/memory`, or a path a human registered (`locket trust`,
     `locket init` at a terminal). A manifest anywhere else is inert, because a
@@ -117,7 +125,7 @@ def trusted(d):
     return granted(Path(d))
 
 
-def granted(d):
+def granted(d: Path) -> bool:
     """The real trust check, which the tests' fixture trust never replaces:
     `grant_trust` asks it, so a fixture is still registered for real."""
     ident = fsio.inode(d)
@@ -132,19 +140,19 @@ def granted(d):
     return d.name == "memory" and fsio.inode(d.parent.parent) == fsio.inode(hosts.claude() / "projects")
 
 
-def changed_since_trust(d):
+def changed_since_trust(d: fsio.StrPath) -> bool:
     """Whether `d` is registered but its configuration no longer matches its pin."""
     ident = fsio.inode(d)
     rows = trusted_ids()[1]
     return ident in rows and rows[ident] is not None and rows[ident] != config_digest(d)
 
 
-def registry_stale():
+def registry_stale() -> list[Path]:
     """Registered paths whose manifest is gone. Listed, never enumerated."""
     return [p for p in registry() if not manifest.has_manifest(p)]
 
 
-def write_store_file(path, text):
+def write_store_file(path: Path, text: str) -> None:
     """Write a file Locket owns inside a store (a manifest, a scaffolded ledger) by
     atomic rename, refusing a symlink at the path: a cloned repo's `locket.json`
     linked to `~/.claude/settings.json` must not turn `init` into an overwrite."""
@@ -166,7 +174,7 @@ def write_store_file(path, text):
         register(p.parent)
 
 
-def pin_unpinned():
+def pin_unpinned() -> Optional[list[Path]]:
     """Pin every registered store that has no pin yet (rows from before 0.12) to its
     configuration as it stands, once a person agrees: an unpinned row is untrusted,
     since a registry written by hand carries no pins. Returns the stores pinned, or
@@ -182,14 +190,14 @@ def pin_unpinned():
     return todo
 
 
-def _write_registry(rows, pins=None):
+def _write_registry(rows: list, pins: Optional[dict[str, str]] = None) -> None:
     paths.PATHS.state.mkdir(parents=True, exist_ok=True)
     keep = sorted({str(p) for p in rows})
     pins = {k: v for k, v in (registry_pins() if pins is None else pins).items() if k in keep}
     fsio.replace_atomic(paths.PATHS.registry, json.dumps({"corpora": keep, "pins": pins}, indent=2) + "\n", ".corpora.")
 
 
-def register(root):
+def register(root: fsio.StrPath) -> bool:
     """Add a corpus path to the registry, pinned to its configuration as it stands,
     or re-pin a row already there. True when the row was new."""
     root = Path(root).resolve()
@@ -202,7 +210,7 @@ def register(root):
     return old is None
 
 
-def _first_cwd(path, limit=60):
+def _first_cwd(path: Path, limit: int = 60) -> Optional[str]:
     """The first `"cwd"` value in a session's JSON lines, or None."""
     try:
         with open(path, errors="ignore") as f:
@@ -217,16 +225,16 @@ def _first_cwd(path, limit=60):
     return None
 
 
-def _unslug(slug, budget=2000):
+def _unslug(slug: str, budget: int = 2000) -> Optional[str]:
     """The existing directory Claude Code slugified into `slug`, or None. The slug
     replaces every non-alphanumeric character with `-`, so `a-b` may be `a/b`,
     `a-b`, `a.b` or `a_b`; matched against the disk one component at a time."""
-    def slugify(name):
+    def slugify(name: str) -> str:
         return re.sub(r"[^A-Za-z0-9]", "-", name)
 
     steps = [0]
 
-    def walk(d, rest):
+    def walk(d: str, rest: str) -> Optional[str]:
         if not rest:
             return d
         steps[0] += 1
@@ -249,12 +257,13 @@ def _unslug(slug, budget=2000):
     return walk("/", slug[1:]) if slug.startswith("-") else None
 
 
-def session_dirs():
+def session_dirs() -> set[str]:
     """Every working directory a host's session record names: Claude Code's
     project transcripts, Codex rollouts, Hermes `state.db`. The detection surface
     for an untrusted store; a directory no host has opened is not on it."""
-    out = set()
-    def mtime(f):
+    out: set[str] = set()
+
+    def mtime(f: Path) -> float:
         try:
             return f.stat().st_mtime
         except OSError:                     # a transcript rotated away mid-scan
@@ -282,7 +291,7 @@ def session_dirs():
     return out
 
 
-def untrusted_stores():
+def untrusted_stores() -> list[Path]:
     """Directories holding a manifest that is not trusted, found on the session
     record's working directories and their parents up to the home directory."""
     found, seen = set(), set()
@@ -300,7 +309,7 @@ def untrusted_stores():
     return sorted(found)
 
 
-def human_confirms(d):
+def human_confirms(d: Path) -> bool:
     """True only when a person at a terminal types `yes`. Trust turns a passive
     manifest into one that can block tool calls and read files outside its
     directory, so it is never granted on an agent's word: a hook-run agent has
@@ -314,7 +323,7 @@ def human_confirms(d):
         trust_summary(d), "trust it")
 
 
-def person_confirms(question, details, act):
+def person_confirms(question: str, details: list[str], act: str) -> bool:
     """True only when a person at a terminal types `yes` to `question`. The one
     gate for every setting an agent must not be able to change on its own word."""
     if not (sys.stdin.isatty() and sys.stderr.isatty()):
@@ -330,7 +339,7 @@ def person_confirms(question, details, act):
         return False
 
 
-def trust_summary(d):
+def trust_summary(d: fsio.StrPath) -> list[str]:
     """What trusting `d` would switch on, one line each, read from the files
     themselves, so the person deciding sees the rows and paths, not a promise."""
     m = manifest.manifest_data(Path(d))
@@ -355,7 +364,7 @@ def trust_summary(d):
     return out
 
 
-def grant_trust(d, confirm=None):
+def grant_trust(d: fsio.StrPath, confirm: Optional[Callable[[Path], bool]] = None) -> bool:
     """Register `d` once `confirm(d)` says a person agreed, printing the outcome.
     True when `d` is trusted afterwards."""
     d = Path(d).expanduser().resolve()
@@ -375,7 +384,7 @@ def grant_trust(d, confirm=None):
     return True
 
 
-def forget(root):
+def forget(root: fsio.StrPath) -> bool:
     """Drop a path from the registry. True when a row was removed. The manifest
     and the cache inside the directory are the user's to delete; this only
     stops the listing naming it."""
@@ -388,7 +397,7 @@ def forget(root):
     return True
 
 
-def read_manifest(root):
+def read_manifest(root: Optional[fsio.StrPath]) -> dict:
     """The manifest as a dict, or {} where it is absent, unreadable or untrusted.
     A broken manifest must degrade to the defaults rather than take a hook down
     with it, and an untrusted one is read as no manifest at all."""

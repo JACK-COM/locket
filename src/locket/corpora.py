@@ -32,7 +32,7 @@ def raw_corpora():
     for d in sorted((hosts.claude() / "projects").glob("*/memory")):
         name = trust.read_manifest(d).get("name")
         ok = isinstance(name, str) and name and name not in taken and name not in out
-        out[name if ok else d.parent.name] = d
+        out[name if ok and isinstance(name, str) else d.parent.name] = d
     for p in reg:
         if p in out.values():
             continue
@@ -319,9 +319,9 @@ class Settings(TypedDict):
 def settings(root: Optional[Path]) -> Settings:
     """`_settings_for`, cached per store and per state of the trust registry, so a store
     trusted or untrusted in another process is seen without a restart."""
-    trust.trusted_ids()
-    pinned = root is not None and fsio.inode(root) in trust.TRUST_CACHE[next(iter(trust.TRUST_CACHE))][1]
-    return _settings_for(root, (next(iter(trust.TRUST_CACHE)), trust.config_digest(root) if pinned else None))
+    key = trust.registry_key()
+    pinned = root is not None and fsio.inode(root) in trust.trusted_ids()[1]
+    return _settings_for(root, (key, trust.config_digest(root) if root is not None and pinned else None))
 
 
 def clear_settings():
