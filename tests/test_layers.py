@@ -31,6 +31,17 @@ class Layers(unittest.TestCase):
                     found.append(f"{f.relative_to(SRC)}:{fn.lineno} binds {name}")
         self.assertEqual(found, [], "a local shadows a module the same function reads")
 
+    def test_the_hook_path_never_loads_numpy(self):
+        """Every hook imports the CLI or memscan before it reads its payload, and numpy
+        costs about 60 ms of a hook's budget; a verb family needing the embedder imports
+        it on use."""
+        import subprocess
+        import sys
+        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import cli, memscan; "
+                "print(sorted(m for m in ('numpy', '_embed', 'memfind') if m in sys.modules))")
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "[]"), r.stderr[-400:])
+
 
 if __name__ == "__main__":
     unittest.main()
