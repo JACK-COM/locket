@@ -16,6 +16,7 @@ from pathlib import Path
 
 import tests.harness  # noqa: F401  (puts the source under test on sys.path)
 
+import bashguard  # noqa: E402
 import memscan  # noqa: E402
 import shellwrites  # noqa: E402
 import pywrites  # noqa: E402
@@ -103,7 +104,7 @@ class TrustVerbHidden(unittest.TestCase):
     """bashguard's name refusal reads `command_text`; no line before the verb may hide it."""
 
     def seen(self, command):
-        return bool(memscan._TRUST_VERB.search(re.sub(r"""['"\\]""", "", memscan.command_text(command))))
+        return bool(bashguard._TRUST_VERB.search(re.sub(r"""['"\\]""", "", memscan.command_text(command))))
 
     def test_verb_after_each_shape_is_seen(self):
         for before in ("cat <<<x", "cat <<< x", "cat <<A-B\nx\nA-B", 'echo "a <<b"', "# <<b",

@@ -47,10 +47,14 @@ from pathlib import Path
 
 import hosts
 import paths
+from bashguard import (  # noqa: F401  (re-exported)
+    SCRATCH_MARKERS, TRUST_REFUSAL, bash_write_decision,
+    ledger_bash_decision, oversized_decision, shell_store_config,
+)
+import bashguard
 import grepassist
 import ledger
 from grepassist import grep_assist, grep_words, prose_like  # noqa: F401  (re-exported)
-import shellwrites
 from shellwrites import (  # noqa: F401  (re-exported)
     BASH_WRITE, BASH_WRITE_STARTS, bash_write_targets, write_matches,
 )
@@ -58,7 +62,6 @@ from cites import (  # noqa: F401  (re-exported)
     CITE, citations, code_index, code_roots, enclosing_scope, project_dir_for,
     resolve_citation,
 )
-import shellscan
 
 # The layers below this module, re-exported under the names its remaining code, the
 # front and ~/.claude/hooks already use. Code inside a layer calls `<module>.<name>`,
@@ -1327,75 +1330,6 @@ def usage():
     return USAGE.replace("@@BUILTIN_LEDGERS@@", "\n".join(lines))
 
 
-_QUOTED = re.compile(r"""(?:echo|printf)\s+(?:-[a-zA-Z]+\s+)*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
-_CSV_REDIRECT = re.compile(r"(?:>>?|\btee\s+(?:-a\s+)?)\s*(?P<p>[^\s;&|<>]+\.csv)")
-
-
-def ledger_bash_decision(command, cwd):
-    """(message, blocking) for a shell command appending to a schema-governed CSV.
-
-    A heredoc body or an echo/printf string is read as rows and checked, and a
-    violation blocks. Each body counts only against the ledger its own pipeline
-    redirects into, so a second redirect elsewhere in a compound command is never
-    read as the ledger's rows. A redirect into the ledger whose rows cannot be read
-    off the command (a script, a variable) warns instead, because the check cannot
-    decide it, and names the sweep that can."""
-    if ".csv" not in command:
-        return None, False
-    targets, owner = {}, {}
-    for m in _CSV_REDIRECT.finditer(command):
-        tok = m.group("p").strip("'\"")
-        cands = [tok] if tok.startswith("/") else [str(Path(r) / tok) for r in shellwrites.cd_targets(command, cwd, m.start("p"))]
-        for c in cands:
-            schema, glob = ledger_schema_for(c)
-            if schema is not None:
-                owner[tok] = c
-                targets[c] = (schema, glob)
-                break
-    if not targets:
-        return None, False
-    # keyed by resolved path, so two spellings of one ledger share one verdict
-    bodies = {c: [] for c in targets}
-
-    owners = {}                             # pipeline span: the ledgers it redirects into
-
-    def attribute(pos, body):
-        span = shellscan.pipeline_span(command, pos)
-        if span not in owners:
-            owners[span] = {owner.get(m.group("p").strip("'\""))
-                            for m in _CSV_REDIRECT.finditer(shellscan.pipeline_of(command, pos))}
-        for c in owners[span]:
-            if c in bodies:
-                bodies[c].append(body)
-
-    for d in shellscan.heredocs(command):
-        # the opener's pipeline in the full command, so a redirect on a continued line counts
-        attribute(d.start, d.body(command))
-    for m in _QUOTED.finditer(command):
-        attribute(m.start(),
-                  (m.group(1) if m.group(1) is not None else m.group(2))
-                  .replace("\\n", "\n").replace('\\"', '"'))
-    # every target is checked before any warns: an opaque write earlier in the command
-    # must never stand in for a readable, violating one later
-    for path, (schema, glob) in targets.items():
-        header = _ledger_header(path)
-        findings = []
-        for body in bodies[path]:
-            if header is None:
-                findings += check_ledger_text(schema, body)
-            else:
-                findings += check_ledger_text(schema, body, header)
-        if findings:
-            return ledger_message(path, glob, schema, findings, "bashguard"), True
-    for path in targets:
-        if not bodies[path]:
-            return (f"This appends to a schema-governed ledger ({Path(path).name}) with rows the "
-                    f"guard cannot read off the command, so the caps go unchecked here. Run "
-                    f"`locket ledgers` after it, or write the row through Write/Edit, "
-                    f"where the check is mechanical."), False
-    return None, False
-
-
 def cmd_ledgers(root):
     """Every schema-governed CSV in the corpus, each row checked, then every
     declared CSV past the size reading. A clean run prints its scope, so a zero
@@ -1429,59 +1363,6 @@ def cmd_ledgers(root):
     bad += len(big)
     print(f"{len(files)} ledger(s) checked, {bad} finding(s)")
     return bad
-
-
-SCRATCH_MARKERS = ("/scratchpad/", "/private/tmp/", "/tmp/")
-MEMWRITE_ESCAPE = "MEMWRITE-OK:"
-
-
-def bash_write_decision(command, cwd, autonomous=False):
-    """(message, blocking) for a Bash command touching a corpus, or (None, False).
-
-    Exempts what 2d exempts, plus the scratchpad and autonomous runs, and honours a
-    declared MEMWRITE-OK escape the way the dossier hook honours NOT-CURATION: a
-    reword records nothing, a declaration records the decision.
-    """
-    if ".md" not in command or autonomous or MEMWRITE_ESCAPE in command:
-        return None, False
-    if any(mark in command for mark in SCRATCH_MARKERS):
-        return None, False
-    blocking, opaque, unlisted = shellwrites.bash_write_targets(command, cwd)
-
-    def live(q):                             # exempt by ITS corpus's names, not ours
-        sets = settings(corpus_for(q))
-        return q.name not in sets["append_surfaces"] and "archive" not in q.parts
-    blocking = [q for q in blocking if live(q)]
-    opaque = [q for q in opaque if live(q)]
-    unlisted = [(w, q) for w, q in unlisted if live(q)]
-    if blocking:
-        names = ", ".join(sorted({q.name for q in blocking}))
-        return (f"This writes to a memory corpus through Bash ({names}), where the write-time "
-                f"gate cannot see it. That gate matches the Write and Edit tools, so a shell "
-                f"redirect skips the 2c one-authority check and the 2e already-has-a-home "
-                f"question, silently.\n"
-                f"  - Use Write or Edit for memory files, even where a session directive "
-                f"prefers Bash. Memory corpora are the carve-out.\n"
-                f"  - A ledger, a holding space, anything under archive/ and the scratchpad "
-                f"are exempt and never reach this message.\n"
-                f"  - If Bash is genuinely right here (an atomic multi-file patch, a scripted "
-                f"migration), put `{MEMWRITE_ESCAPE} <reason>` in the command and it passes."), True
-    if opaque:
-        names = ", ".join(sorted({q.name for q in opaque}))
-        return (f"This looks like a scripted write into a memory corpus ({names}). The "
-                f"write-time gate matches Write and Edit, so if it does write there the 2c and "
-                f"2e checks will not fire and nothing will report that they did not. Route "
-                f"the edit through Write/Edit, or put `{MEMWRITE_ESCAPE} <reason>` in the "
-                f"command if Bash is genuinely right. Running `memfind` first does not "
-                f"substitute: it answers 2e and leaves the 2c check unrun."), False
-    if unlisted:
-        what = ", ".join(sorted({f"`{w}` on {q.name}" for w, q in unlisted}))
-        return (f"This hands a memory file to a command Locket does not know to be read-only "
-                f"({what}). If it writes the file, the write-time gate never sees it, because "
-                f"that gate matches Write and Edit. Route the edit through Write/Edit, or put "
-                f"`{MEMWRITE_ESCAPE} <reason>` in the command if Bash is genuinely right; a "
-                f"read-only command can be ignored."), False
-    return None, False
 
 
 # ---------------------------------------------------------------------------
@@ -1789,58 +1670,6 @@ def gate_status():
     return "\n".join(lines) if lines else "no known host home found; CLI modes only"
 
 
-_CONFIG_WORD = re.compile(r"[^\s;&|<>()]*(?:locket\.json|memfind\.json|reference-sources\.json|triggers\.json)\b")
-
-
-_TRUST_VERB = re.compile(r"\b(?:locket|memscan(?:\.py)?|locket\.py)\s+(?:trust|untrust|forget)\b")
-TRUST_REFUSAL = ("Granting or withdrawing a store's trust is a person's act at their own terminal, "
-                 "never through an agent's shell. Tell the user the command to run.")
-
-
-def shell_store_config(command, cwd):
-    """(store, name) for the first store configuration file a shell command names,
-    read as the shell would resolve it, else None. Naming one is enough: no agent task
-    needs to touch a store's configuration from a shell, and whether a command writes a
-    file cannot be read off its text, while whether it names one can."""
-    for i, m in enumerate(_CONFIG_WORD.finditer(command[:MAX_SCAN])):
-        if i >= 100:
-            break
-        tok = m.group(0)
-        bases = [""] if tok.startswith(("/", "~", "$HOME", "${HOME}")) else shellwrites.cd_targets(command, cwd, m.start())
-        for b in bases:
-            path = shellwrites.expand_home(tok) if not b else str(Path(b) / tok)
-            hit = store_config(path)
-            if hit is not None:
-                return hit
-    return None
-
-
-_PATHLIKE = re.compile(r"""[^\s'"<>;&|()]+\.(?:md|csv)\b""")
-
-
-def oversized_decision(command, cwd):
-    """(message, blocking) for a shell command too long to scan. Its parsers are
-    linear, but not run past MAX_SCAN, so padding cannot buy a slow hook; and since
-    a skipped scan must not read as a clean one, a command naming a store file
-    anywhere is treated as a write to it, never as undecided."""
-    if MEMWRITE_ESCAPE in command:
-        return None, False
-    autonomous = os.environ.get("CLAUDE_AUTONOMOUS") == "1"
-    for i, m in enumerate(_PATHLIKE.finditer(command)):
-        if i >= 500:
-            break
-        tok = m.group(0)
-        cands = [tok] if tok.startswith(("/", "~")) else [
-            str(Path(r) / tok) for r in shellwrites.cd_targets(command, cwd, m.start())]
-        for c in cands:
-            c = str(Path(c).expanduser())
-            if corpus_for(c) is not None or ledger_schema_for(c)[0] is not None:
-                return (f"This command is {len(command)} characters, past the {MAX_SCAN} the guard "
-                        f"scans, and names {relay(c, 160)} in a memory store, so it is read as a write "
-                        f"to it. Split it, or add {MEMWRITE_ESCAPE} <reason> if the write is intended."), autonomous
-    return None, False
-
-
 def hook_mode(payload):
     """The write gate on one normalised Write or Edit, delivered to the host. Reached
     from `hook`, and from `bashguard` when a shell call turned out to be a Codex patch."""
@@ -1880,31 +1709,9 @@ def _hook_entry(mode):
             return hook_mode(payload)       # a Codex patch sent through the shell
         if payload is None or payload["tool_name"] != "Bash":
             return 0
-        command = str(payload["tool_input"].get("command", ""))
-        if len(command) > MAX_SCAN:
-            try:
-                msg, blocking = oversized_decision(command, payload.get("cwd"))
-            except Exception as e:
-                health_error("bashguard", "decision", e)
-                return 0
-            return emit(payload, msg, blocking, mode)
-        bare = re.sub(r"""['"\\]""", "", shellscan.command_text(command))
-        if _TRUST_VERB.search(bare):
-            return emit(payload, TRUST_REFUSAL, True, mode)
-        cfg = shell_store_config(bare, payload.get("cwd"))
-        if cfg is not None:
-            return emit(payload, CONFIG_REFUSAL.format(name=cfg[1], store=cfg[0]), True, mode)
-        if ((".locket" in bare and ("corpora.json" in bare or "config.json" in bare))
-                or (".panoply" in bare and "config.json" in bare) or str(paths.PATHS.registry) in bare):
-            # a shell command naming the registry is refused whether or not it writes: no
-            # agent task needs the file, and a write to it would grant trust
-            return emit(payload, REGISTRY_REFUSAL.format(reg=paths.PATHS.registry), True, mode)
         try:
-            msg, blocking = ledger_bash_decision(command, payload.get("cwd"))
-            if msg is None:
-                msg, blocking = bash_write_decision(
-                    command, payload.get("cwd"),
-                    autonomous=os.environ.get("CLAUDE_AUTONOMOUS") == "1")
+            msg, blocking = bashguard.decide(str(payload["tool_input"].get("command", "")), payload.get("cwd"),
+                                             autonomous=os.environ.get("CLAUDE_AUTONOMOUS") == "1")
         except Exception as e:              # a guardrail must never break the shell
             health_error("bashguard", "decision", e)
             return 0
