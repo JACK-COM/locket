@@ -16,7 +16,7 @@ def _configure(rest):
 
 def _configure_guide(own):
     import configure
-    configure._parser().print_help()
+    configure.parser().print_help()
     print("\n" + configure.__doc__.split("\n\n", 1)[1].rstrip())
     return 0
 

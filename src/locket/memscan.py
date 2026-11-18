@@ -65,27 +65,27 @@ from cites import (  # noqa: F401  (re-exported)
 # so a test patches a name where it lives (`fixture_env` patches trust's).
 from fsio import (  # noqa: F401  (re-exported)
     MAX_FILE_BYTES, MAX_SCAN, MAX_STORE_BYTES, MAX_STORE_FILES, PATH_MAX, SafeOut,
-    _inode, _regular, _replace_atomic, _same, open_safe, read_or_empty, read_safe,
+    inode, regular, replace_atomic, same, open_safe, read_or_empty, read_safe,
     relay, sqlite_rows,
 )
 from health import (  # noqa: F401  (re-exported)
     HEALTH_MARKER_CAP, HEALTH_STALE_OTHER, HEALTH_STALE_POSIX, HEALTH_TEMP_AGE, HookRun,
-    _fold_dead_markers, _marker_name, _utc, health_ack, health_dir, health_error,
+    _fold_dead_markers, _marker_name, utc, health_ack, health_dir, health_error,
     health_report,
 )
 from manifest import (  # noqa: F401  (re-exported)
     HOLDING_SPACES, INDEX_FILES, LEDGER_SCHEMAS, LEDGER_SURFACES, LEGACY_MANIFEST,
-    MANIFEST, MANIFEST_SCHEMA, OLD_MANIFEST, _SCHEMA_KEYS, _inside, _manifest_data,
+    MANIFEST, MANIFEST_SCHEMA, OLD_MANIFEST, SCHEMA_KEYS, inside, manifest_data,
     has_manifest, manifest_file, validate_manifest,
 )
 from trust import (  # noqa: F401  (re-exported)
-    _TRUST_CACHE, _granted, _read_manifest, _trusted_ids, changed_since_trust,
+    TRUST_CACHE, granted, read_manifest, trusted_ids, changed_since_trust,
     config_digest, forget, grant_trust, person_confirms, pin_unpinned, register,
     registry, registry_pins, registry_stale, trusted, untrusted_stores,
     write_store_file,
 )
 from corpora import (  # noqa: F401  (re-exported)
-    _clear_settings, _label, _phys_root_of, _raw_corpora, _root_of, _walked_by,
+    _clear_settings, store_label, phys_root_of, raw_corpora, _root_of, walked_by,
     all_corpora, corpus_for, corpus_for_cwd, corpus_here, corpus_key, excluded_file,
     parent_of, roots_of, search_root, settings, top_of,
 )
@@ -98,11 +98,11 @@ from shellscan import (  # noqa: F401  (re-exported)
     command_text, shell_code as _shell_code, strip_heredocs as _strip_heredocs,
 )
 from corpus import (  # noqa: F401  (re-exported)
-    _archive_md, _own_md, _walk_files, archived_claims, claim_index, corpus, csv_rows, csv_sources,
+    _archive_md, own_md, _walk_files, archived_claims, claim_index, corpus, csv_rows, csv_sources,
     has_content, md_files, resolve, skipped_files, subtract_archived,
 )
 from ledger import (  # noqa: F401  (re-exported)
-    LEAD_BLOCKING, LEAD_WARNING, _csv_rows_of, _ledger_header, check_ledger_text,
+    LEAD_BLOCKING, LEAD_WARNING, csv_rows_of, ledger_header, check_ledger_text,
     CSV_REPORT_BYTES, declared_csvs, large_csvs,
     ledger_decision, ledger_message, ledger_schema_for, ledger_schemas,
     source_row_decision,

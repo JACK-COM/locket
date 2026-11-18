@@ -124,7 +124,7 @@ def trim_log(path, cap):
         fh.seek(size // 2)
         fh.readline()                       # drop the partial row the seek landed in
         kept = fh.read()
-    fsio._replace_atomic(path, kept, ".grepassist-")
+    fsio.replace_atomic(path, kept, ".grepassist-")
 
 
 def log(tool, decision, reason, pattern):
@@ -142,7 +142,7 @@ def log(tool, decision, reason, pattern):
         clean = re.sub(r"[\r\n\t,\"]+", " ", str(pattern))[:80]
         if clean[:1] in ("=", "+", "-", "@"):
             clean = "'" + clean             # a spreadsheet reads these as a formula
-        row = f"{health._utc()},{tool},{decision},{reason},{clean}\n"
+        row = f"{health.utc()},{tool},{decision},{reason},{clean}\n"
         flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
         try:
             fd = os.open(str(paths.PATHS.grepassist_log), flags, 0o600)

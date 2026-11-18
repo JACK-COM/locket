@@ -151,8 +151,8 @@ def _write_cache(root, vecs, meta):
     corpus.ready_cache_dir(root)
     token = os.urandom(TOKEN_BYTES)
     meta_p, vec_p = cache_paths(root)
-    fsio._replace_atomic(vec_p, np.ascontiguousarray(vecs, dtype=np.float32).tobytes() + token, ".index.vec.")
-    fsio._replace_atomic(meta_p, json.dumps({**meta, "token": token.hex()}), ".index.json.")
+    fsio.replace_atomic(vec_p, np.ascontiguousarray(vecs, dtype=np.float32).tobytes() + token, ".index.vec.")
+    fsio.replace_atomic(meta_p, json.dumps({**meta, "token": token.hex()}), ".index.json.")
 
 
 def build_index(root, quiet=False):
@@ -178,7 +178,7 @@ def build_index(root, quiet=False):
     old_items, old_vecs, old_dim, old_fp = [], None, None, {}
     if meta_p.exists() and vec_p.exists():
         try:
-            m = _read_meta(meta_p)
+            m = read_meta(meta_p)
             if m.get("model") == active:
                 old_items = [tuple(i) for i in m["items"]]
                 old_dim = m["dim"]
@@ -294,7 +294,7 @@ def load_index(root, quiet=False):
     meta, vec = cache_paths(root)
     if meta.exists() and vec.exists():
         try:
-            m = _read_meta(meta)
+            m = read_meta(meta)
             if (m.get("model") == tag(resolve_backend()[0])
                     and m.get("fingerprint") == corpus_fingerprint(root)):
                 return ([tuple(i) for i in m["items"]],
@@ -307,7 +307,7 @@ def load_index(root, quiet=False):
 TOKEN_BYTES = 16
 
 
-def _read_meta(path):
+def read_meta(path):
     """The cache's JSON half; raises ValueError or OSError on a damaged one."""
     data = json.loads(_read_text(path))
     if not isinstance(data, dict):
@@ -349,7 +349,7 @@ def load_cached(root):
     if not (meta.exists() and vec.exists()):
         return None
     try:
-        m = _read_meta(meta)
+        m = read_meta(meta)
         # Whichever backend built it: the query is embedded in that same space
         # (`rank` pins the backend from the tag), so no embedder is probed here.
         if m.get("model") not in (tag("ollama"), tag("onnx")):
@@ -430,7 +430,7 @@ def rank(statement, root, top=5, per_file=True, quiet=False, idx=None, lexical=T
         if idx is None:
             which = resolve_backend()[0]
         else:
-            m = _read_meta(cache_paths(root)[0])
+            m = read_meta(cache_paths(root)[0])
             which = "onnx" if str(m.get("model", "")).startswith("onnx:") else "ollama"
         qv = embed([statement], quiet=True, backend=which)[0]
     except RuntimeError:

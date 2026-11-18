@@ -73,7 +73,7 @@ def _withdraw(verb):
             print(f"{verb} needs a directory:  locket {verb} <dir>", file=sys.stderr)
             return 1
         d = Path(rest[0]).expanduser()
-        if any(fsio._same(d, r) for r in trust.registry()) and not trust.person_confirms(
+        if any(fsio.same(d, r) for r in trust.registry()) and not trust.person_confirms(
                 f"Withdraw trust from {d}? Its trigger rows, ledger schemas and sources stop acting.",
                 [], "withdraw it"):
             print(f"registry: unchanged. Withdrawing a store's guardrails is a person's act at a "
@@ -117,7 +117,7 @@ def _forget_tool(args, session):
     d = str(args.get("path") or "").strip()
     if not d:
         raise ValueError("path is required")
-    if any(fsio._same(Path(d).expanduser(), r) for r in trust.registry()):
+    if any(fsio.same(Path(d).expanduser(), r) for r in trust.registry()):
         return (f"{d} is trusted, and withdrawing a store's guardrails is a person's act: ask the user "
                 f"to run  locket untrust {d}  at a terminal")
     return f"{d} is not in the registry"

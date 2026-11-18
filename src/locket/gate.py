@@ -544,13 +544,13 @@ def store_config(path):
         d = q.parent
         if q.name.lower() in names and (trust.trusted(d) or d in set(paths.PATHS.host_stores.values())):
             return d, q.name
-    phys = corpora._phys_root_of(d)
+    phys = corpora.phys_root_of(d)
     if phys is not None:
-        rows = trust._read_manifest(phys).get("triggers")
+        rows = trust.read_manifest(phys).get("triggers")
         if isinstance(rows, str) and rows:
             target = Path(rows).expanduser()
             target = target if target.is_absolute() else phys / target
-            if fsio._same(target, p):
+            if fsio.same(target, p):
                 return phys, p.name
     return None
 
@@ -567,7 +567,7 @@ def is_registry(path):
     guarded = [paths.PATHS.registry, Path(os.environ.get("PANOPLY_CONFIG", str(paths.HOME / ".panoply" / "config.json"))),
                paths.PATHS.state / "config.json"]
     try:
-        return any(fsio._same(path, g) for g in guarded)
+        return any(fsio.same(path, g) for g in guarded)
     except (OSError, RuntimeError, ValueError):
         return False
 

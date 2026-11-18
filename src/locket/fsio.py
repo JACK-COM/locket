@@ -10,7 +10,7 @@ import urllib.parse
 from pathlib import Path
 
 
-def _inode(p):
+def inode(p):
     """(st_dev, st_ino) of a path, or None. Identity for trust: `Path` equality
     calls `/users` and `/Users` two directories on a case-insensitive disk."""
     try:
@@ -56,10 +56,10 @@ class SafeOut:
         return getattr(self._s, name)
 
 
-def _same(a, b):
+def same(a, b):
     """Whether two paths name one directory: by inode where both exist, else by
     resolved path. Spelling is not identity on a case-insensitive disk."""
-    ia, ib = _inode(a), _inode(b)
+    ia, ib = inode(a), inode(b)
     if ia is not None and ib is not None:
         return ia == ib
     pa, pb = Path(a).expanduser().resolve(), Path(b).expanduser().resolve()
@@ -68,7 +68,7 @@ def _same(a, b):
     # not yet on disk: the same name under one directory, case aside, is taken as one
     # file, since on a case-insensitive disk it is, and a gate errs toward refusing
     return (pa.name.casefold() == pb.name.casefold() and pa.parent != pa
-            and _same(pa.parent, pb.parent))
+            and same(pa.parent, pb.parent))
 
 
 MAX_FILE_BYTES = 8 * 1024 * 1024      # past the 5 MB a declared CSV is reported at
@@ -86,7 +86,7 @@ MAX_STORE_FILES = 4000
 MAX_STORE_BYTES = 64 * 1024 * 1024
 
 
-def _regular(p):
+def regular(p):
     """A plain file, by `lstat`: no symlink, no FIFO, no device, one hard link. A
     store is read only through files it holds itself, so a link planted in a cloned
     repository cannot make the walk read a key or a config from elsewhere on disk."""
@@ -130,7 +130,7 @@ def read_or_empty(path):
         return ""
 
 
-def _replace_atomic(path, data, prefix, mode=None):
+def replace_atomic(path, data, prefix, mode=None):
     """Write `data` (str or bytes) beside `path` and rename it over, so a reader never sees
     a partial file. The temp is removed when the write fails; a writer killed mid-way can
     still leave one, which each surface's own sweep removes."""

@@ -56,7 +56,7 @@ def config_digest(d):
     so a `git pull` that adds a block-all row or a source from elsewhere leaves the
     store inert until a person trusts what it now says."""
     d = Path(d)
-    m = manifest._manifest_data(d)
+    m = manifest.manifest_data(d)
     rows = m.get("triggers") if isinstance(m.get("triggers"), str) and m.get("triggers") else "triggers.json"
     rows = Path(rows).expanduser()
     files = [manifest.manifest_file(d), d / manifest.LEGACY_MANIFEST, rows if rows.is_absolute() else d / rows]
@@ -84,10 +84,10 @@ def config_digest(d):
     return h.hexdigest()
 
 
-_TRUST_CACHE = {}
+TRUST_CACHE = {}
 
 
-def _trusted_ids():
+def trusted_ids():
     """Inodes of the host stores and every registered path, recomputed only when
     the registry file changes, because the walk asks once per manifest it meets."""
     try:
@@ -96,18 +96,18 @@ def _trusted_ids():
     except OSError:
         key = (str(paths.PATHS.registry), None, None)
     key += tuple(str(p) for p in paths.PATHS.host_stores.values())
-    if key not in _TRUST_CACHE:
-        host_ids = {fsio._inode(p) for p in paths.PATHS.host_stores.values()}
+    if key not in TRUST_CACHE:
+        host_ids = {fsio.inode(p) for p in paths.PATHS.host_stores.values()}
         host_ids.discard(None)
         pins = registry_pins()
         rows = {}
         for p in registry():
-            ident = fsio._inode(p)
+            ident = fsio.inode(p)
             if ident is not None:
                 rows[ident] = pins.get(str(p))
-        _TRUST_CACHE.clear()
-        _TRUST_CACHE[key] = (host_ids, rows)
-    return _TRUST_CACHE[key]
+        TRUST_CACHE.clear()
+        TRUST_CACHE[key] = (host_ids, rows)
+    return TRUST_CACHE[key]
 
 
 def trusted(d):
@@ -116,28 +116,28 @@ def trusted(d):
     `locket init` at a terminal). A manifest anywhere else is inert, because a
     cloned repository carries whatever manifest its author wrote: trigger rows
     that block every tool call, ledger schemas, `sources` outside the directory."""
-    return _granted(Path(d))
+    return granted(Path(d))
 
 
-def _granted(d):
+def granted(d):
     """The real trust check, which the tests' fixture trust never replaces:
     `grant_trust` asks it, so a fixture is still registered for real."""
-    ident = fsio._inode(d)
+    ident = fsio.inode(d)
     if ident is None:
         return False
-    host_ids, rows = _trusted_ids()
+    host_ids, rows = trusted_ids()
     if ident in host_ids:
         return True
     if ident in rows:
         pin = rows[ident]
         return pin is not None and pin == config_digest(d)
-    return d.name == "memory" and fsio._inode(d.parent.parent) == fsio._inode(hosts.claude() / "projects")
+    return d.name == "memory" and fsio.inode(d.parent.parent) == fsio.inode(hosts.claude() / "projects")
 
 
 def changed_since_trust(d):
     """Whether `d` is registered but its configuration no longer matches its pin."""
-    ident = fsio._inode(d)
-    rows = _trusted_ids()[1]
+    ident = fsio.inode(d)
+    rows = trusted_ids()[1]
     return ident in rows and rows[ident] is not None and rows[ident] != config_digest(d)
 
 
@@ -155,15 +155,15 @@ def write_store_file(path, text):
         raise OSError(f"{p} is a symlink; Locket writes no file through one")
     # Locket's own edit to a manifest a person trusted keeps that trust: the pin moves
     # to what Locket wrote. Any other edit leaves the store inert until re-trusted.
-    repin = (p.name in (manifest.MANIFEST, manifest.OLD_MANIFEST, manifest.LEGACY_MANIFEST) and _granted(p.parent)
-             and any(fsio._same(p.parent, r) for r in registry()))
+    repin = (p.name in (manifest.MANIFEST, manifest.OLD_MANIFEST, manifest.LEGACY_MANIFEST) and granted(p.parent)
+             and any(fsio.same(p.parent, r) for r in registry()))
     try:                                    # an edited file keeps its mode; a new one takes the umask's
         mode = os.stat(p).st_mode & 0o777
     except FileNotFoundError:
         mask = os.umask(0)
         os.umask(mask)
         mode = 0o666 & ~mask
-    fsio._replace_atomic(p, text, f".{p.name}.", mode)
+    fsio.replace_atomic(p, text, f".{p.name}.", mode)
     if repin:
         register(p.parent)
 
@@ -188,7 +188,7 @@ def _write_registry(rows, pins=None):
     paths.PATHS.state.mkdir(parents=True, exist_ok=True)
     keep = sorted({str(p) for p in rows})
     pins = {k: v for k, v in (registry_pins() if pins is None else pins).items() if k in keep}
-    fsio._replace_atomic(paths.PATHS.registry, json.dumps({"corpora": keep, "pins": pins}, indent=2) + "\n", ".corpora.")
+    fsio.replace_atomic(paths.PATHS.registry, json.dumps({"corpora": keep, "pins": pins}, indent=2) + "\n", ".corpora.")
 
 
 def register(root):
@@ -196,7 +196,7 @@ def register(root):
     or re-pin a row already there. True when the row was new."""
     root = Path(root).resolve()
     rows = registry()
-    old = next((r for r in rows if fsio._same(root, r)), None)
+    old = next((r for r in rows if fsio.same(root, r)), None)
     pins = registry_pins()
     pins.pop(str(old), None)
     pins[str(old or root)] = config_digest(root)
@@ -296,7 +296,7 @@ def untrusted_stores():
             seen.add(p)
             if p == paths.HOME or p == p.parent:
                 break
-            if manifest.has_manifest(p) and not _granted(p):
+            if manifest.has_manifest(p) and not granted(p):
                 found.add(p)
     found.update(r for r in registry() if manifest.has_manifest(r) and changed_since_trust(r))
     return sorted(found)
@@ -335,7 +335,7 @@ def person_confirms(question, details, act):
 def trust_summary(d):
     """What trusting `d` would switch on, one line each, read from the files
     themselves, so the person deciding sees the rows and paths, not a promise."""
-    m = manifest._manifest_data(Path(d))
+    m = manifest.manifest_data(Path(d))
     out = [f"{manifest.manifest_file(Path(d)).name}: keys {', '.join(sorted(m)) or 'none'}"]
     for e in m.get("sources") or []:
         if isinstance(e, dict):
@@ -362,8 +362,8 @@ def grant_trust(d, confirm=None):
     """Register `d` once `confirm(d)` says a person agreed, printing the outcome.
     True when `d` is trusted afterwards."""
     d = Path(d).expanduser().resolve()
-    if _granted(d):
-        print(f"registry: {paths.PATHS.registry} (already listed)" if any(fsio._same(d, r) for r in registry())
+    if granted(d):
+        print(f"registry: {paths.PATHS.registry} (already listed)" if any(fsio.same(d, r) for r in registry())
               else f"trust: {d} is a store by convention on this host")
         return True
     changed = changed_since_trust(d)
@@ -384,17 +384,17 @@ def forget(root):
     stops the listing naming it."""
     root = Path(root).expanduser().resolve()
     rows = registry()
-    keep = [r for r in rows if not fsio._same(root, r)]
+    keep = [r for r in rows if not fsio.same(root, r)]
     if len(keep) == len(rows):
         return False
     _write_registry(keep)
     return True
 
 
-def _read_manifest(root):
+def read_manifest(root):
     """The manifest as a dict, or {} where it is absent, unreadable or untrusted.
     A broken manifest must degrade to the defaults rather than take a hook down
     with it, and an untrusted one is read as no manifest at all."""
     if root is None or not trusted(root):
         return {}
-    return manifest._manifest_data(root)
+    return manifest.manifest_data(root)

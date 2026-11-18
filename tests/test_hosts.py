@@ -18,8 +18,8 @@ class MissingHost(unittest.TestCase):
                 self.assertFalse(home.exists(), home)
             mem = Path(t) / "projects" / "-x" / "memory"
             mem.mkdir(parents=True)
-            self.assertFalse(trust._granted(mem), "a store under no host's projects/ was trusted")
-            self.assertEqual(corpora._raw_corpora(), {})
+            self.assertFalse(trust.granted(mem), "a store under no host's projects/ was trusted")
+            self.assertEqual(corpora.raw_corpora(), {})
             self.assertEqual(trust.session_dirs(), set())
 
 

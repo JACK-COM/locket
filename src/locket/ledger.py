@@ -31,13 +31,13 @@ def ledger_schemas(root):
     overriding earlier ones by glob. Malformed entries are skipped."""
     out = {k: dict(v, _from="built in") for k, v in manifest.LEDGER_SCHEMAS.items()}
     for r in (corpora.roots_of(root) if root is not None else []):
-        entries = trust._read_manifest(r).get("ledgers")
+        entries = trust.read_manifest(r).get("ledgers")
         if not isinstance(entries, list):
             continue
         for e in entries:
             if not isinstance(e, dict) or not isinstance(e.get("path"), str):
                 continue
-            own = {k: e[k] for k in manifest._SCHEMA_KEYS if k in e}
+            own = {k: e[k] for k in manifest.SCHEMA_KEYS if k in e}
             base = manifest.LEDGER_SCHEMAS.get(e.get("extends")) or _builtin_for(e["path"])
             out[e["path"]] = _merge_schema(base, own)
             out[e["path"]]["_from"] = f"{manifest.manifest_file(r).name} in {r}"
@@ -74,7 +74,7 @@ def ledger_schema_for(path):
     p = Path(path).expanduser()
     if p.suffix.lower() != ".csv":
         return None, None
-    phys = corpora._phys_root_of(p.parent)
+    phys = corpora.phys_root_of(p.parent)
     if phys is None:
         return None, None
     root = corpora.top_of(phys)
@@ -128,7 +128,7 @@ def check_ledger_rows(schema, header, rows, first=2):
     return out
 
 
-def _csv_rows_of(text):
+def csv_rows_of(text):
     import csv as _csv, io as _io
     return list(_csv.reader(_io.StringIO(text)))
 
@@ -138,7 +138,7 @@ def check_ledger_text(schema, text, header=None):
     (an Edit fragment, a heredoc); a line whose field count differs from the
     header's is not a row and is skipped, since a fragment can cut a row. Without
     it, the first line is the header (a whole-file Write, the sweep)."""
-    rows = _csv_rows_of(text)
+    rows = csv_rows_of(text)
     if header is None:
         if not rows:
             return []
@@ -148,10 +148,10 @@ def check_ledger_text(schema, text, header=None):
     return check_ledger_rows(schema, header, rows, first=1)
 
 
-def _ledger_header(path):
+def ledger_header(path):
     try:
         with fsio.open_safe(path, newline="") as fh:
-            rows = _csv_rows_of(fh.read(4096))
+            rows = csv_rows_of(fh.read(4096))
     except OSError:
         return None
     return rows[0] if rows else None
@@ -175,7 +175,7 @@ def ledger_decision(path, tool_input):
     if "content" in tool_input and tool_input.get("content") is not None:
         findings = check_ledger_text(schema, str(tool_input["content"]))
     else:
-        header = _ledger_header(path)
+        header = ledger_header(path)
         if header is None:
             return None, False
         findings = check_ledger_text(schema, str(tool_input.get("new_string") or ""), header)
@@ -199,7 +199,7 @@ def source_row_decision(path, tool_input, prior, append=False):
     whether a fact is new is not decidable, and moving a passage into a row
     rightly draws this until the prose is cut."""
     p = Path(path).expanduser()
-    phys = corpora._phys_root_of(p.parent)
+    phys = corpora.phys_root_of(p.parent)
     if phys is None:
         return None, False
     root = corpora.top_of(phys)
@@ -259,7 +259,7 @@ def schema_csvs(root):
     # a root-only glob reported such a store clean while checking nothing.
     # `excluded_files` hides a file from claims, not from its schema.
     for r in corpora.roots_of(root):
-        for p in corpus._own_md(r, "*.csv", honor_excluded_files=False):
+        for p in corpus.own_md(r, "*.csv", honor_excluded_files=False):
             rp = p.resolve()
             if rp in seen:
                 continue

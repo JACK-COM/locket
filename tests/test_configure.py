@@ -23,7 +23,7 @@ def _suite():
             cf.LEGACY = Path(t) / "locket" / "config.json"
             cfg, load = _settings.path(), lambda: _settings.load()
             assert load() == ({}, []) and cf.apply()["model"] == (_embed.SHIPPED["model"], "default")
-            run = lambda *a: cf._set_embed(cf._parser().parse_args(["embedder", *a]))
+            run = lambda *a: cf._set_embed(cf.parser().parse_args(["embedder", *a]))
             quiet = io.StringIO()
             with contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
                 assert run("--model", "m1", "--no-check", "--no-autostart") == 0

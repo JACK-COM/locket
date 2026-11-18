@@ -182,7 +182,7 @@ def caches():
     """Every in-store `.memfind/` cache a release before 0.12 may have written: at each
     store root, in each member of a host store (older layout), and in every registered
     path. Nothing reads them now; `migrate` names them and `uninstall` removes them."""
-    roots = set(corpora._raw_corpora().values()) | set(trust.registry())
+    roots = set(corpora.raw_corpora().values()) | set(trust.registry())
     out = set()
     for r in roots:
         if not r.is_dir():
@@ -195,7 +195,7 @@ def caches():
 
 
 def _manifests():
-    roots = set(corpora._raw_corpora().values()) | set(trust.registry())
+    roots = set(corpora.raw_corpora().values()) | set(trust.registry())
     out = []
     for r in roots:
         for name in (manifest.MANIFEST, manifest.OLD_MANIFEST):

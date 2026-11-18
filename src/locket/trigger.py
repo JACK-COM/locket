@@ -35,7 +35,9 @@ from pathlib import Path
 import hosts
 import fsio
 import adapters
-import memscan
+import corpora
+import corpus
+import trust
 
 TRIGGERS = "triggers.json"
 CAP = 12        # deliberately low: adding a row should mean arguing another one out
@@ -92,7 +94,7 @@ SCHEMA = {
 
 def rows_file(root):
     """The rows file for a store: the manifest's `triggers`, else `triggers.json`."""
-    name = memscan._read_manifest(root).get("triggers")
+    name = trust.read_manifest(root).get("triggers")
     p = Path(name).expanduser() if isinstance(name, str) and name else Path(TRIGGERS)
     return p if p.is_absolute() else Path(root) / p
 
@@ -101,7 +103,7 @@ def stores_for(cwd, host=None):
     """The stores whose rows can fire here: the host's, then the one the directory is in."""
     host = hosts.claude() if host is None else host
     out = [host] if Path(host).is_dir() else []
-    here = memscan.corpus_here(cwd)
+    here = corpora.corpus_here(cwd)
     if here is not None and Path(here) not in [Path(h) for h in out]:
         out.append(Path(here))
     return out
@@ -109,7 +111,7 @@ def stores_for(cwd, host=None):
 
 def load(path):
     """The rows file as a dict; raises OSError or ValueError on an unreadable one."""
-    data = json.loads(memscan.read_safe(path))     # a plain file under the size cap, never a FIFO
+    data = json.loads(fsio.read_safe(path))     # a plain file under the size cap, never a FIFO
     if not isinstance(data, dict):
         raise ValueError("top level is not an object")
     return data
@@ -127,20 +129,20 @@ MAX_WINDOWS = 16        # 1 MB of a call read, at most
 
 
 def _search(pattern, text, flags=0, unread=True):
-    """`re.search` over `text`, never over more than memscan.MAX_SCAN at once: a long
+    """`re.search` over `text`, never over more than fsio.MAX_SCAN at once: a long
     call is read in overlapping windows, so padding cannot push the matching part out
     of view. Past MAX_WINDOWS the rest is unread and answers `unread`: True for a
     row's content, so an oversized call fires the row, False for its escape hatch,
     so padding never stands in for the escape."""
-    if len(text) <= memscan.MAX_SCAN:
+    if len(text) <= fsio.MAX_SCAN:
         return re.search(pattern, text, flags) is not None
     rx = re.compile(pattern, flags)
-    step = memscan.MAX_SCAN - OVERLAP
+    step = fsio.MAX_SCAN - OVERLAP
     for i in range(MAX_WINDOWS):
         start = i * step
         if start >= len(text):
             return False
-        end = min(start + memscan.MAX_SCAN, len(text))
+        end = min(start + fsio.MAX_SCAN, len(text))
         # pos/endpos keep `^`, `\b` and lookbehind judged against the whole text; a match
         # ending at an inner window's edge may owe that to the edge (`$`, a lookahead), so
         # it is set aside: the next window, OVERLAP back, sees it with what follows it
@@ -163,7 +165,7 @@ def _transcript_has(path, pattern):
             fh.seek(0, os.SEEK_END)               # load or answer sits; never the whole log
             fh.seek(max(0, fh.tell() - TRANSCRIPT_TAIL))
             tail = fh.read().decode("utf-8", errors="replace")
-        return any(rx.search(line[:memscan.MAX_SCAN]) for line in tail.splitlines())
+        return any(rx.search(line[:fsio.MAX_SCAN]) for line in tail.splitlines())
     except (OSError, re.error, TypeError):     # TypeError: a row's pattern that is no string
         return False
 
@@ -223,7 +225,7 @@ def _owner_missing(root, owner):
         return None
     import csv
     try:
-        with memscan.open_safe(path, newline="") as fh:
+        with fsio.open_safe(path, newline="") as fh:
             rows = csv.reader(fh)
             next(rows, None)                # a header naming the label column is not a row carrying it
             if any(label in row for row in rows):
@@ -244,7 +246,7 @@ def _cap(data):
 def _show(path):
     home = str(Path.home())
     s = str(path)
-    return memscan.relay("~" + s[len(home):] if s.startswith(home + os.sep) else s, 300)
+    return fsio.relay("~" + s[len(home):] if s.startswith(home + os.sep) else s, 300)
 
 
 def fire(payload, host=None):
@@ -283,18 +285,18 @@ def fire(payload, host=None):
                     continue
             except (re.error, TypeError):
                 continue    # a malformed row disables itself, never the rest of the file
-            line = (f"[{memscan.relay(row.get('id', 'trigger'), 60)}] "
-                    f"{memscan.relay(row['question'], 2000, lines=True)}")
+            line = (f"[{fsio.relay(row.get('id', 'trigger'), 60)}] "
+                    f"{fsio.relay(row['question'], 2000, lines=True)}")
             if row.get("owner"):
                 opath, label = _owner(root, row["owner"])
                 line += f"\n  -> {_show(opath)}" + (f"#{label}" if label else "")
             if row.get("pointer"):
-                line += f"\n  -> {memscan.relay(row['pointer'], 300)}"
+                line += f"\n  -> {fsio.relay(row['pointer'], 300)}"
             parts.append(line)
             block |= bool(row.get("block")) and event != "UserPromptSubmit"
         if len(rows) > cap:
             parts.append(f"[over-cap] {_show(path)} holds {len(rows)} rows and runs {cap}; these are not "
-                         f"running: {memscan.relay(', '.join(str(r.get('id', '?')) for r in rows[cap:]), 400)}. Argue one out or "
+                         f"running: {fsio.relay(', '.join(str(r.get('id', '?')) for r in rows[cap:]), 400)}. Argue one out or "
                          f"raise `cap` deliberately.")
     return "\n".join(parts), block
 
@@ -320,7 +322,7 @@ def hook(stdin=None, host=None):
 def findings(root):
     """Every problem in a store's rows file, as lines; [] when clean or absent."""
     path = rows_file(root)
-    named = memscan._read_manifest(root).get("triggers")
+    named = trust.read_manifest(root).get("triggers")
     if not path.is_file():
         return [f"{_show(path)}: named by the manifest but missing"] if named else []
     try:
@@ -355,10 +357,10 @@ def findings(root):
 def check(argv):
     """`locket trigger check [corpus]`: lint the rows files that can fire from here, or one store's."""
     if argv:
-        root = memscan.resolve(argv[0])
+        root = corpus.resolve(argv[0])
         if root is None:
             return 1
-        if not memscan.trusted(root):
+        if not trust.trusted(root):
             print(f"{root} is not trusted, so its rows file is not read; a person trusts it with  "
                   f"locket trust {root}", file=sys.stderr)
             return 1

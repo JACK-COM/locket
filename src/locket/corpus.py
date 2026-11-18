@@ -73,10 +73,10 @@ def md_files(root):
     against a corpus it is not a member of, so forks inside it are invisible while
     the nudge still fires on it. One walker, both ends.
     """
-    return sorted(p for r in corpora.roots_of(root) for p in _own_md(r))
+    return sorted(p for r in corpora.roots_of(root) for p in own_md(r))
 
 
-def _own_md(root, pattern="*.md", honor_excluded_files=True):
+def own_md(root, pattern="*.md", honor_excluded_files=True):
     """The markdown physically under one store, by that store's own settings.
     `pattern` walks another file type the same way (the ledger sweep takes
     `*.csv`), and a sweep that must see a file the manifest hides from claims
@@ -111,7 +111,7 @@ def _corpus_dirs(root):
     root = Path(root)
     s = corpora.settings(root)
     skip, mem = s["excluded_dirs"], s["members"]
-    listed = {r for r in corpora._raw_corpora().values() if r != root and root in r.parents}
+    listed = {r for r in corpora.raw_corpora().values() if r != root and root in r.parents}
 
     def entered(name):
         return name not in skip and not name.startswith(".")
@@ -193,7 +193,7 @@ def skipped_files(root):
 def _own_csv_sources_unchecked(root):
     """The declared CSV paths, links included, so `skipped_files` can name the ones
     `_own_csv_sources` drops."""
-    entries = trust._read_manifest(root).get("sources")
+    entries = trust.read_manifest(root).get("sources")
     out = []
     for e in entries if isinstance(entries, list) else []:
         if isinstance(e, dict) and isinstance(e.get("path"), str):
@@ -211,7 +211,7 @@ def _walk_files(root, pattern="*.md"):
     for d, names in _corpus_dirs(root):
         for n in names:
             p = d / n
-            if not (fnmatch.fnmatch(n, pattern) and fsio._regular(p)):
+            if not (fnmatch.fnmatch(n, pattern) and fsio.regular(p)):
                 continue
             count += 1
             try:
@@ -248,7 +248,7 @@ def csv_sources(root):
 def _own_csv_sources(root):
     """The CSVs one physical store's manifest registers. A relative `path`
     resolves against that store's root."""
-    entries = trust._read_manifest(root).get("sources")
+    entries = trust.read_manifest(root).get("sources")
     if not isinstance(entries, list):
         m = Path(root) / manifest.LEGACY_MANIFEST
         if not m.is_file() or not trust.trusted(root):
@@ -434,7 +434,7 @@ class ClaimCache:
         live = {k: v for k, v in self.entries.items() if os.path.exists(k.split("\0", 1)[0])}
         try:
             ready_cache_dir(self.root)
-            fsio._replace_atomic(self.path, json.dumps({"version": SPLITTER, "files": live}),
+            fsio.replace_atomic(self.path, json.dumps({"version": SPLITTER, "files": live}),
                                  ".claims.json.")
             self.entries, self.dirty = live, False
         except (OSError, RuntimeError):
@@ -553,7 +553,7 @@ def _own_archive_md(root):
             found = []
             for dirpath, dirnames, filenames in os.walk(a):     # never through a linked directory
                 found += [Path(dirpath) / n for n in filenames
-                          if n.endswith(".md") and fsio._regular(Path(dirpath) / n)]
+                          if n.endswith(".md") and fsio.regular(Path(dirpath) / n)]
                 if len(found) > fsio.MAX_STORE_FILES:
                     health.health_error("walk", "bound", OSError(f"{a}: archive past {fsio.MAX_STORE_FILES} files"))
                     break

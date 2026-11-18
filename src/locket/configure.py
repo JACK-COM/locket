@@ -52,14 +52,14 @@ PIECE = "locket"
 LEGACY = None           # Locket 0.10's file; resolved on use, so an unset HOME cannot break an import
 
 
-def _legacy_path():
+def legacy_path():
     return LEGACY or Path.home() / ".locket" / "config.json"
 
 
-def _legacy():
+def legacy_settings():
     """The usable embed settings of Locket 0.10's file while it remains, else None."""
     try:
-        data = json.loads(_legacy_path().read_text(encoding="utf-8"))
+        data = json.loads(legacy_path().read_text(encoding="utf-8"))
     except (OSError, ValueError, RuntimeError):
         return None
     e = data.get("embed") if isinstance(data, dict) else None
@@ -67,11 +67,11 @@ def _legacy():
         if isinstance(e, dict) else None
 
 
-def _layers(data):
+def layers(data):
     """Locket's view of the embed settings in `data`, highest first: its own section, the
     top level, then an unmigrated ~/.locket/config.json."""
     out = _settings.layers(PIECE, "embed", data)
-    legacy = _legacy()
+    legacy = legacy_settings()
     return out + [("~/.locket/config.json", legacy)] if legacy else out
 
 
@@ -79,7 +79,7 @@ def apply():
     """Put Locket's embed settings into the embedder, under the environment. Every module
     that ranks calls this once at import; it is cheap and changes nothing without a file."""
     try:
-        return _embed.apply_config(_layers(_settings.load(check=False)[0]))
+        return _embed.apply_config(layers(_settings.load(check=False)[0]))
     except Exception:                       # nothing in a settings file may stop a hook
         return _embed.apply_config(None)
 
@@ -88,10 +88,10 @@ def migrate():
     """Move ~/.locket/config.json's settings into the shared file's top level, where a key
     already set keeps its value, and rename the old file, both under the shared file's lock.
     Leaves everything in place when either file cannot be read. Returns a line, or None."""
-    old = _legacy_path()
+    old = legacy_path()
     if not old.exists():
         return None
-    legacy = _legacy()
+    legacy = legacy_settings()
     if legacy is None:
         return f"note: {old} has no readable embed section; left in place"
     with _settings.lock():
@@ -139,16 +139,17 @@ def _ollama_check(model):
 def _index_state():
     """[(store, path, state)] for every store with markdown, state being "current", "absent"
     or "built with <tag>". Reads each index's tag only: no embedder is probed or started."""
+    import corpora
+    import corpus
     import memfind
-    import memscan
     now = {_embed.tag("ollama"), _embed.tag("onnx")}
     out = []
-    for name, root in sorted(memscan.all_corpora().items()):
-        if not memscan.md_files(root):
+    for name, root in sorted(corpora.all_corpora().items()):
+        if not corpus.md_files(root):
             continue
         meta = memfind.cache_paths(root)[0]
         try:
-            model = memfind._read_meta(meta).get("model")
+            model = memfind.read_meta(meta).get("model")
         except (OSError, ValueError, AttributeError):   # unreadable, not JSON, or not an object
             model = None
         model = model if isinstance(model, str) else None
@@ -164,7 +165,7 @@ def show():
         print(f"  problem: {f}")
     print("\nembedder, as Locket uses it   (source: env, locket's own section, global, or default)")
     resolved = apply()
-    in_file = {k for _, layer in _layers(data) for k in layer}
+    in_file = {k for _, layer in layers(data) for k in layer}
     for key, (value, src) in resolved.items():
         shown = ("on" if value else "off") if key == "autostart" else value
         note = "  <- overrides the file" if src.startswith("env") and key in in_file else ""
@@ -220,8 +221,8 @@ def _set_embed(args):
         return 2
     if "ollama_host" in changes and not args.dry_run and not _loopback(changes["ollama_host"]):
         # every text Locket embeds goes to this host, memory included: a person decides that
-        import memscan
-        if not memscan.person_confirms(
+        import trust
+        if not trust.person_confirms(
                 f"Send every text Locket embeds, your memory files included, to {changes['ollama_host']}?",
                 ["Only a machine you control should receive it; an agent cannot set this for you."],
                 "send it there"):
@@ -233,7 +234,7 @@ def _set_embed(args):
         # ask ollama before taking the lock, against the host the new settings would use
         new = _settings.edit(_settings.load(check=False)[0], "embed", changes, clearing, args.reset,
                              None if args.shared else PIECE)
-        view = [("global", new.get("embed"))] if args.shared else _layers(new)
+        view = [("global", new.get("embed"))] if args.shared else layers(new)
         with _embed.settings(**{n: getattr(_embed, n) for n in ("MODEL", "OLLAMA", "AUTOSTART", "VENV")}):
             _embed.apply_config(view)
             ok, msg = _ollama_check(changes["model"])
@@ -301,7 +302,7 @@ def _wrap(text):
     return textwrap.fill(text, 78)
 
 
-def _parser():
+def parser():
     fmt = dict(formatter_class=argparse.RawDescriptionHelpFormatter)
     p = argparse.ArgumentParser(
         prog="locket configure", **fmt,
@@ -392,7 +393,7 @@ def _parser():
 
 
 def main(argv):
-    args = _parser().parse_args(argv)
+    args = parser().parse_args(argv)
     if args.section == "schema":
         print(json.dumps(_settings.schema(), indent=2))
         return 0

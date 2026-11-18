@@ -103,7 +103,7 @@ def check_stores(m, row):
 def check_trust(m, row):
     """Registry rows unpinned, store files never read, manifests acting as no store, and rows whose manifest is gone."""
     # A host store or a project memory is a store by convention and needs no manifest.
-    conventional = set(corpora._raw_corpora().values())
+    conventional = set(corpora.raw_corpora().values())
     unpinned = [r for r in trust.registry() if str(r) not in trust.registry_pins()]
     if unpinned:
         row("warn", "trust", f"{len(unpinned)} stores registered before 0.12 act as no store until pinned: "
@@ -141,21 +141,19 @@ def check_trust(m, row):
 def check_config(m, row):
     """The settings file: readable, current, and not overridden by the environment unawares."""
     import configure
-    import configure
-    import _embed
     cfg_data, cfg_problems = _settings.load()
     cfg_path = _settings.path()
-    legacy = configure._legacy_path()
+    legacy = configure.legacy_path()
     if _settings.unreadable(cfg_problems):
         row("fail", "config", cfg_problems[0][:160], f"fix {cfg_path}, or `locket configure embedder --reset`")
     elif cfg_problems:
         row("warn", "config", "; ".join(cfg_problems)[:160], f"fix {cfg_path}; each bad key falls to its default")
     elif legacy.exists():
-        row("warn", "config", f"{legacy} is " + ("still read" if configure._legacy() is not None else
+        row("warn", "config", f"{legacy} is " + ("still read" if configure.legacy_settings() is not None else
             "unreadable, left in place") + f"; settings now live in {cfg_path}", "locket migrate  (moves it)")
     else:
         resolved = configure.apply()
-        in_file = {k for _, layer in configure._layers(cfg_data) for k in layer}
+        in_file = {k for _, layer in configure.layers(cfg_data) for k in layer}
         overridden = [f"{k} by {src[4:]}" for k, (_, src) in resolved.items()
                       if src.startswith("env") and k in in_file]
         detail = f"{cfg_path}" if cfg_path.exists() else "no file; every setting is its default"

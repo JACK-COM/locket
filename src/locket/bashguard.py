@@ -74,7 +74,7 @@ def ledger_bash_decision(command, cwd):
     # every target is checked before any warns: an opaque write earlier in the command
     # must never stand in for a readable, violating one later
     for path, (schema, glob) in targets.items():
-        header = ledger._ledger_header(path)
+        header = ledger.ledger_header(path)
         findings = []
         for body in bodies[path]:
             if header is None:

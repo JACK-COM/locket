@@ -1087,10 +1087,10 @@ def _selftest_inner():
         (kid / ms.MANIFEST).write_text(json.dumps({"belongs_to": "-Users-x-devdocs"})); ms.settings.cache_clear()
         assert ms.parent_of(kid) == proj, "a belongs_to written by slug still joins the named store"
         (proj / ms.MANIFEST).write_text(json.dumps({"name": "council"})); ms.settings.cache_clear()
-        assert ms._raw_corpora().get("council") != proj and "-Users-x-devdocs" in ms._raw_corpora(), \
+        assert ms.raw_corpora().get("council") != proj and "-Users-x-devdocs" in ms.raw_corpora(), \
             "a project name never takes a host key"
         (proj / ms.MANIFEST).write_bytes(b'{"name": "\xff"}'); ms.settings.cache_clear()
-        assert ms._read_manifest(proj) == {} and "-Users-x-devdocs" in ms._raw_corpora(), \
+        assert ms.read_manifest(proj) == {} and "-Users-x-devdocs" in ms.raw_corpora(), \
             "a manifest that is not UTF-8 degrades instead of raising"
     finally:
         paths.PATHS.host_stores["council"] = real_claude
@@ -1108,14 +1108,14 @@ def _selftest_inner():
         f = store / pattern.format("Brain")
         assert f.read_text() == ",".join(ms.LEDGER_SCHEMAS[glob]["columns"]) + "\n", f.name
         assert not ms.check_ledger_text(ms.ledger_schema_for(f)[0], f.read_text()), f"a fresh {f.name} fails its schema"
-    srcs = ms._read_manifest(store)["sources"]
+    srcs = ms.read_manifest(store)["sources"]
     assert sorted(e["path"] for e in srcs) == ["CLAIMS-Brain.csv", "RULINGS-Brain.csv"], srcs
-    assert ms._read_manifest(store)["excluded_dirs"] == ["old"], "the manifest's other keys are kept"
+    assert ms.read_manifest(store)["excluded_dirs"] == ["old"], "the manifest's other keys are kept"
     (store / "RULINGS-Brain.csv").write_text("Ruling,Category,Area,Date\nKeep it.,x,y,2026-09-29\n")
     with contextlib.redirect_stdout(io.StringIO()):
         assert ms.scaffold_ledgers(store, "Brain") == 0
     assert "Keep it." in (store / "RULINGS-Brain.csv").read_text(), "an existing ledger is never touched"
-    assert len(ms._read_manifest(store)["sources"]) == 2, "a source is never listed twice"
+    assert len(ms.read_manifest(store)["sources"]) == 2, "a source is never listed twice"
     assert ms.session_ledger(store).name == "HISTORY-Brain-Sessions.csv"
     with contextlib.redirect_stderr(io.StringIO()):
         assert ms.scaffold_ledgers(store, "a/b") == 1 and ms.scaffold_ledgers(store, "*") == 1
@@ -1130,7 +1130,7 @@ def _selftest_inner():
     with contextlib.redirect_stdout(io.StringIO()):
         assert ms.scaffold_ledgers(store, "Brain") == 0
     assert not (store / "RULINGS-Brain.csv").exists(), "a second RULINGS ledger split the store's rows"
-    assert "RULINGS-Old.csv" in {e["path"] for e in ms._read_manifest(store)["sources"]}
+    assert "RULINGS-Old.csv" in {e["path"] for e in ms.read_manifest(store)["sources"]}
     for pattern, _g, _ in ms.LEDGER_FILES:
         for f in store.glob(_g):
             f.unlink()
@@ -1296,10 +1296,10 @@ def _selftest_inner():
         named = (d / "notes-2").resolve(); named.mkdir()
         with contextlib.redirect_stdout(io.StringIO()):
             assert ms.cmd_init(named, index=False, name="field-notes") == 0
-        assert ms._read_manifest(named) == {"name": "field-notes"} and ms.all_corpora().get("field-notes") == named
+        assert ms.read_manifest(named) == {"name": "field-notes"} and ms.all_corpora().get("field-notes") == named
         with contextlib.redirect_stdout(io.StringIO()):
             assert ms.cmd_init(vault, index=False, name="vault-renamed") == 0
-        assert ms._read_manifest(vault)["name"] == "vault-renamed", "--name on a kept manifest renames it"
+        assert ms.read_manifest(vault)["name"] == "vault-renamed", "--name on a kept manifest renames it"
         clash = (d / "clash").resolve(); clash.mkdir()
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
@@ -1389,7 +1389,7 @@ def _selftest_inner():
         with contextlib.redirect_stdout(buf):
             assert ms.cmd_init(kid, index=False, parent="par") == 0, buf.getvalue()
         ms.settings.cache_clear()
-        assert ms._read_manifest(kid)["belongs_to"] == "par" and ms._read_manifest(kid)["name"] == "kid", \
+        assert ms.read_manifest(kid)["belongs_to"] == "par" and ms.read_manifest(kid)["name"] == "kid", \
             "init --parent adds belongs_to and keeps the rest of the manifest"
         assert "kid" not in ms.all_corpora() and ms.all_corpora()["par"] == par, \
             "a joined store is listed through its parent alone"
@@ -1461,7 +1461,7 @@ def _selftest_inner():
         assert "--name <label>" in err.getvalue(), err.getvalue()
         with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
             assert ms.cmd_init(am, index=False, parent="par", name="auto-memory") == 0
-        assert ms._read_manifest(am) == {"name": "auto-memory", "belongs_to": "par"}, ms._read_manifest(am)
+        assert ms.read_manifest(am) == {"name": "auto-memory", "belongs_to": "par"}, ms.read_manifest(am)
         assert ms.corpus_key(par, am / "a.md") == "auto-memory/a.md"
         assert ms.forget(am)
         assert ms.forget(out)

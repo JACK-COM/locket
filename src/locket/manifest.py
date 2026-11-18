@@ -41,7 +41,7 @@ def has_manifest(root):
     return manifest_file(root).is_file()
 
 
-def _manifest_data(root):
+def manifest_data(root):
     """The manifest file's own contents, trusted or not: for `init` editing a
     file it is about to rewrite, never for acting on one."""
     m = manifest_file(root)
@@ -176,7 +176,7 @@ def validate_manifest(root):
     return out
 
 
-def _inside(rel):
+def inside(rel):
     """Whether a manifest's relative path stays inside its store: not absolute, no
     `..`. A member `/` walked the whole disk inside the write hook."""
     p = PurePosixPath(str(rel).replace("\\", "/"))
@@ -260,4 +260,4 @@ LEDGER_SCHEMAS = {
 }
 
 
-_SCHEMA_KEYS = ("columns", "required", "caps", "enum", "pattern")
+SCHEMA_KEYS = ("columns", "required", "caps", "enum", "pattern")

@@ -26,7 +26,7 @@ def migrate(root):
     old = root / manifest.OLD_MANIFEST
     if not old.is_file():
         return "none"
-    repin = trust._granted(root) and any(fsio._same(root, r) for r in trust.registry())
+    repin = trust.granted(root) and any(fsio.same(root, r) for r in trust.registry())
     old.rename(root / manifest.MANIFEST)
     if repin:
         trust.register(root)
@@ -53,7 +53,7 @@ def _stores_under(d):
     and registry) whose parents include `d`, plus the first hand-written manifest
     found below it. Sorted, host stores first, so the message names a real one."""
     d = Path(d)
-    found = sorted({r for r in corpora._raw_corpora().values() if r != d and d in r.parents})
+    found = sorted({r for r in corpora.raw_corpora().values() if r != d and d in r.parents})
     if found:
         return found
     hit = next((m.parent for name in (manifest.MANIFEST, manifest.OLD_MANIFEST)
@@ -95,8 +95,8 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
             print(f"{ledgers!r} cannot name a ledger: it goes into file names", file=sys.stderr)
             return 1
     elif ledgers is not None:           # the store's own name, made safe for a file name
-        ledgers = re.sub(r"[^\w.-]+", "-", name or corpora._label(d)).strip("-.") or "notes"
-    inside = corpora._phys_root_of(d)
+        ledgers = re.sub(r"[^\w.-]+", "-", name or corpora.store_label(d)).strip("-.") or "notes"
+    inside = corpora.phys_root_of(d)
     if inside is not None and inside != d:
         print(f"{d} is inside the corpus {inside} already; nothing to do", file=sys.stderr)
         return 1
@@ -124,7 +124,7 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
         if d in set(paths.PATHS.host_stores.values()):
             print(f"{d} is a host store and cannot belong to another corpus", file=sys.stderr)
             return 1
-        raw = corpora._raw_corpora()
+        raw = corpora.raw_corpora()
         target = raw.get(parent)
         if target is None:
             print(f"no corpus is named {parent!r}; `corpora` lists the names", file=sys.stderr)
@@ -132,20 +132,20 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
         if target == d:
             print(f"{d} cannot belong to itself", file=sys.stderr)
             return 1
-        if d in target.parents or corpora._walked_by(target, d):
+        if d in target.parents or corpora.walked_by(target, d):
             print(f"{d} and {target} nest on disk inside {target.name}'s walk; a nested "
                   f"directory there is a `members` entry, not a joined store", file=sys.stderr)
             return 1
-        label = name or corpora._label(d)
+        label = name or corpora.store_label(d)
         if "/" in label or label in (".", ".."):
             print(f"{label!r} cannot be a label: it is prefixed to paths", file=sys.stderr)
             return 1
-        if label == corpora._label(target) or (target / label).is_dir():
+        if label == corpora.store_label(target) or (target / label).is_dir():
             print(f"{d}'s label {label!r} collides with a directory or the name of {target}; "
                   f"label the joining store: locket init {d} --parent {parent} --name <label>",
                   file=sys.stderr)
             return 1
-        man = dict(manifest._manifest_data(d))
+        man = dict(manifest.manifest_data(d))
         if name:
             man["name"] = name
         man["belongs_to"] = parent
@@ -154,7 +154,7 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
         if not trust.grant_trust(d, confirm):
             return 1
         corpora.settings.cache_clear()
-        if corpora.parent_of(d, corpora._raw_corpora()) != target:
+        if corpora.parent_of(d, corpora.raw_corpora()) != target:
             print(f"{d} did not resolve to {target} after the write; check for a cycle "
                   f"through {parent!r}", file=sys.stderr)
             return 1
@@ -190,7 +190,7 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
     # replaces the built-in and freezes it there, so a store would stop
     # receiving a changed default without anyone having chosen that.
     if name is None and not (m.is_file() or inside == d):
-        other = corpora._raw_corpora().get(d.name)
+        other = corpora.raw_corpora().get(d.name)
         if other is not None and other != d:
             print(f"the name {d.name!r} is taken by {other}; name this store:  "
                   f"locket init {d} --name <label>", file=sys.stderr)
@@ -199,7 +199,7 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
         if "/" in name or name in (".", "..") or not name.strip():
             print(f"{name!r} cannot be a name: it is prefixed to paths", file=sys.stderr)
             return 1
-        other = corpora._raw_corpora().get(name)
+        other = corpora.raw_corpora().get(name)
         if other is not None and other != d:
             print(f"the name {name!r} is taken by {other}; `corpora` lists the names", file=sys.stderr)
             return 1
@@ -207,7 +207,7 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
     if m.is_file():
         by_convention = d in set(paths.PATHS.host_stores.values()) or (
             d.name == "memory" and d.parent.parent == hosts.claude() / "projects")
-        man = manifest._manifest_data(d)
+        man = manifest.manifest_data(d)
         if name is not None and man.get("name") != name:
             trust.write_store_file(m, json.dumps({**man, "name": name}, indent=2) + "\n")
             print(f"manifest: {m} (kept, name {name!r})")
@@ -270,7 +270,7 @@ def scaffold_ledgers(d, name):
         print(f"{name!r} cannot name a ledger: it goes into file names", file=sys.stderr)
         return 1
     m = manifest.manifest_file(d)
-    man = dict(trust._read_manifest(d))
+    man = dict(trust.read_manifest(d))
     # ⚠ `_read_manifest` reads an unparseable file as {}, and writing that back
     # would erase every key the user had; refuse instead
     if not man and m.is_file() and fsio.read_or_empty(m).strip():

@@ -56,7 +56,7 @@ def _pid_alive(pid):
     return True
 
 
-def _utc(t=None):
+def utc(t=None):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() if t is None else t))
 
 
@@ -123,16 +123,16 @@ def _health_update(change, d=None):
                 if not _valid_record(rec):
                     raise ValueError("not a health record")
             except FileNotFoundError:
-                rec = {"since": _utc(), "verbs": {}}
+                rec = {"since": utc(), "verbs": {}}
             except Exception:
                 try:
                     os.replace(f, d / "health.json.corrupt")
-                    note = f"an unreadable record was set aside as health.json.corrupt at {_utc()}"
+                    note = f"an unreadable record was set aside as health.json.corrupt at {utc()}"
                 except OSError:
-                    note = f"an unreadable record was overwritten at {_utc()}"
-                rec = {"since": _utc(), "verbs": {}, "reset": note}
+                    note = f"an unreadable record was overwritten at {utc()}"
+                rec = {"since": utc(), "verbs": {}, "reset": note}
             change(rec)
-            fsio._replace_atomic(f, json.dumps(rec, indent=1, sort_keys=True), ".health-")
+            fsio.replace_atomic(f, json.dumps(rec, indent=1, sort_keys=True), ".health-")
         return True
     except Exception:
         return False
@@ -142,7 +142,7 @@ def _count(rec, verb, kind, detail):
     verb = verb if verb in HEALTH_VERBS else "?"     # one record per known verb: bounded
     v = rec["verbs"].setdefault(verb, {"killed": 0, "errors": 0})
     v[kind] = int(v.get(kind, 0)) + 1
-    v["last_killed" if kind == "killed" else "last_error"] = dict(detail, at=_utc())
+    v["last_killed" if kind == "killed" else "last_error"] = dict(detail, at=utc())
 
 
 def _marker_name(verb, pid, start_ns):
@@ -332,5 +332,5 @@ def health_report(d=None, fold=True, kinds=("killed", "errors")):
 def health_ack(d=None):
     """Zero the counters and restart `since`: the reading is seen. True when it landed."""
     def change(rec):
-        rec.clear(); rec.update({"since": _utc(), "verbs": {}})
+        rec.clear(); rec.update({"since": utc(), "verbs": {}})
     return _health_update(change, d)

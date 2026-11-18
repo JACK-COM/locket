@@ -16,7 +16,7 @@ import paths
 import trust
 
 
-def _raw_corpora():
+def raw_corpora():
     """Every physical store on the machine, joined or not: each host store that
     exists, one per Claude Code project, and every registered directory whose
     manifest is still there. A registered store is keyed by the `name` in its
@@ -27,15 +27,15 @@ def _raw_corpora():
     reg = [p for p in trust.registry() if manifest.has_manifest(p)]
     # a project's name yields to a host key and to a registered store's name, which
     # a `belongs_to` elsewhere may already point at
-    taken = set(paths.PATHS.host_stores) | {trust._read_manifest(p).get("name") for p in reg}
+    taken = set(paths.PATHS.host_stores) | {trust.read_manifest(p).get("name") for p in reg}
     for d in sorted((hosts.claude() / "projects").glob("*/memory")):
-        name = trust._read_manifest(d).get("name")
+        name = trust.read_manifest(d).get("name")
         ok = isinstance(name, str) and name and name not in taken and name not in out
         out[name if ok else d.parent.name] = d
     for p in reg:
         if p in out.values():
             continue
-        name = trust._read_manifest(p).get("name")
+        name = trust.read_manifest(p).get("name")
         key = name if isinstance(name, str) and name else p.name
         out[key if key not in out else str(p)] = p
     return out
@@ -45,7 +45,7 @@ def all_corpora():
     """Every corpus a name can address: the physical stores, less each one that
     `belongs_to` another. A joined store is reached through its parent's name
     and counted in the parent's files, so it is listed once, as the parent."""
-    raw = _raw_corpora()
+    raw = raw_corpora()
     return {k: v for k, v in raw.items() if parent_of(v, raw) is None}
 
 
@@ -67,24 +67,24 @@ def parent_of(root, raw=None):
     manifest must degrade. A store under its parent but outside the parent's
     members (a host home's own auto-memory under `projects/`) joins."""
     root = Path(root)
-    name = trust._read_manifest(root).get("belongs_to")
+    name = trust.read_manifest(root).get("belongs_to")
     if not isinstance(name, str) or not name:
         return None
-    raw = raw if raw is not None else _raw_corpora()
+    raw = raw if raw is not None else raw_corpora()
     target = _by_name(raw, name)
-    if target is None or target == root or root in target.parents or _walked_by(target, root):
+    if target is None or target == root or root in target.parents or walked_by(target, root):
         return None
     seen, cur = {root}, target                  # a cycle means nobody is the top
     while cur is not None:
         if cur in seen:
             return None
         seen.add(cur)
-        nxt = trust._read_manifest(cur).get("belongs_to")
+        nxt = trust.read_manifest(cur).get("belongs_to")
         cur = _by_name(raw, nxt) if isinstance(nxt, str) else None
     return target
 
 
-def _walked_by(outer, inner):
+def walked_by(outer, inner):
     """Whether store `outer`'s own walk reaches directory `inner`: it sits under
     `outer` on disk, inside a member directory and no excluded or dot-directory.
     Only such a nesting would score a file against two stores; one outside the
@@ -104,7 +104,7 @@ def top_of(root):
     its `belongs_to` chain. Every resolver returns this, so a write into a joined
     store, the cwd default and a name all land on the one corpus."""
     root = Path(root)
-    raw = _raw_corpora()
+    raw = raw_corpora()
     while True:
         up = parent_of(root, raw)
         if up is None:
@@ -114,7 +114,7 @@ def top_of(root):
 
 def children_of(root, raw=None):
     """Physical stores whose `belongs_to` resolves to `root`, sorted."""
-    raw = raw if raw is not None else _raw_corpora()
+    raw = raw if raw is not None else raw_corpora()
     root = Path(root)
     return sorted(r for r in set(raw.values()) if r != root and parent_of(r, raw) == root)
 
@@ -122,7 +122,7 @@ def children_of(root, raw=None):
 def roots_of(root):
     """Every physical directory composing the corpus `root`: itself, then each
     store that belongs to it, recursively. A store is one of these to itself."""
-    raw = _raw_corpora()
+    raw = raw_corpora()
     out, todo = [], [Path(root)]
     while todo:
         r = todo.pop(0)
@@ -133,10 +133,10 @@ def roots_of(root):
     return out
 
 
-def _label(root):
+def store_label(root):
     """What a joined store's files are prefixed with in every report and index
     key: the manifest's `name`, else the directory's basename."""
-    name = trust._read_manifest(root).get("name")
+    name = trust.read_manifest(root).get("name")
     return name if isinstance(name, str) and name else Path(root).name
 
 
@@ -154,7 +154,7 @@ def corpus_key(root, path, roots=None):
         pass
     for r in (roots_of(root) if roots is None else roots)[1:]:
         try:
-            return f"{_label(r)}/{path.relative_to(r)}"
+            return f"{store_label(r)}/{path.relative_to(r)}"
         except ValueError:
             continue
     return str(path)
@@ -186,7 +186,7 @@ def corpus_for(path):
         p = Path.cwd() / p
     if p.suffix.lower() != ".md":           # MEMORY.MD is MEMORY.md on a case-insensitive disk
         return None
-    root = _phys_root_of(p.parent)          # membership and exclusion are the physical store's
+    root = phys_root_of(p.parent)          # membership and exclusion are the physical store's
     if root is None:
         return None
     if not in_members(root, p):
@@ -211,7 +211,7 @@ def in_members(root, path):
     return len(rel) == 1 or rel[0] in mem
 
 
-def _phys_root_of(d):
+def phys_root_of(d):
     """The physical store that directory `d` is or sits inside, or None: a host
     store, a directory holding a manifest, or Claude Code's
     `~/.claude/projects/<slug>/memory`. Membership, exclusion and the walk are
@@ -236,7 +236,7 @@ def _root_of(d):
     """The corpus root that directory `d` is or sits inside, or None. One walker
     for the gate, the CLI default and the MCP, so they cannot disagree about
     what a corpus is; a store that `belongs_to` another resolves to that one."""
-    phys = _phys_root_of(d)
+    phys = phys_root_of(d)
     return None if phys is None else top_of(phys)
 
 
@@ -284,9 +284,9 @@ def _own_walk(root, m=None):
     """-> (members, excluded_dirs): what one store's own walk covers, from its own
     manifest alone. Never unioned across a join, so `parent_of` can ask it of a
     parent without recursing through `settings`, which unions name-sets upward."""
-    m = trust._read_manifest(root) if m is None else m
+    m = trust.read_manifest(root) if m is None else m
     mem = m.get("members")
-    members = ({str(x) for x in mem if isinstance(x, str) and manifest._inside(x)} if isinstance(mem, list)
+    members = ({str(x) for x in mem if isinstance(x, str) and manifest.inside(x)} if isinstance(mem, list)
                else hosts.members_of(root))
     val = m.get("excluded_dirs")
     excluded = {str(x) for x in val} if isinstance(val, list) else set(hosts.EXCLUDED_DIRS)
@@ -300,9 +300,9 @@ def _own_walk(root, m=None):
 def settings(root):
     """`_settings_for`, cached per store and per state of the trust registry, so a store
     trusted or untrusted in another process is seen without a restart."""
-    trust._trusted_ids()
-    pinned = root is not None and fsio._inode(root) in trust._TRUST_CACHE[next(iter(trust._TRUST_CACHE))][1]
-    return _settings_for(root, (next(iter(trust._TRUST_CACHE)), trust.config_digest(root) if pinned else None))
+    trust.trusted_ids()
+    pinned = root is not None and fsio.inode(root) in trust.TRUST_CACHE[next(iter(trust.TRUST_CACHE))][1]
+    return _settings_for(root, (next(iter(trust.TRUST_CACHE)), trust.config_digest(root) if pinned else None))
 
 
 def _clear_settings():
@@ -321,7 +321,7 @@ def _settings_for(root, _trust_key):
     The defaults are this apparatus's file names and are what a corpus without a
     manifest gets, which keeps the Claude Code install zero-config.
     """
-    m = trust._read_manifest(root)
+    m = trust.read_manifest(root)
     members, excluded = _own_walk(root, m)
     # A host store whose files are not this apparatus's: Hermes's MEMORY.md is
     # the whole memory, not an index over topic files, and Codex writes its

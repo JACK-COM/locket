@@ -19,7 +19,7 @@ def settings():
     try:
         moved = configure.migrate()
     except (OSError, TimeoutError) as e:
-        moved = f"warning: {configure._legacy_path()} not moved ({e}); Locket still reads it"
+        moved = f"warning: {configure.legacy_path()} not moved ({e}); Locket still reads it"
     if moved:
         print(moved)
 
@@ -86,7 +86,7 @@ def run(target=None):
     if not one:
         for step in MACHINE:
             step()
-    roots = [corpus.resolve(target)] if one else list(corpora._raw_corpora().values())   # joined stores too
+    roots = [corpus.resolve(target)] if one else list(corpora.raw_corpora().values())   # joined stores too
     seen, n = set(), 0
     for r in roots:
         if r is None or r in seen:

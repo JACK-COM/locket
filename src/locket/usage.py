@@ -283,7 +283,7 @@ def record(claude=None, hermes=None, full=False, ledger=None, quiet=False):
         except OSError:
             pass
     # bytes, so the text layer adds no newline translation to the csv module's \r\n
-    fsio._replace_atomic(ledger, buf.getvalue().encode("utf-8"), ".usage-")
+    fsio.replace_atomic(ledger, buf.getvalue().encode("utf-8"), ".usage-")
     if not quiet:
         for n in notes:
             print(n, file=sys.stderr)
