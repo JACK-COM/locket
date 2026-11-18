@@ -103,6 +103,7 @@ def _suite():
               "params": {"name": "locket_check_before_write",
                          "arguments": {"text": claim * 3, "path": str(link), "append": True}}})
     assert "not inside a memory store" not in r["result"]["content"][0]["text"], r
+    assert "facts.md" in r["result"]["content"][0]["text"], "the linked file's own claim is named"
     r = call({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
               "params": {"name": "locket_find", "arguments": {"statement": claim, "store": str(root)}}})
     assert not r["result"]["isError"] and "[" in r["result"]["content"][0]["text"], r

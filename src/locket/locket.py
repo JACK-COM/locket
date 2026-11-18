@@ -675,7 +675,7 @@ def cmd_status():
 
 # --- doctor -------------------------------------------------------------------
 
-# A paragraph long enough to clear the gate's 200-character floor, written into a
+# A paragraph long enough to clear the gate's floor (`gate.MIN_ADDED`), written into a
 # throwaway store under ~/.locket so the probe never reads or writes a user's memory.
 _PROBE = ("The doctor probe paragraph states one durable fact about a harbour: the tide "
           "gauge at the north pier is read at dawn and dusk, the readings are logged in "

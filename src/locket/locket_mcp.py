@@ -135,7 +135,8 @@ def t_across(args):
 def t_check_before_write(args):
     """The write-time hook, on request, through the hook's own gate: the registry and
     config refusals, a CSV's schema and source rows, the one-authority nudge and the 2e
-    question, over the text about to be written. Advisory; nothing here blocks."""
+    question, over the text about to be written. It cannot stop the write, so what the
+    hook would refuse comes back as advice saying the write should not land."""
     text = str(args.get("text") or "")
     path = str(args.get("path") or "")
     old = str(args.get("old_text") or "")

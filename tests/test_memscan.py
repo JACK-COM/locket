@@ -533,7 +533,7 @@ def _selftest_inner():
     # a dated measurement series is chronology, not repetition: the same sentence
     # carrying a later date and a different figure must be allowed to land, while
     # the undated twin of the same sentence must still fire.
-    # ⚠ Each reading must clear the 200-character floor in `hook_decision` on its
+    # ⚠ Each reading must clear the floor (`gate.MIN_ADDED`) in `hook_decision` on its
     # own, or both assertions below pass for the wrong reason: a short `added`
     # never reaches the scorer, so the carve-out would look correct untested.
     tail = ("bytes on this reading of the ledger growth series, measured against the "
@@ -1822,6 +1822,7 @@ class MemscanBehaviour(unittest.TestCase):
                 "import memfind\nprint('memscan' in sys.modules)\n")
         r = subprocess.run([sys.executable, "-c", prog], capture_output=True, text=True, timeout=60)
         self.assertEqual(r.stdout.strip().splitlines()[-1], "False", r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,7 +13,7 @@ import os
 import re
 import shlex
 from pathlib import Path, PurePosixPath
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 import claims
 import corpora
@@ -126,10 +126,10 @@ class Novel:
 
     def net(self):
         if not self._done:
-            self._done = True
             if self.added is not None:
                 net = corpus.subtract_archived(self.added, self._archived())
                 self._net = net if len(net) >= MIN_ADDED else None
+            self._done = True               # after the read, so a raise is never cached as None
         return self._net
 
 
@@ -197,7 +197,8 @@ def hook_decision(name, tool_input, text, prior, docs, archived=None,
 
     `docs` and `archived` are CALLABLES, invoked only after the cheap gates,
     because reading the corpus and the archive are the only expensive things the
-    hook does and it runs on every memory write. Composed as one function
+    hook does and it runs on every memory write; `archived` is unused where the
+    caller passes the write's `novel`, which `evaluate_write` always does. Composed as one function
     returning a decision rather than an exit code so a test can drive the
     whole branch, including the append case where `added_text` and
     `score_against` are each correct and the pair still fires.
@@ -267,7 +268,7 @@ def hook_decision(name, tool_input, text, prior, docs, archived=None,
     added = novel.net()
     if added is None:
         return history, blocks
-    corpus = docs()
+    by_file = docs()
     # The replaced span stops existing the moment the edit lands, so it must leave
     # the corpus before scoring or an in-place rewrite matches the sentences it
     # retires. `added_text` subtracts the anchor line by line, and a markdown
@@ -276,10 +277,10 @@ def hook_decision(name, tool_input, text, prior, docs, archived=None,
     # ⚠ `corpus()` stores STRIPPED bodies. Comparing a raw `old_string` against
     # them matches nothing and no-ops silently while looking like a working patch.
     old = claims.strip(str(tool_input.get("old_string") or "")).strip()
-    if old and name in corpus:
-        corpus = dict(corpus)
-        corpus[name] = corpus[name].replace(old, " ", 1)
-    ranked = [r for r in claims.score_against(added, corpus)[:3] if r[1] >= claims.FIRE_FLOOR]
+    if old and name in by_file:
+        by_file = dict(by_file)
+        by_file[name] = by_file[name].replace(old, " ", 1)
+    ranked = [r for r in claims.score_against(added, by_file)[:3] if r[1] >= claims.FIRE_FLOOR]
     if not ranked:
         return history, blocks
     lines = ([history, ""] if history else []) + [f"{lead} These files may already own the fact it carries:"]
@@ -456,7 +457,9 @@ def memfind_gate(payload, name, tool_input, text, prior, root, novel=None, auton
     front of it, cannot act on a nudge, and cannot report being blocked. `autonomous`
     defaults to CLAUDE_AUTONOMOUS; `novel` is the write's shared `Novel`.
     """
-    if os.environ.get("CLAUDE_AUTONOMOUS") == "1" if autonomous is None else autonomous:
+    if autonomous is None:
+        autonomous = os.environ.get("CLAUDE_AUTONOMOUS") == "1"
+    if autonomous:
         return None
     # INDEX_FILES is deliberately NOT exempt here. Its lexical exemption exists
     # because a pointer line is meant to restate its target; that says nothing
@@ -605,9 +608,9 @@ def is_registry(path):
 
 
 class Decision(NamedTuple):
-    message: object     # what the writer is told, or None
-    blocking: bool      # the write must not land
-    checked: str        # "refused", "ledger", "csv", "outside", "store", or "error"
+    message: Optional[str]  # what the writer is told, or None
+    blocking: bool          # the write must not land
+    checked: str            # "refused", "ledger", "csv", "outside", "store", or "error"
 
 
 def evaluate_write(path, tool_input, *, append=False, autonomous=False, payload=None):
@@ -619,7 +622,28 @@ def evaluate_write(path, tool_input, *, append=False, autonomous=False, payload=
     edit); with `append`, its `content` or `new_string` is an entry going on the end.
     `payload` is the host's, for its cwd and session. A check that raises lets the
     write through, recorded by `health_error`: a guardrail must never break a write."""
-    payload = payload or {}
+    try:
+        return _evaluate(path, tool_input, append, autonomous, payload or {})
+    except Exception as e:                  # a stage without its own handler: a NUL in a path
+        health.health_error("hook", "gate", e)
+        return Decision(None, False, "error")
+
+
+def _csv_decision(path, ti, append):
+    """A CSV write: the ledger schema, which may block, then a registered source's new
+    rows scored against the store, which warns."""
+    try:
+        msg, blocking = ledger.ledger_decision(path, ti)
+        if blocking:
+            return Decision(msg, True, "ledger")
+        msg = ledger.source_row_decision(path, ti, fsio.read_or_empty(path), append=append)[0]
+        return Decision(msg, False, "ledger" if ledger.ledger_schema_for(path)[0] is not None else "csv")
+    except Exception as e:
+        health.health_error("hook", "ledger", e)
+        return Decision(None, False, "error")
+
+
+def _evaluate(path, tool_input, append, autonomous, payload):
     real = os.path.realpath(_absolute(path, payload.get("cwd"))) if path else ""
     if real and real != path and (is_registry(real) or store_config(real) is not None
                                   or corpora.corpus_for(real) is not None):
@@ -634,21 +658,13 @@ def evaluate_write(path, tool_input, *, append=False, autonomous=False, payload=
         entry = ti.get("content") if ti.get("content") is not None else ti.get("new_string")
         ti = {"new_string": str(entry or "")}
     ti["file_path"] = path
-    if path.lower().endswith(".csv"):       # a ledger row: schema, decidable, may block
-        try:
-            msg, blocking = ledger.ledger_decision(path, ti)
-            if blocking:
-                return Decision(msg, True, "ledger")
-            msg = ledger.source_row_decision(path, ti, fsio.read_or_empty(path), append=append)[0]
-            return Decision(msg, False, "ledger" if ledger.ledger_schema_for(path)[0] is not None else "csv")
-        except Exception as e:
-            health.health_error("hook", "ledger", e)
-            return Decision(None, False, "error")
+    if path.lower().endswith(".csv"):
+        return _csv_decision(path, ti, append)
     root = corpora.corpus_for(path)
     if root is None:
         return Decision(None, False, "outside")
     text = str(ti.get("content") or ti.get("new_string") or "")
-    prior = fsio.read_or_empty(path)             # "" for a new file, an unreadable one or a refused one
+    prior = fsio.read_or_empty(path)        # "" for a new file, an unreadable one or a refused one
     if append and prior:                    # an append is a Write of prior + entry
         text = prior.rstrip("\n") + "\n" + text
     name = Path(path).name
@@ -665,15 +681,15 @@ def evaluate_write(path, tool_input, *, append=False, autonomous=False, payload=
     # The silent path is the paraphrase blind spot: lexical scoring found
     # nothing, which is also what it returns for a fact restated in new words.
     try:
-        gate = memfind_gate(payload, name, ti, text, prior, root, novel=novel, autonomous=autonomous)
+        question = memfind_gate(payload, name, ti, text, prior, root, novel=novel, autonomous=autonomous)
     except Exception as e:
         health.health_error("hook", "2e", e)
-        gate = None
+        question = None
     # A non-blocking nudge must still reach the model when the 2e gate blocks,
     # or the warning is discarded by the very write that gets refused. ⚠ It is
     # re-led on the way: exit 2 means the write did NOT land, and a warning
     # worded for the landed case would assert the opposite of what happened.
-    if gate:
+    if question:
         warn = msg.replace(ledger.LEAD_WARNING, ledger.LEAD_BLOCKING, 1) if msg else None
-        return Decision("\n\n".join(x for x in (warn, gate) if x), True, "store")
+        return Decision("\n\n".join(x for x in (warn, question) if x), True, "store")
     return Decision(msg, False, "store")
