@@ -683,6 +683,8 @@ def _phys_root_of(d):
     the physical store's; the corpus it belongs to is `top_of` it."""
     projects = CLAUDE / "projects"
     stores = set(HOST_STORES.values())
+    if len(str(d)) > PATH_MAX:              # no file lives there; walking it cost a stat per part
+        return None
     for parent in (d, *d.parents):
         if parent in stores:
             return parent
@@ -1022,18 +1024,33 @@ settings.cache_clear = _settings_for.cache_clear   # every caller's reset still 
 
 
 def unwrap(txt):
-    """`txt` with hard wraps inside a sentence joined by a space."""
-    lines = txt.split("\n")
-    out = []
-    for ln in lines:
-        prev = out[-1] if out else None
-        if (prev is not None and prev.strip() and not _ENDS.search(prev)
-                and not _NO_JOIN_FROM.match(prev)
+    """`txt` with hard wraps inside a sentence joined by a space. Linear: a joined
+    line is kept as its segments and joined once, and only its tail is tested for an
+    ending, because rebuilding and re-searching the whole line on every wrap made one
+    unpunctuated 200 KB file cost seconds inside the write hook."""
+    out = []                                # each line as its segments
+    for ln in txt.split("\n"):
+        cur = out[-1] if out else None
+        if (cur is not None and (len(cur) > 1 or cur[0].strip())
+                and not _ENDS.search(_tail(cur)) and not _NO_JOIN_FROM.match(cur[0])
                 and ln.strip() and not _LINE_MEANINGFUL.match(ln)):
-            out[-1] = prev.rstrip() + " " + ln.strip()
+            cur[-1] = cur[-1].rstrip()
+            cur.append(" " + ln.strip())
         else:
-            out.append(ln)
-    return "\n".join(out)
+            out.append([ln])
+    return "\n".join("".join(c) for c in out)
+
+
+def _tail(segments, width=256):
+    """The last `width` or more characters of a line held as segments: all `_ENDS`
+    needs, since an ending is a stop followed only by quotes and space."""
+    parts, n = [], 0
+    for seg in reversed(segments):
+        parts.append(seg)
+        n += len(seg)
+        if n >= width:
+            break
+    return "".join(reversed(parts))
 LINK = re.compile(r"\[\[([A-Za-z0-9_\-]+)\]\]")
 # an index line: "- [Title](target.md) — hook text"
 IDX_LINE = re.compile(r"^\s*[-*]\s*\[(?P<title>[^\]]+)\]\((?P<target>[a-z0-9_\-]+\.md)\)(?P<hook>.*)$")
@@ -1200,6 +1217,8 @@ def has_content(root, csv=True):
 
 
 MAX_FILE_BYTES = 8 * 1024 * 1024      # past the 5 MB a declared CSV is reported at
+MAX_SCAN = 64 * 1024                  # model-written text a pattern is run over, at most
+PATH_MAX = 4096                       # Linux's; longer names no file on any host we serve
 MAX_STORE_FILES = 4000
 MAX_STORE_BYTES = 64 * 1024 * 1024
 
@@ -5464,8 +5483,8 @@ def check_ledger_rows(schema, header, rows, first=2):
                 out.append(f"row {n}: {c} is {v!r}, allowed {shown}")
         for c, pat in (schema.get("pattern") or {}).items():
             v = val(c)
-            try:
-                ok = v is None or re.fullmatch(pat, v) is not None
+            try:                            # a value past MAX_SCAN is never handed to a pattern
+                ok = v is None or (len(v) <= MAX_SCAN and re.fullmatch(pat, v) is not None)
             except re.error:
                 ok = True
             if not ok:
@@ -5591,7 +5610,7 @@ def source_row_decision(path, tool_input, prior, append=False):
 
 
 _QUOTED = re.compile(r"""(?:echo|printf)\s+(?:-[a-zA-Z]+\s+)*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
-_CSV_REDIRECT = re.compile(r"(?:>>?|\btee\s+(?:-a\s+)?)\s*(?P<p>[^\s;&|]+\.csv)")
+_CSV_REDIRECT = re.compile(r"(?:>>?|\btee\s+(?:-a\s+)?)\s*(?P<p>[^\s;&|<>]+\.csv)")
 # a pipeline boundary: a pipe stays inside, because `printf ... | tee -a x.csv` is one write,
 # and so does a backslash-continued newline
 _PIPELINE_END = re.compile(r"\|\||&&|;|(?<!\\)\n")
@@ -5763,17 +5782,48 @@ MEMWRITE_ESCAPE = "MEMWRITE-OK:"
 # SOURCE of a cp is a read, and blocking that would break every
 # backup-before-rewrite command this discipline actually requires.
 BASH_WRITE = (
-    re.compile(r">>?\s*(?P<p>[^\s;&|]+\.md)"),
-    re.compile(r"\btee\b[^;&|]*?(?P<p>[^\s;&|]+\.md)"),
+    re.compile(r">>?\s*(?P<p>[^\s;&|<>]+\.md)"),
+    # the path starts a word (after a space, a quote or `=`): starting it mid-word made one
+    # 32 KB argument cost seconds of backtracking inside a single match attempt
+    re.compile(r"\btee\b[^;&|]*?(?<![^\s'\"=])(?P<p>[^\s;&|<>]+\.md)"),
     # `-i` in a flag cluster of its own (`-i`, `-Ei`, `-i.bak`, `-ibak`, `--in-place`), never
     # the `-i` inside `make-it-yours.md`, which read a `sed -n` as a write to `t-yours.md`
-    re.compile(r"\bg?sed\b[^;&|]*?(?<!\S)-(?:[nEsuzr]*i|-in-place)[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|]+\.md)"),
+    re.compile(r"\bg?sed\b[^;&|]*?(?<!\S)-(?:[nEsuzr]*i|-in-place)[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|<>]+\.md)"),
     # perl and ruby share sed's `-i` (`-pi`, `-i.bak`, `-0pi`); gawk spells it `-i inplace`
     # only argument-free flags before the `i`, as in _INPLACE: `-MList::Util` and `-CSDio` are not it
-    re.compile(r"\b(?:perl|ruby)\b[^;&|]*?(?<!\S)-[0-9lnpaWwsSTtUuXc]*i[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|]+\.md)"),
-    re.compile(r"\bg?awk\b[^;&|]*?(?<!\S)-i\s*inplace\b[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|]+\.md)"),
-    re.compile(r"\b(?:cp|mv|rsync)\b[^;&|]+?\s(?P<p>[^\s;&|]+\.md)\s*(?:$|[;&|])"),
+    re.compile(r"\b(?:perl|ruby)\b[^;&|]*?(?<!\S)-[0-9lnpaWwsSTtUuXc]*i[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|<>]+\.md)"),
+    re.compile(r"\bg?awk\b[^;&|]*?(?<!\S)-i\s*inplace\b[^;&|]*?(?<![^\s'\"])(?P<p>[^\s;&|<>]+\.md)"),
+    re.compile(r"\b(?:cp|mv|rsync)\b[^;&|]+?\s(?P<p>[^\s;&|<>]+\.md)\s*(?:$|[;&|])"),
 )
+# Where each pattern above may start: the command word, or None for a redirect. A
+# pattern is tried from its first start in a clause and nowhere after a miss there,
+# because a lazy span retried from every `sed -i` in one clause cost 9.5 s on 4 KB:
+# a match from a later start is also a match from the first, so one miss settles it.
+BASH_WRITE_STARTS = (None, re.compile(r"\btee\b"), re.compile(r"\bg?sed\b"),
+                     re.compile(r"\b(?:perl|ruby)\b"), re.compile(r"\bg?awk\b"),
+                     re.compile(r"\b(?:cp|mv|rsync)\b"))
+_CLAUSE = re.compile(r"[^;&|]+")
+
+
+def write_matches(pattern, start, command):
+    """`pattern.finditer(command)` in linear time: per clause, matched from the first
+    `start` word, then from the next one after each hit, never after a miss."""
+    if start is None:
+        yield from pattern.finditer(command)
+        return
+    for clause in _CLAUSE.finditer(command):
+        cur, end = clause.start(), clause.end()
+        while True:
+            s0 = start.search(command, cur, end)
+            if not s0:
+                break
+            m = pattern.match(command, s0.start(), end)
+            if not m:
+                break
+            yield m
+            cur = m.end()
+
+
 # Destination computed at run time, so it cannot be read off the command text.
 # Warn rather than block: a false block here costs more than a missed one.
 BASH_WRITE_OPAQUE = re.compile(
@@ -5879,25 +5929,41 @@ def _cd_targets(command, cwd, pos=None):
     target is not claimed as a corpus write. The scan runs over `_shell_code`: a
     `cd /elsewhere` inside a string, a comment or a heredoc body moved nothing, and
     reading it as a move let a real write into the cwd's corpus pass silently."""
-    here = cwd
+    times, dirs = _cd_timeline(command, cwd)
+    if pos is None:
+        here = dirs[-1]
+    else:
+        import bisect
+        here = dirs[bisect.bisect_right(times, pos - 1)]   # the last cd starting before pos
+    return [here] if here else []
+
+
+@lru_cache(maxsize=8)
+def _cd_timeline(command, cwd):
+    """(starts, dirs): `dirs[0]` is the cwd and `dirs[k]` the directory after the k-th
+    `cd`, which starts at `starts[k - 1]`. Built once per command, because resolving
+    each path by rescanning the whole command made a long one quadratic."""
+    here, times, dirs = cwd, [], [cwd]
     for m in _CD.finditer(_shell_code(command)):
-        if pos is not None and m.start() >= pos:
-            break
         if m.group(1) == "popd":
             here = None                          # the stack is not tracked
-            continue
-        d = command[m.start(2):m.end(2)].strip() if m.group(2) is not None else ""
-        d = d or None
-        if d is None or d == "~":
-            here = str(HOME)
-        elif any(c in d for c in "$`(") and not d.strip("'\"").startswith(("$HOME", "${HOME}")):
-            here = None
-        elif d == "-":
-            here = None                          # the previous directory; not tracked
         else:
-            d = _expand_home(d)
-            here = d if d.startswith("/") else (str(Path(here) / d) if here else None)
-    return [here] if here else []
+            d = command[m.start(2):m.end(2)].strip() if m.group(2) is not None else ""
+            d = d or None
+            if d is None or d == "~":
+                here = str(HOME)
+            elif any(c in d for c in "$`(") and not d.strip("'\"").startswith(("$HOME", "${HOME}")):
+                here = None
+            elif d == "-":
+                here = None                      # the previous directory; not tracked
+            else:
+                d = _expand_home(d)
+                here = d if d.startswith("/") else (str(Path(here) / d) if here else None)
+            if here and len(here) > PATH_MAX:
+                here = None                      # no such directory: `cd x; ` repeated, not a path
+        times.append(m.start())
+        dirs.append(here)
+    return times, dirs
 
 
 # An in-place flag read off the tokens, so a `;` inside the program text (`sed -i
@@ -5995,6 +6061,7 @@ _PY_WORD = re.compile(r"(?<![\w.-])python[\d.]*(?![\w.-])")
 _PY_HEREDOC = re.compile(r"""<<(-?)\s*(['"]?)(\w+)\2""")
 _PY_DASH_C = re.compile(r"""(?<![\w.-])python[\d.]*(?:\s+-[A-Za-z]+)*?\s+-c\s+(?:'([^']*)'|"((?:[^"\\]|\\.)*)")""")
 _HOLE = "\0"                                     # an f-string value that does not fold
+_FOLD_STEPS = 10_000                              # fold calls per program, the whole run
 _FOLD_CAP = 64                                   # candidate strings per expression
 
 # The program counts as read only when EVERY call in it is one of these or a known
@@ -6089,6 +6156,7 @@ class _PyWrites:
     its file name, and one with a hole in its directory is not."""
 
     def __init__(self, tree):
+        self.steps = 0                      # fold calls this run, against _FOLD_STEPS
         self.binds, self.unknown, self.aliases, self.defs = {}, set(), {}, set()
         self.targets, self.writes, self.decided, self.bases = [], False, True, []
         accepted = set()
@@ -6149,7 +6217,13 @@ class _PyWrites:
         return ".".join([root] + list(reversed(parts)))
 
     def fold(self, e, seen=()):
-        """Set of strings `e` can be, or None when it cannot be known."""
+        """Set of strings `e` can be, or None when it cannot be known. A name bound
+        to itself twice (`x1 = x0 + x0`) doubles the walk per line, so the run stops
+        at _FOLD_STEPS and the rest is unknown. No memo: a fold's answer depends on
+        `seen`, so one cached per node would answer for the wrong path."""
+        self.steps += 1
+        if self.steps > _FOLD_STEPS:
+            return None
         if isinstance(e, ast.Constant):
             return {e.value} if isinstance(e.value, str) else None
         if isinstance(e, ast.JoinedStr):
@@ -6376,8 +6450,8 @@ def bash_write_targets(command, cwd):
         return None
 
     blocking, opaque = [], []
-    for pat in BASH_WRITE:
-        for m in pat.finditer(command):
+    for pat, start in zip(BASH_WRITE, BASH_WRITE_STARTS):
+        for m in write_matches(pat, start, command):
             hit = resolve(m.group("p"), m.start("p"))
             if hit:
                 (blocking if hit[1] else opaque).append(hit[0])
@@ -7301,6 +7375,32 @@ REGISTRY_REFUSAL = ("This write edits Locket's trust registry, {reg}. Trust is a
                     "terminal: ask the user to run  locket trust <dir>  (or  locket untrust <dir>).")
 
 
+_PATHLIKE = re.compile(r"""[^\s'"<>;&|()]+\.(?:md|csv)\b""")
+
+
+def oversized_decision(command, cwd):
+    """(message, blocking) for a shell command too long to scan. Its parsers are
+    linear, but not run past MAX_SCAN, so padding cannot buy a slow hook; and since
+    a skipped scan must not read as a clean one, a command naming a store file
+    anywhere is treated as a write to it, never as undecided."""
+    if MEMWRITE_ESCAPE in command:
+        return None, False
+    autonomous = os.environ.get("CLAUDE_AUTONOMOUS") == "1"
+    for i, m in enumerate(_PATHLIKE.finditer(command)):
+        if i >= 500:
+            break
+        tok = m.group(0)
+        cands = [tok] if tok.startswith(("/", "~")) else [
+            str(Path(r) / tok) for r in _cd_targets(command, cwd, m.start())]
+        for c in cands:
+            c = str(Path(c).expanduser())
+            if corpus_for(c) is not None or ledger_schema_for(c)[0] is not None:
+                return (f"This command is {len(command)} characters, past the {MAX_SCAN} the guard "
+                        f"scans, and names {relay(c, 160)} in a memory store, so it is read as a write "
+                        f"to it. Split it, or add {MEMWRITE_ESCAPE} <reason> if the write is intended."), autonomous
+    return None, False
+
+
 def is_registry(path):
     """Whether `path` names the trust registry, by resolved path: a decidable
     question, so the gate on it may block."""
@@ -7398,6 +7498,13 @@ def _hook_entry(mode):
         if payload is None or payload["tool_name"] != "Bash":
             return 0
         command = str(payload["tool_input"].get("command", ""))
+        if len(command) > MAX_SCAN:
+            try:
+                msg, blocking = oversized_decision(command, payload.get("cwd"))
+            except Exception as e:
+                health_error("bashguard", "decision", e)
+                return 0
+            return emit(payload, msg, blocking, mode)
         if ".locket/corpora.json" in command or str(REGISTRY) in command:
             # a shell command naming the registry: whether it writes is not decidable
             # from the text, so this warns where the Write/Edit gate refuses

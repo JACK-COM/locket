@@ -114,9 +114,13 @@ def load(path):
 
 
 def _haystack(tool_input, fields):
+    """The text a row's patterns run over, cut at memscan.MAX_SCAN: cut, never skipped,
+    so padding a call past the cap cannot slip it past a row."""
     if fields:
-        return " ".join(str(tool_input.get(f, "")) for f in fields)
-    return " ".join(v for v in tool_input.values() if isinstance(v, str))
+        text = " ".join(str(tool_input.get(f, "")) for f in fields)
+    else:
+        text = " ".join(v for v in tool_input.values() if isinstance(v, str))
+    return text[:memscan.MAX_SCAN]
 
 
 def _transcript_has(path, pattern):
@@ -127,7 +131,7 @@ def _transcript_has(path, pattern):
     try:
         rx = re.compile(pattern)
         with open(path, encoding="utf-8", errors="replace") as fh:
-            return any(rx.search(line) for line in fh)
+            return any(rx.search(line[:memscan.MAX_SCAN]) for line in fh)
     except (OSError, re.error):
         return False
 
