@@ -246,7 +246,7 @@ def _owner_missing(root, owner):
         return None
     import csv
     try:
-        with open(path, newline="", encoding="utf-8", errors="replace") as fh:
+        with memscan.open_safe(path, newline="") as fh:
             rows = csv.reader(fh)
             next(rows, None)                # a header naming the label column is not a row carrying it
             if any(label in row for row in rows):
@@ -298,12 +298,13 @@ def fire(payload, host=None):
                     continue
             except (re.error, TypeError):
                 continue    # a malformed row disables itself, never the rest of the file
-            line = f"[{row.get('id', 'trigger')}] {row['question']}"
+            line = (f"[{memscan.relay(row.get('id', 'trigger'), 60)}] "
+                    f"{memscan.relay(row['question'], 2000, lines=True)}")
             if row.get("owner"):
                 path, label = _owner(root, row["owner"])
                 line += f"\n  -> {_show(path)}" + (f"#{label}" if label else "")
             if row.get("pointer"):
-                line += f"\n  -> {row['pointer']}"
+                line += f"\n  -> {memscan.relay(row['pointer'], 300)}"
             parts.append(line)
             block |= bool(row.get("block")) and event != "UserPromptSubmit"
         if len(rows) > cap:

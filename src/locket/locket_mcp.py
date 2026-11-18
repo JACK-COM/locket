@@ -149,10 +149,7 @@ def t_check_before_write(args):
         msg, _ = memscan.ledger_decision(str(p), ti)
         if msg:
             return msg.replace("the write is refused", "the write should not land")
-        try:
-            prior = p.read_text(errors="ignore")
-        except OSError:
-            prior = ""
+        prior = memscan.read_or_empty(p)     # never through a link or a FIFO, never past the cap
         msg, _ = memscan.source_row_decision(str(p), ti, prior, append=bool(args.get("append")))
         if msg:
             return msg.replace(memscan.LEAD_WARNING, "About to write:")
@@ -163,11 +160,8 @@ def t_check_before_write(args):
     root = memscan.corpus_for(p)
     if root is None:
         return (f"{p} is not inside a memory store this tool knows, so nothing to check. "
-                f"Call locket_corpora, or put a locket.json in the store's directory.")
-    try:
-        prior = p.read_text(errors="ignore")
-    except OSError:
-        prior = ""
+                f"Call locket_corpora; a folder becomes a store once a person runs  locket trust <folder>.")
+    prior = memscan.read_or_empty(p)
     # Three shapes, and the caller has to say which, because a filesystem connector
     # writes whole files and the hook cannot see the operation behind them:
     # `old_text` is an edit; `append` is an entry going on the end; otherwise `text`

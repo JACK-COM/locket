@@ -141,15 +141,62 @@ EXCLUDED_DIRS = {"archive", "in-flight", "harness-logs", "discovery-research", "
                  "backups", "backup"}   # a backup is a verbatim copy, so it forks by design
 
 
-def registry():
-    """Registered corpus paths, as `init` wrote them. [] where the file is absent
-    or unreadable, so enumeration degrades to the host stores rather than dies."""
+def _registry_data():
     try:
         data = json.loads(REGISTRY.read_text())
     except (OSError, json.JSONDecodeError, ValueError):
-        return []
-    rows = data.get("corpora") if isinstance(data, dict) else None
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def registry():
+    """Registered corpus paths, as `init` wrote them. [] where the file is absent
+    or unreadable, so enumeration degrades to the host stores rather than dies."""
+    rows = _registry_data().get("corpora")
     return [Path(x) for x in rows if isinstance(x, str)] if isinstance(rows, list) else []
+
+
+def registry_pins():
+    """{registered path: digest of its configuration when a person trusted it}. A row
+    with no pin predates pinning and is trusted as it stands until `migrate` pins it."""
+    pins = _registry_data().get("pins")
+    return {str(k): v for k, v in pins.items() if isinstance(v, str)} if isinstance(pins, dict) else {}
+
+
+_DIGESTS = {}
+
+
+def config_digest(d):
+    """sha256 over every file that makes a store act: its manifest, its legacy sources
+    file and its rows file, each named, absent ones included. Trust is pinned to it,
+    so a `git pull` that adds a block-all row or a source from elsewhere leaves the
+    store inert until a person trusts what it now says."""
+    d = Path(d)
+    m = _manifest_data(d)
+    rows = m.get("triggers") if isinstance(m.get("triggers"), str) and m.get("triggers") else "triggers.json"
+    rows = Path(rows).expanduser()
+    files = [manifest_file(d), d / LEGACY_MANIFEST, rows if rows.is_absolute() else d / rows]
+    sig = []
+    for f in files:
+        try:
+            st = os.lstat(f)
+            sig.append((str(f), st.st_ino, st.st_mtime_ns, st.st_size))
+        except OSError:
+            sig.append((str(f), None))
+    sig = tuple(sig)
+    hit = _DIGESTS.get(str(d))
+    if hit and hit[0] == sig:
+        return hit[1]
+    h = hashlib.sha256()
+    for f in files:
+        h.update(f.name.encode() + b"\0")
+        try:
+            with open_safe(f, binary=True) as fh:
+                h.update(fh.read())
+        except OSError:
+            h.update(b"\0absent\0")
+    _DIGESTS[str(d)] = (sig, h.hexdigest())
+    return h.hexdigest()
 
 
 def _inode(p):
@@ -175,10 +222,16 @@ def _trusted_ids():
         key = (str(REGISTRY), None, None)
     key += tuple(str(p) for p in HOST_STORES.values())
     if key not in _TRUST_CACHE:
-        ids = {_inode(p) for p in [*HOST_STORES.values(), *registry()]}
-        ids.discard(None)
+        hosts = {_inode(p) for p in HOST_STORES.values()}
+        hosts.discard(None)
+        pins = registry_pins()
+        rows = {}
+        for p in registry():
+            ident = _inode(p)
+            if ident is not None:
+                rows[ident] = pins.get(str(p))
         _TRUST_CACHE.clear()
-        _TRUST_CACHE[key] = ids
+        _TRUST_CACHE[key] = (hosts, rows)
     return _TRUST_CACHE[key]
 
 
@@ -197,9 +250,20 @@ def _granted(d):
     ident = _inode(d)
     if ident is None:
         return False
-    if ident in _trusted_ids():
+    hosts, rows = _trusted_ids()
+    if ident in hosts:
         return True
+    if ident in rows:
+        pin = rows[ident]
+        return pin is None or pin == config_digest(d)
     return d.name == "memory" and _inode(d.parent.parent) == _inode(CLAUDE / "projects")
+
+
+def changed_since_trust(d):
+    """Whether `d` is registered but its configuration no longer matches its pin."""
+    ident = _inode(d)
+    rows = _trusted_ids()[1]
+    return ident in rows and rows[ident] is not None and rows[ident] != config_digest(d)
 
 
 def registry_stale():
@@ -210,7 +274,7 @@ def registry_stale():
 _INVISIBLE = frozenset(("Cc", "Cf", "Co", "Cs", "Cn", "Zl", "Zp"))
 
 
-def relay(text, limit=200):
+def relay(text, limit=200, lines=False):
     """Text from a store, made safe to put in front of an agent or on a terminal:
     every control, format, private-use, unassigned and line-separator character
     becomes a space (a newline is how a planted label poses as a fresh instruction;
@@ -218,6 +282,8 @@ def relay(text, limit=200):
     characters hide text from the person reading it), runs collapse, and the result
     is cut to `limit` characters."""
     import unicodedata
+    if lines:                               # a row the user wrote across lines keeps them
+        return "\n".join(relay(ln, limit) for ln in str(text)[:limit * 4].split("\n"))[:limit]
     flat = "".join(" " if unicodedata.category(c) in _INVISIBLE else c for c in str(text)[:limit * 4])
     flat = " ".join(flat.split())
     return flat if len(flat) <= limit else flat[:limit - 1] + "\u2026"
@@ -232,20 +298,51 @@ def _same(a, b):
     return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
 
 
-def _write_registry(rows):
+def write_store_file(path, text):
+    """Write a file Locket owns inside a store (a manifest, a scaffolded ledger) by
+    atomic rename, refusing a symlink at the path: a cloned repo's `locket.json`
+    linked to `~/.claude/settings.json` must not turn `init` into an overwrite."""
+    p = Path(path)
+    if p.is_symlink():
+        raise OSError(f"{p} is a symlink; Locket writes no file through one")
+    # Locket's own edit to a manifest a person trusted keeps that trust: the pin moves
+    # to what Locket wrote. Any other edit leaves the store inert until re-trusted.
+    repin = (p.name in (MANIFEST, OLD_MANIFEST, LEGACY_MANIFEST) and _granted(p.parent)
+             and any(_same(p.parent, r) for r in registry()))
+    _replace_atomic(p, text, f".{p.name}.")
+    if repin:
+        register(p.parent)
+
+
+def pin_unpinned():
+    """Pin every registered store that has no pin yet (rows from before 0.12) to its
+    configuration as it stands. Returns the stores pinned."""
+    pins, done = registry_pins(), []
+    for r in registry():
+        if str(r) not in pins and has_manifest(r):
+            register(r)
+            done.append(r)
+    return done
+
+
+def _write_registry(rows, pins=None):
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-    _replace_atomic(REGISTRY, json.dumps({"corpora": sorted({str(p) for p in rows})}, indent=2) + "\n",
-                    ".corpora.")
+    keep = sorted({str(p) for p in rows})
+    pins = {k: v for k, v in (registry_pins() if pins is None else pins).items() if k in keep}
+    _replace_atomic(REGISTRY, json.dumps({"corpora": keep, "pins": pins}, indent=2) + "\n", ".corpora.")
 
 
 def register(root):
-    """Add a corpus path to the registry, once. True when it was new."""
+    """Add a corpus path to the registry, pinned to its configuration as it stands,
+    or re-pin a row already there. True when the row was new."""
     root = Path(root).resolve()
     rows = registry()
-    if any(_same(root, r) for r in rows):
-        return False
-    _write_registry(rows + [root])
-    return True
+    old = next((r for r in rows if _same(root, r)), None)
+    pins = registry_pins()
+    pins.pop(str(old), None)
+    pins[str(old or root)] = config_digest(root)
+    _write_registry(rows if old else rows + [root], pins)
+    return old is None
 
 
 def _first_cwd(path, limit=60):
@@ -353,6 +450,7 @@ def untrusted_stores():
                 break
             if has_manifest(p) and not _granted(p):
                 found.add(p)
+    found.update(r for r in registry() if has_manifest(r) and changed_since_trust(r))
     return sorted(found)
 
 
@@ -417,11 +515,15 @@ def grant_trust(d, confirm=None):
         print(f"registry: {REGISTRY} (already listed)" if any(_same(d, r) for r in registry())
               else f"trust: {d} is a store by convention on this host")
         return True
+    changed = changed_since_trust(d)
     if not (confirm or human_confirms)(d):
-        print(f"trust: not granted. Trust is given by a person at a terminal, not by an "
+        why = " Its configuration changed since it was trusted." if changed else ""
+        print(f"trust: not granted.{why} Trust is given by a person at a terminal, not by an "
               f"agent; ask the user to run:\n  locket trust {shlex.quote(str(d))}")
         return False
-    print(f"registry: {REGISTRY} ({'added' if register(d) else 'already listed'})")
+    added = register(d)
+    print(f"registry: {REGISTRY} (" + ("added" if added else "trust renewed for its current configuration"
+                                        if changed else "already listed") + ")")
     return True
 
 
@@ -435,7 +537,10 @@ def migrate(root):
     old = root / OLD_MANIFEST
     if not old.is_file():
         return "none"
+    repin = _granted(root) and any(_same(root, r) for r in registry())
     old.rename(root / MANIFEST)
+    if repin:
+        register(root)
     settings.cache_clear()
     return "migrated"
 
@@ -913,13 +1018,20 @@ def validate_manifest(root):
     return out
 
 
+def _inside(rel):
+    """Whether a manifest's relative path stays inside its store: not absolute, no
+    `..`. A member `/` walked the whole disk inside the write hook."""
+    p = PurePosixPath(str(rel).replace("\\", "/"))
+    return bool(str(rel).strip()) and not p.is_absolute() and ".." not in p.parts and not str(rel).startswith("~")
+
+
 def _own_walk(root, m=None):
     """-> (members, excluded_dirs): what one store's own walk covers, from its own
     manifest alone. Never unioned across a join, so `parent_of` can ask it of a
     parent without recursing through `settings`, which unions name-sets upward."""
     m = _read_manifest(root) if m is None else m
     mem = m.get("members")
-    members = ({str(x) for x in mem if isinstance(x, str)} if isinstance(mem, list)
+    members = ({str(x) for x in mem if isinstance(x, str) and _inside(x)} if isinstance(mem, list)
                else (set(HOST_MEMBERS[Path(root)]) if root is not None
                      and Path(root) in HOST_MEMBERS else None))
     val = m.get("excluded_dirs")
@@ -1489,8 +1601,15 @@ def _own_archive_md(root):
         if hosted and d == root:
             continue
         a = d / "archive"
-        if a.is_dir() and not has_manifest(a):
-            yield from sorted(p for p in a.rglob("*.md") if p.is_file())
+        if a.is_dir() and not a.is_symlink() and not has_manifest(a):
+            found = []
+            for dirpath, dirnames, filenames in os.walk(a):     # never through a linked directory
+                found += [Path(dirpath) / n for n in filenames
+                          if n.endswith(".md") and _regular(Path(dirpath) / n)]
+                if len(found) > MAX_STORE_FILES:
+                    health_error("walk", "bound", OSError(f"{a}: archive past {MAX_STORE_FILES} files"))
+                    break
+            yield from sorted(found[:MAX_STORE_FILES])
 
 
 def subtract_archived(added, arch):
@@ -1810,6 +1929,8 @@ def code_roots(corpus_root):
 
 
 def _own_code_roots(corpus_root):
+    if not trusted(corpus_root):
+        return []                            # an untrusted folder's citations reach no host file
     declared = settings(corpus_root)["code_roots"]
     if declared is not None:                 # the manifest names them outright
         return [((Path(corpus_root) / d) if not d.is_absolute() else d, frozenset())
@@ -1920,7 +2041,7 @@ def resolve_citation(path, line, idx):
     first = None
     for h in hits:
         try:
-            lines = Path(h).read_text(errors="replace").splitlines()
+            lines = read_safe(h).splitlines()     # never through a link, a FIFO or past the cap
         except OSError:
             continue
         if line <= len(lines):
@@ -2251,7 +2372,7 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
         if name:
             man["name"] = name
         man["belongs_to"] = parent
-        m.write_text(json.dumps(man, indent=2) + "\n")
+        write_store_file(m, json.dumps(man, indent=2) + "\n")
         settings.cache_clear()
         if not grant_trust(d, confirm):
             return 1
@@ -2311,14 +2432,14 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
             d.name == "memory" and d.parent.parent == CLAUDE / "projects")
         man = _manifest_data(d)
         if name is not None and man.get("name") != name:
-            m.write_text(json.dumps({**man, "name": name}, indent=2) + "\n")
+            write_store_file(m, json.dumps({**man, "name": name}, indent=2) + "\n")
             print(f"manifest: {m} (kept, name {name!r})")
         else:
             print(f"manifest: {m} (kept)")
     elif by_convention and name is None:
         print(f"manifest: none needed; {d} is a corpus by convention on this host")
     else:
-        m.write_text(json.dumps({"name": name or d.name}, indent=2) + "\n")
+        write_store_file(m, json.dumps({"name": name or d.name}, indent=2) + "\n")
         print(f"manifest: {m} (written, name {name or d.name!r})")
     settings.cache_clear()
     if by_convention:
@@ -2410,13 +2531,13 @@ def scaffold_ledgers(d, name):
         if f.exists():
             print(f"ledger: {f.name} (kept)")
         else:
-            f.write_text(",".join(map(str, schema["columns"])) + "\n")
+            write_store_file(f, ",".join(map(str, schema["columns"])) + "\n")
             print(f"ledger: {f.name} (written, header only)")
         if text and f.resolve() not in listed:
             sources.append({"path": f.name, "text": text, "label": "Area"})
             added.append(f.name)
     if added:
-        m.write_text(json.dumps({**man, "sources": sources}, indent=2) + "\n")
+        write_store_file(m, json.dumps({**man, "sources": sources}, indent=2) + "\n")
         settings.cache_clear()
         print(f"manifest: {', '.join(added)} registered as sources")
     return 0
@@ -7185,11 +7306,14 @@ def parse_patch(text):
 
 def _patch_input(patch, cwd):
     """The Write or Edit a Codex patch amounts to, as (tool, tool_input), or None
-    when it adds nothing. A patch can touch several files and a hook judges one,
-    so a CSV (whose ledger gate is decidable and may block) is judged first, then the
-    first file inside a store; a patch whose memory edit is its second file is still seen."""
+    when it adds nothing. A patch can touch several files and a hook judges one, so
+    the most decidable is judged first: the trust registry or a store's configuration
+    (refused outright, so a benign first file cannot carry a manifest past the gate),
+    then a CSV (whose ledger gate may block), then the first file inside a store."""
     files = [f for f in parse_patch(patch) if f[0] != "delete"]
-    pick = (next((f for f in files if f[1].lower().endswith(".csv")), None)
+    refused = lambda f: is_registry(_absolute(f[1], cwd)) or store_config(_absolute(f[1], cwd)) is not None
+    pick = (next((f for f in files if refused(f)), None)
+            or next((f for f in files if f[1].lower().endswith(".csv")), None)
             or next((f for f in files if corpus_for(_absolute(f[1], cwd)) is not None), None)
             or (files[0] if files else None))
     if pick is None:
@@ -7598,9 +7722,9 @@ def _hook_entry(mode):
             return emit(payload, msg, blocking, mode)
         bare = re.sub(r"""['"\\]""", "", command)
         if (".locket" in bare and "corpora.json" in bare) or str(REGISTRY) in bare:
-            # a shell command naming the registry: whether it writes is not decidable
-            # from the text, so this warns where the Write/Edit gate refuses
-            return emit(payload, REGISTRY_REFUSAL.format(reg=REGISTRY), False, mode)
+            # a shell command naming the registry is refused whether or not it writes: no
+            # agent task needs the file, and a write to it would grant trust
+            return emit(payload, REGISTRY_REFUSAL.format(reg=REGISTRY), True, mode)
         try:
             msg, blocking = ledger_bash_decision(command, payload.get("cwd"))
             if msg is None:
@@ -7663,7 +7787,11 @@ def _main_rest(mode, argv):
             print("init needs a directory:  locket init <dir> [--name <label>] [--parent <corpus>] "
                   "[--ledgers[=<Name>]]  (a ledger name takes `=`, never a space)", file=sys.stderr)
             return 1
-        return cmd_init(rest[0], parent=flags.get("--parent"), name=flags.get("--name"), ledgers=ledgers)
+        try:
+            return cmd_init(rest[0], parent=flags.get("--parent"), name=flags.get("--name"), ledgers=ledgers)
+        except OSError as e:                # a refused write (a symlinked manifest or ledger) is named
+            print(f"init: {e}", file=sys.stderr)
+            return 1
     if mode == "migrate":                   # rename memfind.json -> locket.json, one store or all
         one = len(argv) > 2 and argv[2] != "all"
         targets = [resolve(argv[2])] if one else list(_raw_corpora().values())   # joined stores too

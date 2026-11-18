@@ -575,6 +575,12 @@ def cmd_uninstall(argv):
         print("  nothing; Locket is not installed here")
     if dry:
         return 0
+    if purge and manifests and not memscan.person_confirms(
+            f"Delete the locket.json in {len(manifests)} stores, and the usage ledger?",
+            [str(m) for m in manifests[:8]], "delete them"):
+        # every store's configuration at once is a person's call, --yes or not
+        print("nothing removed: --purge deletes every store's locket.json, so a person confirms it "
+              "at a terminal. Run it yourself, or uninstall without --purge"); return 1
     if not yes:
         if sys.stdin.isatty():
             if input("proceed? [y/N] ").strip().lower() not in ("y", "yes"):
@@ -1225,7 +1231,8 @@ def cmd_doctor():
         loose = None
         row("warn", "trust", f"the scan for untrusted stores failed ({type(e).__name__}: {e})")
     for d in loose or []:
-        row("warn", "trust", f"{d} holds a {memscan.MANIFEST} that is not trusted, so it acts as no store: "
+        why = ("changed since you trusted it" if memscan.changed_since_trust(d) else "not trusted")
+        row("warn", "trust", f"{d} holds a {memscan.MANIFEST} that is {why}, so it acts as no store: "
             "its trigger rows, ledger schemas and sources are ignored",
             f"locket trust {shlex.quote(str(d))}  (at a terminal, if you made it), or delete its {memscan.MANIFEST}")
     if loose is not None:
@@ -1849,6 +1856,10 @@ def main(argv):
         for c in _caches():
             print(f"index: {c} is no longer read; the index now lives in "
                   f"{memscan.REGISTRY.parent / 'cache'}. Delete it:  rm -r {shlex.quote(str(c))}")
+        # 0.12: trust is pinned to a store's configuration; pin the rows that predate it
+        for d in memscan.pin_unpinned():
+            print(f"trust: pinned {d} to its configuration as it stands; a later change to its "
+                  f"locket.json or rows file needs  locket trust {shlex.quote(str(d))}  again")
         # 0.12: a manifest acts only once a person trusts it; name the ones that stopped
         try:
             loose = memscan.untrusted_stores()

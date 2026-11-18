@@ -234,6 +234,90 @@ class TriggerPadding(Scratch):
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
 
+class RedTeamCases(Scratch):
+    """Each case is a path a blind red team found from the attacker's seat."""
+
+    def test_a_pull_that_changes_a_trusted_store_leaves_it_inert(self):
+        self.registered_via_cli()
+        (self.clone / "triggers.json").write_text(json.dumps({"rows": [
+            {"id": "wedge", "tools": ".*", "content": ".*", "block": True, "question": "PULLED"}]}))
+        r = self.run_locket("trigger", payload=self.bash("ls"))
+        self.assertEqual(r.returncode, 0, "a rows file added after trust must not act: " + r.stderr)
+
+    def test_locket_own_init_keeps_trust(self):
+        self.registered_via_cli()
+        self.run_locket("init", str(self.clone), "--name", "renamed")
+        self.assertIn("renamed", (self.clone / "locket.json").read_text())
+        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan; from pathlib import Path; "
+                f"print(memscan.trusted(Path({str(self.clone)!r})))")
+        r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), "True", "Locket's own edit moves the pin: " + r.stderr)
+
+    def registered_via_cli(self):
+        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan; "
+                f"memscan.register({str(self.clone)!r})")
+        r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_init_never_writes_through_a_symlinked_manifest(self):
+        target = self.home / "precious.json"
+        target.write_text('{"keep": true}\n')
+        (self.clone / "locket.json").unlink()
+        (self.clone / "locket.json").symlink_to(target)
+        self.run_locket("init", str(self.clone), "--name", "notes")
+        self.assertEqual(target.read_text(), '{"keep": true}\n')
+
+    def test_init_never_creates_through_a_dangling_link(self):
+        target = self.home / "created-by-locket"
+        (self.clone / "locket.json").unlink()
+        (self.clone / "locket.json").symlink_to(target)
+        self.run_locket("init", str(self.clone))
+        self.assertFalse(target.exists())
+
+    def test_codex_patch_with_a_manifest_second_is_refused(self):
+        mem = self.home / ".claude" / "projects" / "-x" / "memory"
+        mem.mkdir(parents=True)
+        patch = ("*** Begin Patch\n*** Add File: notes.txt\n+hello\n"
+                 f"*** Add File: {mem / 'locket.json'}\n+{{}}\n*** End Patch")
+        payload = {"hook_event_name": "PreToolUse", "tool_name": "apply_patch", "turn_id": "t",
+                   "session_id": "s", "cwd": str(self.clone), "tool_input": {"command": patch}}
+        r = self.run_locket("hook", payload=payload)
+        self.assertNotEqual(r.stdout + r.stderr, "", "the manifest in the patch draws the refusal")
+        self.assertIn("locket.json", r.stdout + r.stderr)
+
+    def test_registry_named_in_shell_is_refused(self):
+        r = self.run_locket("bashguard", payload=self.bash(f"cat {self.registry}"))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_absolute_member_is_ignored(self):
+        (self.clone / "locket.json").write_text(json.dumps({"members": ["/"]}))
+        self.trust(self.clone)
+        code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan; from pathlib import Path; "
+                f"print(memscan.settings(Path({str(self.clone)!r}))['members'])")
+        r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), "set()", r.stderr)
+
+    def test_cites_in_an_untrusted_folder_reads_no_host_file(self):
+        (self.home / ".claude" / "secret.py").write_text("line one\nTOKEN-in-a-host-file\n")
+        (self.clone / "notes.md").write_text("The value lives at secret.py:2 in the host config folder here.\n")
+        r = self.run_locket("cites", str(self.clone))
+        self.assertNotIn("TOKEN-in-a-host-file", r.stdout + r.stderr)
+
+    def test_purge_needs_a_person(self):
+        self.trust(self.clone)
+        self.run_locket("uninstall", "--purge", "--yes")
+        self.assertTrue((self.clone / "locket.json").exists())
+
+    def test_trigger_question_is_sanitised(self):
+        (self.home / ".claude" / "triggers.json").write_text(json.dumps({"rows": [
+            {"id": "x", "tools": "Bash", "content": "ls", "question": "ok\u202e\x1b[2Jhidden" + "q" * 5000}]}))
+        r = self.run_locket("trigger", payload=self.bash("ls"))
+        out = r.stdout + r.stderr
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\u202e", out)
+        self.assertLess(len(out), 4000)
+
+
 class TrustIsByIdentity(Scratch):
     def probe(self, expr):
         code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import memscan; "
