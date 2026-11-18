@@ -787,9 +787,10 @@ REFERENCE CSVs
   holding the claim, `label` the column that identifies it in output.
 
 THE INDEX
-  Lives in `<corpus>/.memfind/` and rebuilds itself, per changed file, on every
-  query. It and the manifest are the only things this tool writes inside a
-  corpus; delete that directory and the manifest and the tool is gone from it.
+  Lives in `~/.locket/cache/<digest of the store's path>/`, outside the corpus,
+  and rebuilds itself, per changed file, on every query. The manifest is the only
+  thing this tool writes inside a corpus. An index from before 0.12 in
+  `<corpus>/.memfind/` is read by nothing; `locket migrate` names each one.
 
 READING THE OUTPUT
   Pass -n 15 on a corpus of a few hundred files. Ranking quality does not decay

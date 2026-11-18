@@ -59,9 +59,9 @@ CODEX = Path(os.environ.get("CODEX_HOME") or HOME / ".codex")   # Codex's home, 
 # the write-time gate and for a literal path, so a memory store on a host this
 # file has never heard of is covered by writing one file into it; its absence
 # means the host defaults below. Every key it may carry is listed once, under
-# MANIFEST in USAGE; `settings`, `csv_sources` and `all_corpora` read them. It
-# and the `.memfind/` cache are the only two things this tool ever owns inside
-# a corpus.
+# MANIFEST in USAGE; `settings`, `csv_sources` and `all_corpora` read them, and
+# only from a trusted store (`trusted`). It is the only thing this tool owns
+# inside a corpus; the index lives in ~/.locket/cache.
 MANIFEST = "locket.json"
 OLD_MANIFEST = "memfind.json"      # the name before 2026-09-21; read, migrated by `migrate`, never written
 LEGACY_MANIFEST = "reference-sources.json"
@@ -2221,7 +2221,7 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
         top = top_of(d)
         stale = d / ".memfind"
         if stale.is_dir():
-            print(f"index: {stale} is no longer read; the corpus indexes at {top}")
+            print(f"index: {stale} is no longer read; delete it")
         n, rows = len(md_files(top)), len(csv_rows(top))
         print(f"corpus: {top}  {n} files" + (f" + {rows} csv rows" if rows else "")
               + f"  [{len(roots_of(top)) - 1} joined]")
@@ -2230,7 +2230,7 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
         try:
             import memfind
             memfind.build_index(top, quiet=True)
-            print(f"index: {top / '.memfind'} built")
+            print(f"index: built for {top}")
         except ImportError:
             print(f"index: memfind.py not found beside memscan.py; run  locket index {top}")
         except RuntimeError as e:
@@ -2292,7 +2292,7 @@ def cmd_init(target, index=True, parent=None, name=None, ledgers=None, confirm=N
     try:                                    # memfind.py sits beside this file
         import memfind
         memfind.build_index(d, quiet=True)
-        print(f"index: {d / '.memfind'} built")
+        print(f"index: built for {d}")
     except ImportError:
         print(f"index: memfind.py not found beside memscan.py; run  locket index {d}")
     except RuntimeError as e:
@@ -5038,8 +5038,10 @@ USAGE
   store, rename the ledger, holding-space and index files this tool treats
   specially, exclude individual files (`excluded_files`: relative paths or
   globs, skipped by every mode and by the gate), declare the code roots
-  `cites` resolves against, and register reference CSVs. The manifest, the
-  `.memfind/` cache and the registry row are all this tool owns for a corpus.
+  `cites` resolves against, and register reference CSVs. A manifest acts only
+  once a person has trusted its directory (`locket trust`); until then it is
+  read as no manifest. The manifest, the registry row and the index under
+  ~/.locket/cache are all this tool owns for a corpus.
 
 MANIFEST
   `locket.json` at the corpus root, a JSON object (the older name `memfind.json`
@@ -5163,7 +5165,7 @@ MANIFEST
   On Hermes's ~/.hermes the three surface-role lists default to empty
   instead, because its MEMORY.md is the whole memory rather than an index; a
   manifest there still wins. Store the file under version control: it is
-  authored configuration, where .memfind/ is derived and rebuilt.
+  authored configuration, where the index is derived and rebuilt.
 
 MODES
   audit     cross-file claim pairs that currently AGREE, so fork RISK rather
