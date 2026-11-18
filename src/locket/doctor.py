@@ -6,6 +6,7 @@ import shlex
 import shutil
 import sys
 from functools import cached_property
+from typing import Optional, Protocol
 
 import adapters
 import corpora
@@ -46,6 +47,12 @@ def cmd_status():
     print(f"corpora: {n}  (`locket corpora` lists them)")
     print(adapters.gate_status())
     return 0
+
+
+class Row(Protocol):
+    """How a check reports: one row of `level` ("ok", "warn" or "fail"), what it checked,
+    what it found, and the command that fixes a failure."""
+    def __call__(self, level: str, what: str, detail: str, fix: Optional[str] = None) -> None: ...
 
 
 class Machine:

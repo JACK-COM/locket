@@ -309,6 +309,11 @@ def config_hooks(text):
 FLAG = None
 
 
+def register():
+    """Nothing to merge: config.yaml is edited by hand."""
+    return 0
+
+
 def removal():
     """Nothing Locket edits; the YAML lines that run it, named for a person to remove."""
     cfg = hosts.hermes() / "config.yaml"

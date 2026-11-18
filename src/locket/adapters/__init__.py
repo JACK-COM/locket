@@ -1,35 +1,61 @@
-"""The hosts Locket serves, each one module with two faces.
-
-The hook face, for every hook host in HOSTS: NAME, `detects(payload)`, `native(payload,
-tool, tool_input)` (its payload into Claude Code's tool names and fields), `deliver(payload,
-msg, blocking, source, db)` (the exit code) and `status()` (one line, or None where the
-host is not installed); `home()` (its own store), `asked(payload)` (the 2e answer when the
-payload carries no transcript), and for the trigger hook `trigger_event(payload)` (its
-payload in the shape `trigger.fire` reads), `seen(payload, home, pattern)` (whether the
-session carries a pattern past its transcript) and `trigger_reply(payload, message, block,
-home)` (the exit code).
-
-The install face, for every target in TARGETS (the hook hosts and Desktop): FLAG (the
-`locket install` flag, or None where the host's config is edited by hand), `register()`,
-`removal()` (an `install.Removal`) and `checks(m, row)` (its doctor rows). The install
-face imports probes and trigger inside its functions, so a hook never loads them.
-
-A new host is one module added to HOSTS and TARGETS.
+"""The hosts Locket serves, each one module with two faces: `HookHost`, for a host whose
+hooks Locket runs in, and `Target`, for a host `locket install`, `uninstall` and `doctor`
+reach. A new host is one module, added to HOSTS and TARGETS; `make typecheck` fails while
+it lacks any part of either face.
 """
+from __future__ import annotations
+
 import json
 import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional, Protocol
 
 import gate
 from adapters import claude_code, codex, desktop, hermes
 
+if TYPE_CHECKING:
+    import doctor
+    import install
+
+
+class HookHost(Protocol):
+    """The hook face. `native` reads the host's payload into Claude Code's tool names and
+    fields; `deliver` hands a decision back and returns the exit code; `status` is one
+    line, or None where the host is not installed; `home` is its own store; `asked` is the
+    2e answer when the payload carries no transcript. For the trigger hook, `trigger_event`
+    is the payload in the shape `trigger.fire` reads, `seen` whether the session carries a
+    pattern past its transcript, and `trigger_reply` the exit code."""
+    @property
+    def NAME(self) -> str: ...
+    def detects(self, payload: dict) -> bool: ...
+    def native(self, payload: dict, tool: Optional[str], ti: dict) -> tuple[Optional[str], dict]: ...
+    def deliver(self, payload: dict, msg: str, blocking: bool, source: str, db: Optional[Path]) -> int: ...
+    def status(self) -> Optional[str]: ...
+    def home(self) -> Path: ...
+    def asked(self, payload: dict) -> bool: ...
+    def trigger_event(self, payload: dict) -> dict: ...
+    def seen(self, payload: dict, home: Optional[Path], pattern: str) -> bool: ...
+    def trigger_reply(self, payload: dict, message: str, block: bool, home: Optional[Path]) -> int: ...
+
+
+class Target(Protocol):
+    """The install face. FLAG is the `locket install` flag, or None where the host's config
+    is edited by hand (`register` then does nothing); `removal` is what uninstall does to
+    its config; `checks` adds its doctor rows. It imports probes and trigger inside its
+    functions, so a hook never loads them."""
+    @property
+    def FLAG(self) -> Optional[str]: ...
+    def register(self) -> int: ...
+    def removal(self) -> install.Removal: ...
+    def checks(self, m: doctor.Machine, row: doctor.Row) -> None: ...
+
+
 # Walked in order and the first host that detects a payload owns it; Claude Code,
 # whose shape the others are read into, detects everything and so comes last.
-HOSTS = (hermes, codex, claude_code)
+HOSTS: tuple[HookHost, ...] = (hermes, codex, claude_code)
 BY_NAME = {h.NAME: h for h in HOSTS}
-# What `locket install`, `uninstall` and `doctor` walk: every hook host, and Desktop, which
-# runs no hooks and takes the MCP server. Each declares FLAG (its install flag, or None
-# where its config is edited by hand), `register()`, `removal()` and `checks(m, row)`.
-TARGETS = (claude_code, codex, hermes, desktop)
+# Every hook host, and Desktop, which runs no hooks and takes the MCP server.
+TARGETS: tuple[Target, ...] = (claude_code, codex, hermes, desktop)
 
 
 def host_of(payload):
