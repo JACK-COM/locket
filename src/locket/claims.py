@@ -217,29 +217,101 @@ def pointer_only(sentence):
     return len(tokens(_TARGET.sub(" ", s))) < MIN_TOKENS
 
 
-def score_against(text, docs):
+class ClaimIndex:
+    """The claims of many files behind posting lists, so a scorer reads only the
+    claims that can share MIN_SHARED tokens with the one it holds.
+
+    Exact, never approximate: a claim of k tokens shares MIN_SHARED with another
+    only if it shares one of its k - MIN_SHARED + 1 rarest (the prefix filter), so
+    those postings hold every pair `similar` scores above 0. Comparing every pair
+    was 2.8 s of a 3.1 s score for a 20 KB write at ten times the council corpus.
+    """
+
+    def __init__(self, files=()):
+        self.names, self.items = [], []         # items: (file number, sentence, tokens)
+        self.postings = defaultdict(list)       # token: item numbers, ascending
+        for name, file_claims in files:
+            self.add(name, file_claims)
+
+    @classmethod
+    def from_docs(cls, docs):
+        """From {name: stripped body}, the shape `corpus()` returns."""
+        return cls((name, claims(body)) for name, body in docs.items())
+
+    def add(self, name, file_claims):
+        f = len(self.names)
+        self.names.append(name)
+        items, postings = self.items, self.postings
+        for s, ts in file_claims:
+            i = len(items)
+            items.append((f, s, ts))
+            for w in ts:
+                postings[w].append(i)
+
+    def __len__(self):
+        return len(self.items)
+
+    def __contains__(self, name):
+        return name in self.names
+
+    def candidates(self, ts):
+        """Item numbers of every claim sharing MIN_SHARED tokens with `ts`, ascending."""
+        if len(ts) < MIN_SHARED:
+            return []
+        empty = ()
+        rare = sorted(ts, key=lambda w: (len(self.postings.get(w, empty)), w))[:len(ts) - MIN_SHARED + 1]
+        found = set()
+        for w in rare:
+            found.update(self.postings.get(w, empty))
+        return sorted(i for i in found if len(ts & self.items[i][2]) >= MIN_SHARED)
+
+    def holds(self, ts, floor):
+        """True where some claim here scores `floor` or more against `ts`."""
+        return any(similar(ts, self.items[i][2]) >= floor for i in self.candidates(ts))
+
+
+def _ranked(index, incoming, inc_all, hidden):
+    """`score_against`'s rows for one index, skipping the names `hidden` drops."""
+    items = index.items
+    overlap = Counter(items[i][0] for w in inc_all for i in index.postings.get(w, ()))
+    best = {}                                   # file number: (score, order, pair)
+    for k, (isent, its) in enumerate(incoming):
+        for i in index.candidates(its):
+            f, s, ts = index.items[i]
+            jac, cur = similar(ts, its), best.get(f)
+            # the first pair at the best score wins, file order then incoming order,
+            # as the all-pairs loop this replaced chose it
+            if cur is None or jac > cur[0] or (jac == cur[0] and (i, k) < cur[1]):
+                best[f] = (jac, (i, k), (isent, s))
+    rows = []
+    for f, name in enumerate(index.names):
+        if hidden(name):
+            continue
+        jac, _, pair = best.get(f, (0.0, None, None))
+        # claim-level match dominates; bulk token overlap breaks ties so a
+        # paraphrase still surfaces the right topical neighbour.
+        rows.append((jac + min(overlap[f] / 400.0, 0.35), jac, name, pair))
+    return rows
+
+
+def score_against(text, docs, hide=None, extra=None):
     """Rank files by how much of `text` they already assert.
 
-    Returns (combined, claim_score, filename, (incoming, existing)) best first,
-    empty where `text` carries no claim.
+    `docs` is {name: stripped body} or a ClaimIndex. `hide(name)` drops a file from
+    it, and `extra` ({name: stripped body}) is scored in place of any file of the
+    same name, so a caller can stand a file as a write will leave it without
+    rebuilding the index. Returns (combined, claim_score, filename, (incoming,
+    existing)) best first, empty where `text` carries no claim.
     """
     incoming = list(claims(strip(text)))
     if not incoming:
         return []
+    index = docs if isinstance(docs, ClaimIndex) else ClaimIndex.from_docs(docs)
     inc_all = set().union(*(ts for _, ts in incoming))
-    ranked = []
-    for name, body in docs.items():
-        best, best_pair = 0.0, None
-        overlap = 0
-        for s, ts in claims(body):
-            overlap += len(ts & inc_all)
-            for isent, its in incoming:
-                jac = similar(ts, its)
-                if jac > best:
-                    best, best_pair = jac, (isent, s)
-        # claim-level match dominates; bulk token overlap breaks ties so a
-        # paraphrase still surfaces the right topical neighbour.
-        ranked.append((best + min(overlap / 400.0, 0.35), best, name, best_pair))
+    extra = extra or {}
+    ranked = _ranked(index, incoming, inc_all, lambda n: n in extra or bool(hide and hide(n)))
+    if extra:
+        ranked += _ranked(ClaimIndex.from_docs(extra), incoming, inc_all, lambda n: False)
     ranked.sort(reverse=True)
     return ranked
 

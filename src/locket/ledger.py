@@ -226,12 +226,13 @@ def source_row_decision(path, tool_input, prior, append=False):
         return None, False
     # The file's own rows are scored as they will stand after the write, minus the
     # new ones, so an edited row never matches the version it replaces.
-    docs = {k: v for k, v in corpus.corpus(root).items() if not k.startswith(f"{p.name}#")}
+    index, own = corpus.claim_index(root), f"{p.name}#"
     kept = Counter(after) - Counter(added)
-    docs[p.name] = "\n".join(claims.strip(t) for t in kept.elements() if t)
+    stands = {p.name: "\n".join(claims.strip(t) for t in kept.elements() if t)}
     lines = []
     for row in added:
-        ranked = [r for r in claims.score_against(row, docs)[:3] if r[1] >= claims.FIRE_FLOOR]
+        ranked = [r for r in claims.score_against(row, index, hide=lambda k: k.startswith(own), extra=stands)[:3]
+                  if r[1] >= claims.FIRE_FLOOR]
         if ranked:
             lines.append(f"  row: {fsio.relay(row, 120)}")
             for _c, best, fname, pair in ranked:

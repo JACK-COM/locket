@@ -435,7 +435,7 @@ def _selftest_inner():
     (home / "memory/gone.md").symlink_to(home / "memory/never-there.md")
     assert "memory/gone.md" not in {str(q.relative_to(home)) for q in ms.md_files(home)}
     (home / "memory/gone.md").unlink()
-    assert any("superseded" in " ".join(ts) for ts in ms.archived_claims(home)), \
+    assert any("superseded" in " ".join(ts) for _, _, ts in ms.archived_claims(home).items), \
         "provenance is read from the archive under a member, not root/archive alone"
     buf = _io.StringIO()
     with _ctx.redirect_stdout(buf):
@@ -1402,7 +1402,7 @@ def _selftest_inner():
         assert "named-one" not in dl and "not-this" in dl, \
             "a link resolves by the frontmatter name, never by a `name:` in the body"
         (par / "feedback_named_one.md").unlink()
-        assert any("superseded" in " ".join(ts) for ts in ms.archived_claims(par)), \
+        assert any("superseded" in " ".join(ts) for _, _, ts in ms.archived_claims(par).items), \
             "provenance is read from the joined store's archive too"
         assert any(s[4] == "ok" for s in ms.csv_pointers(par)), ms.csv_pointers(par)
         assert any("[1 joined store]" in l for l in ms.corpora_lines()), ms.corpora_lines()

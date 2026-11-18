@@ -48,6 +48,42 @@ def cd_reference(command, cwd, pos):
     return [here] if here else []
 
 
+def score_reference(text, docs):
+    """`score_against` as the all-pairs loop the claim index replaced."""
+    incoming = list(memscan.claims(memscan.strip(text)))
+    if not incoming:
+        return []
+    inc_all = set().union(*(ts for _, ts in incoming))
+    ranked = []
+    for name, body in docs.items():
+        best, best_pair, overlap = 0.0, None, 0
+        for s, ts in memscan.claims(body):
+            overlap += len(ts & inc_all)
+            for isent, its in incoming:
+                jac = memscan.similar(ts, its)
+                if jac > best:
+                    best, best_pair = jac, (isent, s)
+        ranked.append((best + min(overlap / 400.0, 0.35), best, name, best_pair))
+    ranked.sort(reverse=True)
+    return ranked
+
+
+def subtract_reference(added, arch):
+    if not arch:
+        return memscan.strip(added)
+    return "\n".join(s for s, ts in memscan.claims(memscan.strip(added))
+                     if not any(memscan.similar(ts, a) >= memscan.FIRE_FLOOR for a in arch))
+
+
+# a small vocabulary, so random sentences share five tokens often enough to pair
+VOCAB = [f"w{i:02d}" for i in range(24)] + ["the", "and", "of"]
+
+
+def _prose(rnd, lines):
+    return "\n".join(" ".join(rnd.choice(VOCAB) for _ in range(rnd.randint(2, 12))) + rnd.choice([".", "", ";"])
+                     for _ in range(lines))
+
+
 SHELL = ["sed", "gsed", "-i", "-n", "-Ei", "--in-place", "perl", "ruby", "-pi", "-0pi", "awk", "gawk",
          "-i inplace", "tee", "-a", "cp", "mv", "rsync", "cat", "echo", "x", "a.md", "dir/b.md", "'c.md'",
          '"d.md"', ">", ">>", ";", "&&", "|", "||", "\n", "cd", "cd /tmp", "cd sub", "cd -", "popd",
@@ -63,6 +99,31 @@ class Equivalence(unittest.TestCase):
             txt = "\n".join(" ".join(rnd.choice(PROSE) for _ in range(rnd.randint(0, 4)))
                             for _ in range(rnd.randint(0, 12)))
             self.assertEqual(memscan.unwrap(txt), unwrap_reference(txt), repr(txt))
+
+    def test_score_against(self):
+        rnd = random.Random(13)
+        for _ in range(CASES // 10):
+            docs = {f"f{k}.md": _prose(rnd, rnd.randint(0, 8)) for k in range(rnd.randint(0, 6))}
+            text = _prose(rnd, rnd.randint(0, 5))
+            want = score_reference(text, docs)
+            self.assertEqual(memscan.score_against(text, docs), want, repr((text, docs)))
+            index = memscan.ClaimIndex.from_docs(docs)
+            self.assertEqual(memscan.score_against(text, index), want, repr((text, docs)))
+            # a hidden file and one stood as a write leaves it, against the dict edited the same way
+            if docs:
+                gone, edited = rnd.choice(sorted(docs)), rnd.choice(sorted(docs))
+                swap = {edited: _prose(rnd, 2)}
+                ref = {k: v for k, v in docs.items() if k != gone or k == edited}
+                ref.update(swap)
+                self.assertEqual(memscan.score_against(text, index, hide=lambda n: n == gone, extra=swap),
+                                 score_reference(text, ref), repr((text, docs, gone, swap)))
+
+    def test_subtract_archived(self):
+        rnd = random.Random(17)
+        for _ in range(CASES // 10):
+            arch = [ts for _, ts in memscan.claims(_prose(rnd, rnd.randint(0, 10)))]
+            added = _prose(rnd, rnd.randint(0, 6))
+            self.assertEqual(memscan.subtract_archived(added, arch), subtract_reference(added, arch))
 
     def test_write_matches(self):
         rnd = random.Random(11)

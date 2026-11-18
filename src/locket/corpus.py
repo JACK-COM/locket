@@ -2,13 +2,15 @@
 bounded in count and bytes, its registered CSV rows, its claims keyed by file, and its
 archive, whose claims are subtracted as provenance.
 """
+import csv as _csv   # `csv` is corpus()'s flag
 import fnmatch
+import hashlib
 import json
 import os
 import stat
 import sys
+import time
 from collections import defaultdict
-from functools import lru_cache
 from pathlib import Path
 
 import claims
@@ -268,21 +270,31 @@ def _own_csv_sources(root):
     return out
 
 
+# What a registered CSV that cannot be read raises: that file is skipped, never the corpus.
+CSV_ERRORS = (OSError, _csv.Error, UnicodeDecodeError)
+
+
+def _rows_of(pth, textcol, labelcol):
+    """[(label, text)] for one registered CSV's rows; raises one of CSV_ERRORS."""
+    out = []
+    with fsio.open_safe(pth, newline="", max_bytes=None) as fh:   # declared CSVs are never capped
+        for r in _csv.DictReader(fh):
+            t = (r.get(textcol) or "").strip()
+            if not t:
+                continue
+            tag = (r.get(labelcol) or "").strip() if labelcol else ""
+            out.append((f"{pth.name}#{tag}", t))
+    return out
+
+
 def csv_rows(root):
     """[(label, text)] for every registered CSV row, in file order, labelled
     `<file>.csv#<label value>`. Errors in one file skip that file, never raise."""
-    import csv as _csv
     out = []
-    for pth, textcol, labelcol in csv_sources(root):
+    for source in csv_sources(root):
         try:
-            with fsio.open_safe(pth, newline="", max_bytes=None) as fh:   # declared CSVs are never capped
-                for r in _csv.DictReader(fh):
-                    t = (r.get(textcol) or "").strip()
-                    if not t:
-                        continue
-                    tag = (r.get(labelcol) or "").strip() if labelcol else ""
-                    out.append((f"{pth.name}#{tag}", t))
-        except (OSError, _csv.Error, UnicodeDecodeError):
+            out.extend(_rows_of(*source))
+        except CSV_ERRORS:
             continue
     return out
 
@@ -315,9 +327,153 @@ def corpus(root, csv=True):
     return docs
 
 
-@lru_cache(maxsize=None)
+def cache_dir(root):
+    """`~/.locket/cache/<digest of the store's real path>/`. Outside the corpus on
+    purpose: a cache inside it is a file anyone shipping the directory controls, so
+    a cloned repo could plant ranked text for every hook to print, or symlink the
+    cache onto a file the next build would overwrite."""
+    real = os.path.realpath(str(root))
+    return paths.PATHS.cache / hashlib.sha256(real.encode()).hexdigest()[:16]
+
+
+def ready_cache_dir(root):
+    """`cache_dir(root)`, made 0700 where missing; raises RuntimeError where it is a
+    link or a directory another user owns, since every write into it is a rename."""
+    d = cache_dir(root)
+    d.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        d.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(d)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise RuntimeError(f"refusing the cache directory {d}: not a directory this user owns")
+    return d
+
+
+CLAIM_CACHE = "claims.json"
+# A file modified this recently is never cached: a filesystem keeps mtime at a coarse
+# tick (milliseconds on Linux), so a same-size rewrite inside one tick would leave the
+# old claims standing under an unchanged fingerprint. Git calls this "racily clean".
+RACY_NS = 2_000_000_000
+
+
+def _file_claims(p):
+    return list(claims.claims(claims.strip(fsio.read_safe(p))))
+
+
+def _csv_claims(pth, textcol, labelcol):
+    """[(label, claims)] per row of one registered CSV, rows with no claim kept, so
+    every label `corpus()` would carry is still a file in the index."""
+    return [(label, list(claims.claims(claims.strip(t)))) for label, t in _rows_of(pth, textcol, labelcol)]
+
+
+class ClaimCache:
+    """Each file's claims, kept in `<cache_dir>/claims.json` and reused while the
+    file's size, mtime and inode are unchanged, so a hook stops re-reading and
+    re-tokenising the corpus and the archive on every write.
+
+    Only an optimisation: an unreadable or foreign cache reads as empty, a failed
+    save is dropped, and nothing in it decides anything the files would not."""
+
+    def __init__(self, root):
+        self.root, self.path = root, cache_dir(root) / CLAIM_CACHE
+        self.entries, self.dirty = self._load(), False
+
+    def _load(self):
+        try:
+            with fsio.open_safe(self.path, max_bytes=None) as f:
+                data = json.load(f)
+            if data.get("version") == claims.CLAIMS_VERSION and isinstance(data.get("files"), dict):
+                return data["files"]
+        except (OSError, ValueError, AttributeError):
+            pass
+        return {}
+
+    def claims_of(self, key, path, make, *args):
+        """`make(*args)`, or what it returned while `path` stood as it stands now.
+        Raises what the stat or `make` raises, so a caller skips that file."""
+        st = os.stat(path)                      # before the read: a later write moves it
+        fp = [st.st_size, st.st_mtime_ns, st.st_ino]
+        hit = self.entries.get(key)
+        if hit and hit[0] == fp:
+            return _decode(hit[1])
+        value = make(*args)
+        if time.time_ns() - st.st_mtime_ns > RACY_NS:
+            self.entries[key], self.dirty = [fp, _encode(value)], True
+        elif hit:
+            del self.entries[key]
+            self.dirty = True
+        return value
+
+    def save(self):
+        """Write the cache when it changed, dropping files that are gone."""
+        if not self.dirty:
+            return
+        live = {k: v for k, v in self.entries.items() if os.path.exists(k.split("\0", 1)[0])}
+        try:
+            ready_cache_dir(self.root)
+            fsio._replace_atomic(self.path, json.dumps({"version": claims.CLAIMS_VERSION, "files": live}),
+                                 ".claims.json.")
+            self.entries, self.dirty = live, False
+        except (OSError, RuntimeError):
+            pass
+
+
+def _encode(value):
+    """Claims as JSON: a token set as one space-joined string (tokens hold no space),
+    a CSV's rows as [label, claims] pairs."""
+    if value and isinstance(value[0][1], list):
+        return [[label, _encode(cl)] for label, cl in value]
+    return [[s, " ".join(sorted(ts))] for s, ts in value]
+
+
+def _decode(value):
+    if value and isinstance(value[0][1], list):
+        return [(label, _decode(cl)) for label, cl in value]
+    return [(s, set(ts.split())) for s, ts in value]
+
+
+_CACHES = {}
+
+
+def claim_cache(root):
+    """One ClaimCache per store per process, so the corpus and archive reads of one
+    write share a load, and a long-running server keeps it warm."""
+    key = str(cache_dir(root))                  # the path, so a test's scratch PATHS never shares one
+    if key not in _CACHES:
+        _CACHES[key] = ClaimCache(root)
+    return _CACHES[key]
+
+
+def claim_index(root, csv=True):
+    """`corpus(root, csv)` as a ClaimIndex under the same names, its claims from the
+    claim cache, for the scorers that read every claim of every file."""
+    rs = corpora.roots_of(root)
+    cache, index = claim_cache(root), claims.ClaimIndex()
+    for p in md_files(root):
+        try:
+            index.add(corpora.corpus_key(root, p, rs), cache.claims_of(str(p), p, _file_claims, p))
+        except OSError:
+            continue
+    if csv:
+        grouped = {}
+        for source in csv_sources(root):
+            key = "\0".join([str(source[0]), source[1], source[2] or ""])
+            try:
+                rows = cache.claims_of(key, source[0], _csv_claims, *source)
+            except CSV_ERRORS:
+                continue
+            for label, cl in rows:
+                grouped.setdefault(label, []).extend(cl)
+        for label, cl in grouped.items():
+            index.add(label, cl)
+    cache.save()
+    return index
+
+
 def archived_claims(root):
-    """Token-sets of every claim already filed under `<corpus>/archive/`.
+    """Every claim already filed under `<corpus>/archive/`, as a ClaimIndex.
 
     Read as a PROVENANCE record, never as corpus: `archive` stays in
     EXCLUDED_DIRS, so nothing here is ever scored against or reported as a fork.
@@ -329,14 +485,14 @@ def archived_claims(root):
     filing a paraphrase where §4 asks for verbatim, silently narrows what the
     gate will forgive.
     """
-    out = []
+    cache, index = claim_cache(root), claims.ClaimIndex()
     for p in sorted(_archive_md(root)):
         try:
-            body = fsio.read_safe(p)
+            index.add(str(p), cache.claims_of(str(p), p, _file_claims, p))
         except OSError:
             continue
-        out.extend(ts for _, ts in claims.claims(claims.strip(body)))
-    return out
+    cache.save()
+    return index
 
 
 def _archive_md(root):
@@ -401,5 +557,7 @@ def subtract_archived(added, arch):
     """
     if not arch:
         return claims.strip(added)
+    if not isinstance(arch, claims.ClaimIndex):
+        arch = claims.ClaimIndex([("", [("", ts) for ts in arch])])
     return "\n".join(s for s, ts in claims.claims(claims.strip(added))
-                     if not any(claims.similar(ts, a) >= claims.FIRE_FLOOR for a in arch))
+                     if not arch.holds(ts, claims.FIRE_FLOOR))

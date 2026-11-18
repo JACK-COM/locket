@@ -268,19 +268,18 @@ def hook_decision(name, tool_input, text, prior, docs, archived=None,
     added = novel.net()
     if added is None:
         return history, blocks
-    by_file = docs()
+    index = docs()
     # The replaced span stops existing the moment the edit lands, so it must leave
     # the corpus before scoring or an in-place rewrite matches the sentences it
     # retires. `added_text` subtracts the anchor line by line, and a markdown
     # paragraph is one physical line, so an extended paragraph is never
-    # byte-identical and survives that subtraction.
-    # ⚠ `corpus()` stores STRIPPED bodies. Comparing a raw `old_string` against
+    # byte-identical and survives that subtraction. `prior` is the file the index
+    # holds as `name`, so its stripped text is that file's body.
+    # ⚠ The corpus holds STRIPPED bodies. Comparing a raw `old_string` against
     # them matches nothing and no-ops silently while looking like a working patch.
     old = claims.strip(str(tool_input.get("old_string") or "")).strip()
-    if old and name in by_file:
-        by_file = dict(by_file)
-        by_file[name] = by_file[name].replace(old, " ", 1)
-    ranked = [r for r in claims.score_against(added, by_file)[:3] if r[1] >= claims.FIRE_FLOOR]
+    edited = {name: claims.strip(prior).replace(old, " ", 1)} if old and name in index else None
+    ranked = [r for r in claims.score_against(added, index, extra=edited)[:3] if r[1] >= claims.FIRE_FLOOR]
     if not ranked:
         return history, blocks
     lines = ([history, ""] if history else []) + [f"{lead} These files may already own the fact it carries:"]
@@ -670,7 +669,7 @@ def _evaluate(path, tool_input, append, autonomous, payload):
     name = Path(path).name
     novel = Novel(ti, text, prior, lambda: corpus.archived_claims(root))
     try:
-        msg, blocking = hook_decision(name, ti, text, prior, lambda: corpus.corpus(root),
+        msg, blocking = hook_decision(name, ti, text, prior, lambda: corpus.claim_index(root),
                                       autonomous=autonomous, sets=corpora.settings(root), root=root,
                                       novel=novel)
     except Exception as e:                  # a dangling symlink in the corpus raised here

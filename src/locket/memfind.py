@@ -39,7 +39,7 @@ which a markdown-only index cannot see at all.
 Falls back with a clear message when ollama is not running; it is never a
 dependency of anything that must succeed.
 """
-import sys, os, json, math, array, time, hashlib, stat
+import sys, os, json, math, array, time
 from operator import mul
 from pathlib import Path
 
@@ -49,7 +49,6 @@ import corpora
 import corpus
 import fsio
 import manifest
-import paths
 
 import _embed  # noqa: E402  (panoply-lib's embedder ladder, a generated copy beside this file)
 import configure  # noqa: E402
@@ -134,13 +133,7 @@ def corpus_fingerprint(root):
     return fp
 
 
-def cache_dir(root):
-    """`~/.locket/cache/<digest of the store's real path>/`. Outside the corpus on
-    purpose: a cache inside it is a file anyone shipping the directory controls, so
-    a cloned repo could plant ranked text for every hook to print, or symlink the
-    cache onto a file the next build would overwrite."""
-    real = os.path.realpath(str(root))
-    return paths.PATHS.cache / hashlib.sha256(real.encode()).hexdigest()[:16]
+cache_dir = corpus.cache_dir
 
 
 def cache_paths(root):
@@ -154,15 +147,7 @@ def _write_cache(root, flat, meta):
     write cut between the two is a mismatch `_read_vectors` refuses: the vectors end
     in a random token the JSON names, so new vectors never pair with old text even
     when the count is unchanged."""
-    d = cache_dir(root)
-    d.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        d.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    st = os.lstat(d)
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
-        raise RuntimeError(f"refusing the cache directory {d}: not a directory this user owns")
+    corpus.ready_cache_dir(root)
     token = os.urandom(TOKEN_BYTES)
     meta_p, vec_p = cache_paths(root)
     fsio._replace_atomic(vec_p, flat.tobytes() + token, ".index.vec.")

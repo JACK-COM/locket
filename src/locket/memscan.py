@@ -82,14 +82,14 @@ from corpora import (  # noqa: F401  (re-exported)
 )
 from claims import (  # noqa: F401  (re-exported)
     CLAIMS_VERSION, ENTRY_TOKENS, FIRE_FLOOR, IDX_LINE, LINK, MIN_TOKENS, PAIR_FLOOR,
-    _ENDS, _LINE_MEANINGFUL, _NO_JOIN_FROM, claims, cross_file_pairs, pointer_only,
+    ClaimIndex, _ENDS, _LINE_MEANINGFUL, _NO_JOIN_FROM, claims, cross_file_pairs, pointer_only,
     score_against, similar, strip, tokens, unclaimed, unwrap,
 )
 from shellscan import (  # noqa: F401  (re-exported)
     command_text, shell_code as _shell_code, strip_heredocs as _strip_heredocs,
 )
 from corpus import (  # noqa: F401  (re-exported)
-    _archive_md, _own_md, _walk_files, archived_claims, corpus, csv_rows, csv_sources,
+    _archive_md, _own_md, _walk_files, archived_claims, claim_index, corpus, csv_rows, csv_sources,
     has_content, md_files, resolve, skipped_files, subtract_archived,
 )
 from ledger import (  # noqa: F401  (re-exported)
@@ -1184,7 +1184,7 @@ def cmd_cites(root, filters=None):
 
 
 def cmd_against(root, text, top=3):
-    docs = corpus(root)
+    docs = claim_index(root)
     ranked = score_against(text, docs)[:top]
     for combined, best, name, pair in ranked:
         print(f"[{best:.2f}] {name}")
