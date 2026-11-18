@@ -44,5 +44,5 @@ follow_imports = "skip"
 
 # Modules whose every function is annotated; a module joins once it is.
 [[tool.mypy.overrides]]
-module = ["fsio", "paths", "hosts", "manifest", "trust", "corpora"]
+module = ["fsio", "paths", "hosts", "manifest", "trust", "corpora", "claims", "corpus", "ledger"]
 disallow_untyped_defs = true

@@ -26,7 +26,7 @@ LEAD_BLOCKING = "A memory is about to be written."
 LEAD_WARNING = "This memory write landed."
 
 
-def ledger_schemas(root):
+def ledger_schemas(root: Path) -> dict[str, dict]:
     """{glob: schema} in force for a corpus: the built-ins, then every `ledgers`
     entry in the manifest of each physical store composing it, later entries
     overriding earlier ones by glob. Malformed entries are skipped."""
@@ -45,7 +45,7 @@ def ledger_schemas(root):
     return out
 
 
-def _builtin_for(path):
+def _builtin_for(path: str) -> dict:
     """The built-in schema a manifest entry's path falls under, by its own text
     or its basename, or {}."""
     name = PurePosixPath(path).name
@@ -55,7 +55,7 @@ def _builtin_for(path):
     return {}
 
 
-def _merge_schema(base, own):
+def _merge_schema(base: dict, own: dict) -> dict:
     """`own` over `base`: a dict-valued key (caps, enum, pattern) merges column by
     column, a list-valued key (columns, required) replaces. A store overriding one
     column's enum keeps the built-in's date pattern and caps, rather than having to
@@ -66,7 +66,7 @@ def _merge_schema(base, own):
     return out
 
 
-def ledger_schema_for(path):
+def ledger_schema_for(path: fsio.StrPath) -> tuple[Optional[dict], Optional[str]]:
     """(schema, glob) governing a CSV path, or (None, None). A manifest entry is
     matched against the path relative to its store and against the basename;
     a built-in against the basename anywhere inside a trusted store. Outside
@@ -89,7 +89,7 @@ def ledger_schema_for(path):
     return None, None
 
 
-def check_ledger_rows(schema, header, rows, first=2):
+def check_ledger_rows(schema: dict, header: list[str], rows: list[list[str]], first: int = 2) -> list[str]:
     """Findings for data rows against a schema, each `row N: <what>`; N counts
     from `first`, the file line the first data row sits on. A header that does
     not carry the schema's columns is one finding and ends the check, because
@@ -129,12 +129,12 @@ def check_ledger_rows(schema, header, rows, first=2):
     return out
 
 
-def csv_rows_of(text):
+def csv_rows_of(text: str) -> list[list[str]]:
     import csv as _csv, io as _io
     return list(_csv.reader(_io.StringIO(text)))
 
 
-def check_ledger_text(schema, text, header=None):
+def check_ledger_text(schema: dict, text: str, header: Optional[list[str]] = None) -> list[str]:
     """Findings for CSV `text`. With `header`, every parsed line is a data row
     (an Edit fragment, a heredoc); a line whose field count differs from the
     header's is not a row and is skipped, since a fragment can cut a row. Without
@@ -149,7 +149,7 @@ def check_ledger_text(schema, text, header=None):
     return check_ledger_rows(schema, header, rows, first=1)
 
 
-def ledger_header(path):
+def ledger_header(path: fsio.StrPath) -> Optional[list[str]]:
     try:
         with fsio.open_safe(path, newline="") as fh:
             rows = csv_rows_of(fh.read(4096))
@@ -158,7 +158,7 @@ def ledger_header(path):
     return rows[0] if rows else None
 
 
-def ledger_message(path, glob, schema, findings, via):
+def ledger_message(path: fsio.StrPath, glob: Optional[str], schema: dict, findings: list[str], via: str) -> str:
     return (f"A ledger row breaks its schema and the write is refused ({Path(path).name}, "
             f"schema {glob!r}, {schema.get('_from', 'built in')}):\n  - " + "\n  - ".join(fsio.relay(f, 240) for f in findings[:12])
             + (f"\n  - ... {len(findings) - 12} more" if len(findings) > 12 else "")
@@ -168,7 +168,7 @@ def ledger_message(path, glob, schema, findings, via):
               f"sweeps the rows already there.")
 
 
-def ledger_decision(path, tool_input):
+def ledger_decision(path: fsio.StrPath, tool_input: dict) -> tuple[Optional[str], bool]:
     """(message, blocking) for a Write or Edit into a schema-governed CSV."""
     schema, glob = ledger_schema_for(path)
     if schema is None:
@@ -185,7 +185,7 @@ def ledger_decision(path, tool_input):
     return ledger_message(path, glob, schema, findings, "the write-time hook"), True
 
 
-def _source_texts(body, textcol):
+def _source_texts(body: str, textcol: str) -> list[str]:
     import csv as _csv, io
     try:
         return [(r.get(textcol) or "").strip() for r in _csv.DictReader(io.StringIO(body))]
@@ -193,7 +193,7 @@ def _source_texts(body, textcol):
         return []
 
 
-def source_row_decision(path, tool_input, prior, append=False):
+def source_row_decision(path: fsio.StrPath, tool_input: dict, prior: str, append: bool = False) -> tuple[Optional[str], bool]:
     """(message, False) for a write into a registered source CSV: each row it adds,
     scored against the rest of the store, so a ruling that restates prose is named
     before `audit` would find it. Warn-only in every mode, a cycle included:
@@ -253,7 +253,7 @@ def source_row_decision(path, tool_input, prior, append=False):
 CSV_REPORT_BYTES = 5 * 1024 * 1024
 
 
-def schema_csvs(root):
+def schema_csvs(root: Path) -> list[tuple[Path, dict, Optional[str]]]:
     """[(path, schema, glob)] for every schema-governed CSV the store's walk finds."""
     seen, files = set(), []
     # The store's own walker, members and excluded directories honoured, so a
@@ -274,7 +274,7 @@ def schema_csvs(root):
     return files
 
 
-def declared_csvs(root):
+def declared_csvs(root: Path) -> list[tuple[Path, Optional[str]]]:
     """[(path, text column or None)] for every CSV the store declares: each
     schema-governed ledger and each registered source, once. These are the
     files the write hook reads on every row written into them."""
@@ -290,7 +290,7 @@ def declared_csvs(root):
     return out
 
 
-def large_csvs(root, limit=None):
+def large_csvs(root: Path, limit: Optional[int] = None) -> list[tuple[Path, int]]:
     """[(path, bytes)] for each declared CSV past CSV_REPORT_BYTES, largest first.
     A declared CSV keeps every row in one file and is never split, because a split
     hides rows from every reader that names the table (RULINGS.csv on

@@ -4,6 +4,12 @@ here reads a file.
 """
 import re
 from collections import Counter, defaultdict
+from typing import Callable, Iterable, Iterator, Optional, Union
+
+# A claim: the sentence as written, and the content tokens it is scored by.
+Claim = tuple[str, set[str]]
+# A scored file, best first: (combined score, claim score, file name, (incoming sentence, its match)).
+Ranked = tuple[float, float, str, tuple[str, str]]
 
 
 STOP = set("""a an the and or but if then than that this these those is are was were be been being
@@ -41,7 +47,7 @@ _LINE_MEANINGFUL = re.compile(r"""\s*(?:[-*+]\s|#|>|\||\d+[.)]\s|```|$)""")
 _NO_JOIN_FROM = re.compile(r"""\s*(?:#|\||```|$)""")   # a bullet's continuation is still its sentence
 
 
-def unwrap(txt):
+def unwrap(txt: str) -> str:
     """`txt` with hard wraps inside a sentence joined by a space. Linear: a joined
     line is kept as its segments and joined once, and only its tail is tested for an
     ending, because rebuilding and re-searching the whole line on every wrap made one
@@ -60,7 +66,7 @@ def unwrap(txt):
     return "\n".join("".join(c) for c in out)
 
 
-def _tail(segments, width=256):
+def _tail(segments: list[str], width: int = 256) -> str:
     """The last `width` or more characters of a line held as segments: all `_ENDS`
     needs, since an ending is a stop followed only by quotes and space."""
     parts, n = [], 0
@@ -100,7 +106,7 @@ MIN_SHARED = 5          # content tokens two claims must actually share
 ENTRY_TOKENS = 8        # content tokens a line needs to BE an entry, not a stem
 
 
-def similar(ta, tb):
+def similar(ta: set[str], tb: set[str]) -> float:
     """Jaccard over two token sets, or 0.0 where they share fewer than MIN_SHARED.
 
     A ratio alone cannot tell a restated fact from two short lines ending in the
@@ -113,7 +119,7 @@ def similar(ta, tb):
     return shared / len(ta | tb) if shared >= MIN_SHARED else 0.0
 
 
-def strip(txt):
+def strip(txt: str) -> str:
     """Body text with frontmatter, code fences and markdown furniture removed."""
     if txt.startswith("---"):
         end = txt.find("\n---", 3)
@@ -128,11 +134,11 @@ def strip(txt):
     return re.sub(r"[*_`#>|\[\]]", " ", txt)
 
 
-def tokens(s):
+def tokens(s: str) -> set[str]:
     return {w for w in WORD.findall(s.lower()) if w not in STOP}
 
 
-def claims(txt):
+def claims(txt: str) -> Iterator[Claim]:
     """(sentence, token-set) for every sentence carrying enough to be a claim."""
     for s in SENT.split(txt):
         s = " ".join(s.split())
@@ -141,7 +147,7 @@ def claims(txt):
             yield s, ts
 
 
-def unclaimed(txt):
+def unclaimed(txt: str) -> Iterator[str]:
     """The sentences `claims` drops as under the floor, with at least one
     content token. What the instrument cannot see is reported beside what it
     saw, because a check cannot name the claims it never formed and a clean
@@ -153,21 +159,22 @@ def unclaimed(txt):
             yield s
 
 
-def _inverted(items, df):
+def _inverted(items: list[tuple[str, str, set[str]]], df: Counter[str]) -> dict[str, list[int]]:
     """Bucket by the 3 rarest tokens, so candidate generation stays near-linear.
 
     Ties in rarity break on the token itself: broken by set order they followed
     the per-process string hash, so each run bucketed differently and a pair
     found by one `audit` was missing from the next on an unchanged store."""
-    inv = defaultdict(list)
+    inv: defaultdict[str, list[int]] = defaultdict(list)
     for i, (_, _, ts) in enumerate(items):
         for w in sorted(ts, key=lambda w: (df[w], w))[:3]:
             inv[w].append(i)
     return inv
 
 
-def cross_file_pairs(docs, floor=PAIR_FLOOR, same_file=False):
-    items: list[tuple[str, str, frozenset]] = []
+def cross_file_pairs(docs: dict[str, str], floor: float = PAIR_FLOOR,
+                     same_file: bool = False) -> list[tuple[float, str, str, str, str]]:
+    items: list[tuple[str, str, set[str]]] = []
     df: Counter[str] = Counter()
     for name, txt in docs.items():
         for s, ts in claims(txt):
@@ -207,7 +214,7 @@ _TARGET = re.compile(r"""https?://\S+|[\w~./-]*\.(?:md|csv|jsonl?|py|sh|txt|toml
 _REDIRECT = re.compile(r"(?:see|cf\.?|composes)\s")   # a verb whose object is the reference
 
 
-def pointer_only(sentence):
+def pointer_only(sentence: str) -> bool:
     """True where a sentence's payload is a cross-reference, not a claim.
 
     The criterion: an opening redirect ("See X", "Composes Y"), or a sentence naming a
@@ -234,18 +241,19 @@ class ClaimIndex:
     was 2.8 s of a 3.1 s score for a 20 KB write at ten times the council corpus.
     """
 
-    def __init__(self, files=()):
-        self.names, self.items = [], []         # items: (file number, sentence, tokens)
-        self.postings = defaultdict(list)       # token: item numbers, ascending
+    def __init__(self, files: Iterable[tuple[str, Iterable[Claim]]] = ()):
+        self.names: list[str] = []
+        self.items: list[tuple[int, str, set[str]]] = []    # (file number, sentence, tokens)
+        self.postings: defaultdict[str, list[int]] = defaultdict(list)    # token: item numbers, ascending
         for name, file_claims in files:
             self.add(name, file_claims)
 
     @classmethod
-    def from_docs(cls, docs):
+    def from_docs(cls, docs: dict[str, str]) -> "ClaimIndex":
         """From {name: stripped body}, the shape `corpus()` returns."""
         return cls((name, claims(body)) for name, body in docs.items())
 
-    def add(self, name, file_claims):
+    def add(self, name: str, file_claims: Iterable[Claim]) -> None:
         f = len(self.names)
         self.names.append(name)
         items, postings = self.items, self.postings
@@ -255,29 +263,30 @@ class ClaimIndex:
             for w in ts:
                 postings[w].append(i)
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.items)
 
-    def __contains__(self, name):
+    def __contains__(self, name: object) -> bool:
         return name in self.names
 
-    def candidates(self, ts):
+    def candidates(self, ts: set[str]) -> list[int]:
         """Item numbers of every claim sharing MIN_SHARED tokens with `ts`, ascending."""
         if len(ts) < MIN_SHARED:
             return []
-        empty = ()
+        empty: tuple[int, ...] = ()
         rare = sorted(ts, key=lambda w: (len(self.postings.get(w, empty)), w))[:len(ts) - MIN_SHARED + 1]
-        found = set()
+        found: set[int] = set()
         for w in rare:
             found.update(self.postings.get(w, empty))
         return sorted(i for i in found if len(ts & self.items[i][2]) >= MIN_SHARED)
 
-    def holds(self, ts, floor):
+    def holds(self, ts: set[str], floor: float) -> bool:
         """True where some claim here scores `floor` or more against `ts`."""
         return any(similar(ts, self.items[i][2]) >= floor for i in self.candidates(ts))
 
 
-def _ranked(index, incoming, inc_all, hidden):
+def _ranked(index: ClaimIndex, incoming: list[Claim], inc_all: set[str],
+            hidden: Callable[[str], bool]) -> list[Ranked]:
     """`score_against`'s rows for one index, skipping the names `hidden` drops."""
     items = index.items
     overlap = Counter(items[i][0] for w in inc_all for i in index.postings.get(w, ()))
@@ -301,7 +310,8 @@ def _ranked(index, incoming, inc_all, hidden):
     return rows
 
 
-def score_against(text, docs, hide=None, extra=None):
+def score_against(text: str, docs: Union[dict[str, str], ClaimIndex], hide: Optional[Callable[[str], bool]] = None,
+                  extra: Optional[dict[str, str]] = None) -> list[Ranked]:
     """Rank files by how much of `text` they already assert.
 
     `docs` is {name: stripped body} or a ClaimIndex. `hide(name)` drops a file from

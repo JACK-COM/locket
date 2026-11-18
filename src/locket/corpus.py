@@ -12,7 +12,7 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Iterator, Optional
 
 import claims
 import corpora
@@ -24,7 +24,7 @@ import paths
 import trust
 
 
-def resolve(name):
+def resolve(name: str) -> Optional[Path]:
     """A corpus path from a shorthand, a project-slug substring, or a literal path.
 
     Returns None and prints the candidates where the name matches no corpus or
@@ -64,7 +64,7 @@ def resolve(name):
     return None
 
 
-def md_files(root):
+def md_files(root: Path) -> list[Path]:
     """Every markdown file the corpus contains: the root's own, subdirectories
     included, then each joined store's own. Sorted by path, so a joined store's
     files sit together.
@@ -77,7 +77,7 @@ def md_files(root):
     return sorted(p for r in corpora.roots_of(root) for p in own_md(r))
 
 
-def own_md(root, pattern="*.md", honor_excluded_files=True):
+def own_md(root: Path, pattern: str = "*.md", honor_excluded_files: bool = True) -> list[Path]:
     """The markdown physically under one store, by that store's own settings.
     `pattern` walks another file type the same way (the ledger sweep takes
     `*.csv`), and a sweep that must see a file the manifest hides from claims
@@ -87,7 +87,7 @@ def own_md(root, pattern="*.md", honor_excluded_files=True):
                   if not (honor_excluded_files and corpora.excluded_file(root, p)))
 
 
-def _corpus_dirs(root):
+def _corpus_dirs(root: Path) -> Iterator[tuple[Path, list[str]]]:
     """Every directory one store's own walk enters: the root, then each member
     directory and everything below it, never descending into a dot-directory,
     an excluded directory or a nested store. Yields (dir, filenames).
@@ -114,7 +114,7 @@ def _corpus_dirs(root):
     skip, mem = s["excluded_dirs"], s["members"]
     listed = {r for r in corpora.raw_corpora().values() if r != root and root in r.parents}
 
-    def entered(name):
+    def entered(name: str) -> bool:
         return name not in skip and not name.startswith(".")
 
     if mem is None:
@@ -152,12 +152,12 @@ def _corpus_dirs(root):
             yield here, sorted(filenames)
 
 
-def has_content(root, csv=True):
+def has_content(root: Path, csv: bool = True) -> bool:
     """Whether a store, its joined stores included, holds anything to score: a non-empty
     markdown file its manifest does not exclude, or with `csv`, a non-empty registered CSV
     source. Stops at the first one, so a store with memory costs almost nothing to ask.
     `csv=False` asks what the meaning index can build from, which is markdown only."""
-    def nonempty(p):
+    def nonempty(p: Path) -> bool:
         try:
             return p.is_file() and p.stat().st_size > 0
         except OSError:
@@ -167,7 +167,7 @@ def has_content(root, csv=True):
                for r in corpora.roots_of(root))
 
 
-def skipped_files(root):
+def skipped_files(root: Path) -> list[tuple[Path, str]]:
     """Files Locket would read in one store but passes over, as (path, why): markdown
     the walk meets, and the CSVs the manifest declares, each a symlink, a hard link,
     not a file, or (markdown only) past MAX_FILE_BYTES. For `doctor`, so a skip is
@@ -191,7 +191,7 @@ def skipped_files(root):
     return out
 
 
-def _own_csv_sources_unchecked(root):
+def _own_csv_sources_unchecked(root: Path) -> list[tuple[Path]]:
     """The declared CSV paths, links included, so `skipped_files` can name the ones
     `_own_csv_sources` drops."""
     entries = trust.read_manifest(root).get("sources")
@@ -203,7 +203,7 @@ def _own_csv_sources_unchecked(root):
     return out
 
 
-def _walk_files(root, pattern="*.md"):
+def _walk_files(root: Path, pattern: str = "*.md") -> Iterator[Path]:
     """Every readable file under one store matching `pattern`, by the walk above.
     The match follows the platform's case rule, as `Path.glob` does. Only plain
     files (`_regular`): a symlink, dangling or not, is dropped, and so is a hard
@@ -247,7 +247,7 @@ def csv_sources(root: Path) -> list[tuple[Path, str, Optional[str]]]:
     return out
 
 
-def _own_csv_sources(root):
+def _own_csv_sources(root: Path) -> list[tuple[Path, str, Optional[str]]]:
     """The CSVs one physical store's manifest registers. A relative `path`
     resolves against that store's root."""
     entries = trust.read_manifest(root).get("sources")
@@ -276,7 +276,7 @@ def _own_csv_sources(root):
 CSV_ERRORS = (OSError, _csv.Error, UnicodeDecodeError)
 
 
-def _rows_of(pth, textcol, labelcol, out):
+def _rows_of(pth: Path, textcol: str, labelcol: Optional[str], out: list[tuple[str, str]]) -> None:
     """Append (label, text) for one registered CSV's rows to `out`; raises one of
     CSV_ERRORS. Into the caller's list, so the rows read before a bad one are kept."""
     with fsio.open_safe(pth, newline="", max_bytes=None) as fh:   # declared CSVs are never capped
@@ -288,7 +288,7 @@ def _rows_of(pth, textcol, labelcol, out):
             out.append((f"{pth.name}#{tag}", t))
 
 
-def csv_rows(root):
+def csv_rows(root: Path) -> list[tuple[str, str]]:
     """[(label, text)] for every registered CSV row, in file order, labelled
     `<file>.csv#<label value>`. Errors in one file skip that file, never raise."""
     out: list[tuple[str, str]] = []
@@ -300,7 +300,7 @@ def csv_rows(root):
     return out
 
 
-def corpus(root, csv=True):
+def corpus(root: Path, csv: bool = True) -> dict[str, str]:
     """{name: stripped body} for every claim source in the corpus.
 
     The registered CSVs are IN the corpus, grouped one pseudo-document per label
@@ -328,7 +328,7 @@ def corpus(root, csv=True):
     return docs
 
 
-def cache_dir(root):
+def cache_dir(root: Path) -> Path:
     """`~/.locket/cache/<digest of the store's real path>/`. Outside the corpus on
     purpose: a cache inside it is a file anyone shipping the directory controls, so
     a cloned repo could plant ranked text for every hook to print, or symlink the
@@ -337,7 +337,7 @@ def cache_dir(root):
     return paths.PATHS.cache / hashlib.sha256(real.encode()).hexdigest()[:16]
 
 
-def ready_cache_dir(root):
+def ready_cache_dir(root: Path) -> Path:
     """`cache_dir(root)`, made 0700 where missing; raises RuntimeError where it is a
     link or a directory another user owns, since every write into it is a rename."""
     d = cache_dir(root)
@@ -355,7 +355,7 @@ def ready_cache_dir(root):
 CLAIM_CACHE = "claims.json"
 
 
-def _splitter_version():
+def _splitter_version() -> str:
     """CLAIMS_VERSION and a digest of claims.py, so a change to the stop list, the token
     pattern or the strip misses every entry even where nobody bumped the number."""
     try:
@@ -372,11 +372,11 @@ SPLITTER = _splitter_version()
 RACY_NS = 2_000_000_000
 
 
-def _file_claims(p):
+def _file_claims(p: Path) -> list[claims.Claim]:
     return list(claims.claims(claims.strip(fsio.read_safe(p))))
 
 
-def _csv_claims(pth, textcol, labelcol):
+def _csv_claims(pth: Path, textcol: str, labelcol: Optional[str]) -> list[tuple[str, list[claims.Claim]]]:
     """[(label, claims)] per row of one registered CSV, rows with no claim kept, so
     every label `corpus()` would carry is still a file in the index. A file that
     stops parsing keeps the rows before the fault, as `csv_rows` does."""
@@ -396,11 +396,11 @@ class ClaimCache:
     Only an optimisation: an unreadable or foreign cache reads as empty, a failed
     save is dropped, and nothing in it decides anything the files would not."""
 
-    def __init__(self, root):
+    def __init__(self, root: Path):
         self.root, self.path = root, cache_dir(root) / CLAIM_CACHE
         self.entries, self.dirty = self._load(), False
 
-    def _load(self):
+    def _load(self) -> dict:
         try:
             with fsio.open_safe(self.path, max_bytes=None) as f:
                 data = json.load(f)
@@ -410,7 +410,7 @@ class ClaimCache:
             pass
         return {}
 
-    def claims_of(self, key, path, make, *args):
+    def claims_of(self, key: str, path: Path, make: Callable[..., Any], *args: Any) -> Any:
         """`make(*args)`, or what it returned while `path` stood as it stands now.
         Raises what the stat or `make` raises, so a caller skips that file."""
         st = os.stat(path)                      # before the read: a later write moves it
@@ -429,7 +429,7 @@ class ClaimCache:
             self.dirty = True
         return value
 
-    def save(self):
+    def save(self) -> None:
         """Write the cache when it changed, dropping files that are gone."""
         if not self.dirty:
             return
@@ -443,7 +443,7 @@ class ClaimCache:
             pass
 
 
-def _encode(value):
+def _encode(value: list) -> list:
     """Claims as JSON: a token set as one space-joined string (tokens hold no space),
     a CSV's rows as [label, claims] pairs."""
     if value and isinstance(value[0][1], list):
@@ -451,12 +451,12 @@ def _encode(value):
     return [[s, " ".join(sorted(ts))] for s, ts in value]
 
 
-def _decode(value, rows=False):
+def _decode(value: object, rows: bool = False) -> list:
     """`_encode` reversed; raises ValueError on any other shape, so a cache that parses
     as JSON but is not one this code wrote reads as a miss, never as a crash."""
     if not isinstance(value, list):
         raise ValueError("claim cache entry is not a list")
-    out = []
+    out: list = []
     for pair in value:
         if not (isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str)):
             raise ValueError("claim cache entry is malformed")
@@ -472,7 +472,7 @@ def _decode(value, rows=False):
 _CACHES = {}
 
 
-def claim_cache(root):
+def claim_cache(root: Path) -> "ClaimCache":
     """One ClaimCache per store per process, so the corpus and archive reads of one
     write share a load, and a long-running server keeps it warm."""
     key = str(cache_dir(root))                  # the path, so a test's scratch PATHS never shares one
@@ -481,7 +481,7 @@ def claim_cache(root):
     return _CACHES[key]
 
 
-def claim_index(root, csv=True):
+def claim_index(root: Path, csv: bool = True) -> claims.ClaimIndex:
     """`corpus(root, csv)` as a ClaimIndex under the same names, its claims from the
     claim cache, for the scorers that read every claim of every file."""
     rs = corpora.roots_of(root)
@@ -507,7 +507,7 @@ def claim_index(root, csv=True):
     return index
 
 
-def archived_claims(root):
+def archived_claims(root: Path) -> claims.ClaimIndex:
     """Every claim already filed under `<corpus>/archive/`, as a ClaimIndex.
 
     Read as a PROVENANCE record, never as corpus: `archive` stays in
@@ -530,7 +530,7 @@ def archived_claims(root):
     return index
 
 
-def _archive_md(root):
+def _archive_md(root: Path) -> Iterator[Path]:
     """Markdown under every directory named `archive` inside the store's members
     (`memory/archive/` under the council home, `archive/` in a flat store) and
     inside each joined store's, so a move out of any member surface keeps its
@@ -540,7 +540,7 @@ def _archive_md(root):
         yield from _own_archive_md(r)
 
 
-def _own_archive_md(root):
+def _own_archive_md(root: Path) -> Iterator[Path]:
     # Each `archive/` is found as a child of a directory the walk enters, because
     # the walk prunes `archive` itself while it stays in `excluded_dirs`. An
     # archive carrying its own manifest is a nested store, not provenance. A host
@@ -562,7 +562,7 @@ def _own_archive_md(root):
             yield from sorted(found[:fsio.MAX_STORE_FILES])
 
 
-def subtract_archived(added, arch):
+def subtract_archived(added: str, arch: claims.ClaimIndex) -> str:
     """`added` with every claim that is already archived removed.
 
     The gate asks "is this text novel?" as a proxy for "is this fact new?", and
