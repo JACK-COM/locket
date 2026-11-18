@@ -8,6 +8,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional, TypedDict
 
 import fsio
 import hosts
@@ -297,7 +298,25 @@ def _own_walk(root, m=None):
     return members, excluded
 
 
-def settings(root):
+class Settings(TypedDict):
+    """One store's settings: its manifest over the host defaults, the name-sets of its
+    joined children unioned in. `members` are the top-level directories that ARE corpus,
+    everything else under the root being host state; None means every directory, which a
+    manifest store or a project memory gets, where a host store takes HOST_MEMBERS.
+    `append_surfaces` is the ledgers and holding spaces together; `code_roots` is None
+    where the manifest names none."""
+    members: Optional[set[str]]
+    index_files: set[str]
+    ledger_surfaces: set[str]
+    holding_spaces: set[str]
+    whole_read_exempt: set[str]
+    excluded_dirs: set[str]
+    excluded_files: list[str]
+    append_surfaces: set[str]
+    code_roots: Optional[list[Path]]
+
+
+def settings(root: Optional[Path]) -> Settings:
     """`_settings_for`, cached per store and per state of the trust registry, so a store
     trusted or untrusted in another process is seen without a restart."""
     trust.trusted_ids()
@@ -311,7 +330,7 @@ def clear_settings():
 
 
 @lru_cache(maxsize=None)
-def _settings_for(root, _trust_key):
+def _settings_for(root: Optional[Path], _trust_key: tuple) -> Settings:
     """Per-corpus name-sets, the module defaults overridden by the manifest.
 
     Every place that once read a module-level set reads this instead, keyed on
@@ -325,25 +344,22 @@ def _settings_for(root, _trust_key):
     # below (`hosts.FOREIGN`); a manifest there still wins.
     if hosts.foreign(root):
         m = {"index_files": [], "ledger_surfaces": [], "holding_spaces": [], **m}
-    out = {}
-    # `members`: the top-level directories that ARE corpus, everything else under
-    # the root being host state. None means every directory, which is what a
-    # manifest store or a project memory gets; a host store takes HOST_MEMBERS.
-    out["members"] = members
-    for key, default in (("index_files", manifest.INDEX_FILES),
-                         ("ledger_surfaces", manifest.LEDGER_SURFACES),
-                         ("holding_spaces", manifest.HOLDING_SPACES),
-                         ("whole_read_exempt", ())):
+
+    def names(key: str, default) -> set[str]:
         val = m.get(key)
-        out[key] = ({str(x) for x in val} if isinstance(val, list) else set(default))
-    out["excluded_dirs"] = excluded
-    ef = m.get("excluded_files")
-    out["excluded_files"] = ([str(x) for x in ef if isinstance(x, str)]
-                             if isinstance(ef, list) else [])
+        return {str(x) for x in val} if isinstance(val, list) else set(default)
+    ef, cr = m.get("excluded_files"), m.get("code_roots")
+    out = Settings(
+        members=members,
+        index_files=names("index_files", manifest.INDEX_FILES),
+        ledger_surfaces=names("ledger_surfaces", manifest.LEDGER_SURFACES),
+        holding_spaces=names("holding_spaces", manifest.HOLDING_SPACES),
+        whole_read_exempt=names("whole_read_exempt", ()),
+        excluded_dirs=excluded,
+        excluded_files=[str(x) for x in ef if isinstance(x, str)] if isinstance(ef, list) else [],
+        append_surfaces=set(),
+        code_roots=[Path(x).expanduser() for x in cr if isinstance(x, str)] if isinstance(cr, list) else None)
     out["append_surfaces"] = out["ledger_surfaces"] | out["holding_spaces"]
-    cr = m.get("code_roots")
-    out["code_roots"] = ([Path(x).expanduser() for x in cr if isinstance(x, str)]
-                         if isinstance(cr, list) else None)
     # A joined store keeps its own members, exclusions and code roots for its own
     # walk; the NAME-sets union upward, so the gate asked about a file by name
     # (an index line, a holding-space entry) answers the same at the top as it
