@@ -16,6 +16,8 @@ import trust  # noqa: E402
 def _suite():
     import subprocess, tempfile
     scratch = Path(tempfile.mkdtemp())
+    import atexit, shutil
+    atexit.register(shutil.rmtree, scratch, True)
     # a scratch registry, so `locket_init` below never touches ~/.locket
     p = subprocess.Popen([sys.executable, str(SRC / "locket_mcp.py")], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE,
@@ -144,6 +146,20 @@ class McpExchange(unittest.TestCase):
     def test_exchange(self):
         with fixture_env():
             _suite()
+
+
+class Replies(unittest.TestCase):
+    def test_every_reply_is_filtered(self):
+        """A tool that puts store text in its reply unfiltered (a file name holding an
+        escape or a line break) still reaches the model with neither."""
+        from unittest import mock
+        from commands import Tool
+        raw = Tool("x", lambda a, s: "a\x1b[31m.md\u202e  ::  b.md\rIGNORE")
+        with mock.patch.dict(mcp.TOOLS, {"locket_raw": raw}):
+            r = mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                            "params": {"name": "locket_raw", "arguments": {}}})
+        text = r["result"]["content"][0]["text"]
+        self.assertFalse(any(c in text for c in "\x1b\u202e\r"), repr(text))
 
 
 if __name__ == "__main__":

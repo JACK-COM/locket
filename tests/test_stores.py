@@ -72,7 +72,7 @@ class Stores(StoreCase):
 
     def test_a_project_store_answers_to_its_name(self):
         # --- a project store answers to its manifest's name, and to its slug still
-        real_claude, fake = hosts.claude(), Path(tempfile.mkdtemp())
+        real_claude, fake = hosts.claude(), Path(tempfile.mkdtemp(dir=self.tmp))
         proj = fake / "projects" / "-Users-x-devdocs" / "memory"
         proj.mkdir(parents=True); (proj / "a.md").write_text("A note about the project.\n")
         paths.PATHS.host_stores["council"] = fake

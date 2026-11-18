@@ -30,6 +30,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cli
+import fsio
 from commands import Session, Tool
 
 PROTOCOL = "2025-03-26"
@@ -81,7 +82,7 @@ def handle(msg):
             return {"jsonrpc": "2.0", "id": mid,
                     "error": {"code": -32602, "message": f"unknown tool {name!r}"}}
         try:
-            text = TOOLS[name].call(args, SESSION)
+            text = fsio.safe(TOOLS[name].call(args, SESSION))   # every tool's reply, store text in it
             return {"jsonrpc": "2.0", "id": mid,
                     "result": {"content": [{"type": "text", "text": text}], "isError": False}}
         except Exception as e:                      # a tool error is a result, not a crash

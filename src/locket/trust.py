@@ -329,7 +329,7 @@ def person_confirms(question: str, details: list[str], act: str) -> bool:
     if not (sys.stdin.isatty() and sys.stderr.isatty()):
         return False
     say = lambda line: print(line, file=sys.stderr)   # one stream for the whole exchange
-    say(question)
+    say(fsio.relay(question, 2000, lines=True))
     for line in details:
         say(f"  {fsio.relay(line)}")
     sys.stderr.write(f"Type yes to {act}: "); sys.stderr.flush()

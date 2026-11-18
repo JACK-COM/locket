@@ -16,6 +16,9 @@ class BashGuard(StoreCase):
     COUNCIL = False
 
     def test_fires_on_the_thing_and_no_near_miss(self):
+        # The council at its real place under HOME, so every home-relative spelling names
+        # it; the store inside is a slug that exists nowhere, so nothing live is read.
+        self.hosts(stores={"council": paths.HOME / ".claude"})
         # a command naming a scratch path is exempt by design, so under a HOME in
         # /tmp (Homebrew's test sandbox) every absolute-path case would pass silently
         # Claude Code's home is the real one for this block, under HOME, so every
@@ -103,19 +106,15 @@ class BashGuard(StoreCase):
             ):
                 assert bw(quiet) == (None, False), f"decoy fired: {quiet}"
             # a run-time variable is undecidable from the command: expanded, it may warn, never block
-            saved = {k: os.environ.get(k) for k in ("LOCKET_T_OUT", "LOCKET_T_MEM", "LOCKET_T_UNSET")}
-            os.environ.update(LOCKET_T_OUT="/Users/x/elsewhere/", LOCKET_T_MEM=cmem)
+            env = mock.patch.dict(os.environ, LOCKET_T_OUT="/Users/x/elsewhere/", LOCKET_T_MEM=cmem)
+            env.start()
+            self.addCleanup(env.stop)
             os.environ.pop("LOCKET_T_UNSET", None)
             for quiet in ('cat > "$LOCKET_T_OUT/pr.md" <<EOF', "cat > ${LOCKET_T_OUT}pr.md",
                           "echo x >> $LOCKET_T_UNSET/topic_note.md", 'echo x > "$(mktemp -d)/n.md"'):
                 assert bw(quiet) == (None, False), f"a variable outside the corpus fired: {quiet}"
             msg, blk = bw("echo x >> $LOCKET_T_MEM/topic_note.md")
             assert msg and not blk, "a variable expanding into a corpus warns rather than blocks"
-            for k, v in saved.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
             msg, blk = bw("python3 - <<'EOF'\npathlib.Path('MEMORY.md').write_text(s)\nEOF")
             assert msg and not blk, "a scripted write warns rather than blocks"
             # a Python program's targets are read off the program: names inside its data are not

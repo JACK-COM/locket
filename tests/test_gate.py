@@ -298,7 +298,7 @@ class QuestionGate(StoreCase):
         # --- the §2e question gate -------------------------------------------------
         # Driveable without ollama: an unreachable embedder degrades the message and
         # never changes the decision, which is the property that lets it block at all.
-        d = Path(tempfile.mkdtemp())
+        d = Path(tempfile.mkdtemp(dir=self.tmp))
         (d / "asked.jsonl").write_bytes(
             b'{"message":{"content":[{"type":"tool_use","name":"Bash",'
             b'"input":{"command":"python3 ~/.claude/scripts/memfind.py \\"x\\" council"}}]}}\n')

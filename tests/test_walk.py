@@ -84,9 +84,9 @@ class HostHome(StoreCase):
             assert got == {"memory/a.md", "rules/r.md"}, f"an unlistable root dropped its members: {got}"
         # A member path is entered only if every component would be: `memory/archive`
         # stays provenance even when a manifest names it as a member.
-        hosts.HOST_MEMBERS["home"] = {"memory", "rules", "memory/archive"}; corpora.clear_settings()
+        self.hosts(members={"home": {"memory", "rules", "memory/archive"}})
         assert not any("archive" in str(q) for q in corpus.md_files(home)), "a member path entered an excluded dir"
-        hosts.HOST_MEMBERS["home"] = {"memory", "rules"}; corpora.clear_settings()
+        self.hosts(members={"home": {"memory", "rules"}})
         # One unreadable file is skipped and the rest still score: raised, it emptied the
         # whole read inside the hook and the catch-all let the write through.
         if hasattr(os, "getuid") and os.getuid() != 0:

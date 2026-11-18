@@ -189,5 +189,24 @@ class MemfindBehaviour(unittest.TestCase):
             self.skipTest(f"no embedder here: {e}")
 
 
+class Fingerprint(unittest.TestCase):
+    def test_two_csvs_of_one_name_are_two_entries(self):
+        """Joined stores can each register a RULINGS.csv; keyed by name, an edit to one
+        left the index looking fresh."""
+        import tempfile
+        from unittest import mock
+        with fixture_env(), tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "s"; root.mkdir()
+            (root / manifest.MANIFEST).write_text("{}\n")
+            a, b = Path(t) / "a" / "RULINGS.csv", Path(t) / "b" / "RULINGS.csv"
+            for p in (a, b):
+                p.parent.mkdir(); p.write_text("Ruling,Area\n")
+            with mock.patch.object(mf, "csv_sources", return_value=[(a, "", ""), (b, "", "")]):
+                before = mf.corpus_fingerprint(root)
+                a.write_text("Ruling,Area\nA new row that changes the file size.,x\n")
+                after = mf.corpus_fingerprint(root)
+        self.assertNotEqual(before, after)
+
+
 if __name__ == "__main__":
     unittest.main()

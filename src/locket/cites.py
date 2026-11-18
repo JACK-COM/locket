@@ -68,7 +68,8 @@ def project_dir_for(corpus_root):
                 best = (e, s)
         if best is None:
             return None
-        cur, rest = cur / best[0], rest[len(best[1]):].lstrip("-")
+        # one dash is the separator; a second belongs to a name that starts with `.` or `_`
+        cur, rest = cur / best[0], rest[len(best[1]) + 1:]
     return cur
 
 

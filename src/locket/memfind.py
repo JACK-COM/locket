@@ -111,6 +111,18 @@ def _is_row(label):
     return ".csv#" in label
 
 
+def take_n(rest, default):
+    """(top, rest without `-n N`). Raises ValueError when N is missing or not a whole number."""
+    if "-n" not in rest:
+        return default, rest
+    j = rest.index("-n")
+    try:
+        top = int(rest[j + 1])
+    except (IndexError, ValueError):
+        raise ValueError("-n takes a whole number, as in  -n 10") from None
+    return top, rest[:j] + rest[j + 2:]
+
+
 def corpus_fingerprint(root):
     """{filename: [mtime_ns, size]} per file, so a stale index is detectable."""
     # Keyed by corpus-relative path, never basename: a store with depth holds
@@ -122,7 +134,7 @@ def corpus_fingerprint(root):
     # The registered CSVs and the manifest naming them, so editing either one, or
     # adding a source, invalidates the index exactly as editing a memory file does.
     for pth, _, _ in csv_sources(root):
-        fp[pth.name] = [pth.stat().st_mtime_ns, pth.stat().st_size]
+        fp["csv:" + str(pth.resolve())] = [pth.stat().st_mtime_ns, pth.stat().st_size]
     for r in rs:                                # a joined store's manifest counts too
         for name in (MANIFEST, manifest.MANIFEST, manifest.OLD_MANIFEST):
             man = Path(r) / name
@@ -193,7 +205,7 @@ def build_index(root, quiet=False):
     # file's sentences move together, so it reuses a contiguous SLICE. A CSV row is
     # independent of its neighbours and every row below an edit shifts, so a row
     # reuses by its own TEXT. Keying a row on its label would never hit: labels are
-    # `<file>.csv#<area>` and the fingerprint is per basename.
+    # `<file>.csv#<area>` and the fingerprint is per file.
     old_slice = {}                                     # file -> (start, count)
     old_row = {}                                       # row text -> position
     if old_items:
@@ -637,9 +649,10 @@ def main(argv):
                   file=sys.stderr); return 1
         build_index(root); return 0
     if argv[1] == "--siblings":
-        rest, top = argv[2:], 30
-        if "-n" in rest:
-            j = rest.index("-n"); top = int(rest[j + 1]); rest = rest[:j] + rest[j + 2:]
+        try:
+            top, rest = take_n(argv[2:], 30)
+        except ValueError as e:
+            print(f"memfind: {e}", file=sys.stderr); return 1
         root = corpus.resolve(rest[0]) if rest else corpora.corpus_here(os.getcwd())
         if root is None:
             print("no corpus for this directory; name one", file=sys.stderr); return 1
@@ -653,10 +666,10 @@ def main(argv):
         return 0
 
     statement = argv[1]
-    rest = argv[2:]
-    top = 5
-    if "-n" in rest:
-        j = rest.index("-n"); top = int(rest[j + 1]); rest = rest[:j] + rest[j + 2:]
+    try:
+        top, rest = take_n(argv[2:], 5)
+    except ValueError as e:
+        print(f"memfind: {e}", file=sys.stderr); return 1
     root = corpus.resolve(rest[0]) if rest else corpora.corpus_here(os.getcwd())
     if root is None:
         print("no corpus for this directory; name one", file=sys.stderr)

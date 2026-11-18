@@ -33,10 +33,12 @@ class GrepAssist(StoreCase):
 
     def test_decision_log(self):
         # --- grepassist's decision log: never raises, trims atomically, records every branch
-        real_paths, logdir = paths.PATHS, Path(tempfile.mkdtemp())
+        real_paths, logdir = paths.PATHS, Path(tempfile.mkdtemp(dir=self.tmp))
         try:
             paths.PATHS = real_paths.replace(grepassist_log=logdir / "ro" / "ga.csv")
             (logdir / "ro").mkdir(); (logdir / "ro").chmod(0o500)
+            ro = logdir / "ro"                  # writable again, or the cleanup cannot remove it
+            self.addCleanup(lambda: ro.exists() and ro.chmod(0o700))
             assert grepassist.log("Bash", "declined", "x", "p") == 0, "an unwritable log must not raise"
             (logdir / "ro").chmod(0o700)
             paths.PATHS = real_paths.replace(grepassist_log=logdir / "ga.csv")
@@ -49,7 +51,7 @@ class GrepAssist(StoreCase):
                 paths.PATHS.grepassist_log.read_text().splitlines()[-1].endswith(",'=cmd"), "a formula-led pattern must be quoted"
             assert paths.PATHS.grepassist_log.stat().st_mode & 0o777 in (0o600, 0o644), paths.PATHS.grepassist_log.stat().st_mode
             fresh = logdir / "hook.csv"
-            nowhere = Path(tempfile.mkdtemp())
+            nowhere = Path(tempfile.mkdtemp(dir=self.tmp))
             for cmd, reason in (("grep -rn 'a fact here' .", "no-corpus"), ("echo hi", None)):
                 payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": str(nowhere),
                                       "tool_input": {"command": cmd}})
@@ -76,7 +78,7 @@ class GrepAssist(StoreCase):
             "code_roots": [str(d)]}))
         corpora.clear_settings()
         # grepassist places a search by its path words as the shell expands them, from a cwd in no store
-        outside, real_home = Path(tempfile.mkdtemp()), os.environ["HOME"]
+        outside, real_home = Path(tempfile.mkdtemp(dir=self.tmp)), os.environ["HOME"]
         assert corpora.corpus_here(outside) is None, "the cwd fallback has nothing here, so the path must place it"
         os.environ["HOME"] = str(d)
         try:

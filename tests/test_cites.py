@@ -1,4 +1,5 @@
 """cites: what a path:line citation is, the scope it lands in, and whether it resolves."""
+import re
 import unittest
 from unittest import mock
 
@@ -28,6 +29,15 @@ class Cites(StoreCase):
         assert cites.enclosing_scope(src, 8) is None, cites.enclosing_scope(src, 8)
 
     def test_project_slug_round_trips(self):
+        # two working directories whose names lose their dot and underscore in the slug
+        for name in ("my.app", "my_app-two", ".dotted"):
+            work = (self.tmp / "work" / name).resolve()
+            work.mkdir(parents=True)
+            mem = self.council / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(work)) / "memory"
+            mem.mkdir(parents=True)
+            (mem / "a.md").write_text("A project note.\n")
+        corpora.clear_settings()
+        checked = 0
         # The slug is lossy (dots, dashes and underscores all arrive as `-`), so the
         # decode is only trustworthy if it round-trips through the encoder.
         for name, c in sorted(corpora.all_corpora().items()):
@@ -36,6 +46,8 @@ class Cites(StoreCase):
             d = cites.project_dir_for(c)
             if d is not None:
                 assert corpora.corpus_for_cwd(d) == c, (name, d)
+                checked += 1
+        assert checked == 3, f"{checked} of the three project stores decoded"
 
     def test_resolution(self):
         home = self.tmp / "home"

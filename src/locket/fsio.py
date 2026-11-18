@@ -48,6 +48,14 @@ def relay(text: object, limit: int = 200, lines: bool = False) -> str:
 PLAIN_HELP: dict = {"color": False} if sys.version_info >= (3, 14) else {}
 
 
+def safe(text: object) -> str:
+    """`text` with every control, bidi and invisible character but newline and tab made a
+    space: what SafeOut writes, for a string that reaches an agent another way."""
+    import unicodedata
+    keep = "\n\t"
+    return "".join(c if c in keep or unicodedata.category(c) not in _INVISIBLE else " " for c in str(text))
+
+
 class SafeOut:
     """A text stream that passes every line through `relay(lines=True)`'s character
     rule: whatever a mode prints (a title, a file name, a history line from a store)
@@ -57,10 +65,7 @@ class SafeOut:
         self._s = stream
 
     def write(self, text: object) -> int:
-        import unicodedata
-        keep = "\n\t"
-        return self._s.write("".join(c if c in keep or unicodedata.category(c) not in _INVISIBLE else " "
-                                     for c in str(text)))
+        return self._s.write(safe(text))
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._s, name)
