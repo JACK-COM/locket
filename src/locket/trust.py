@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+import _guard
 import fsio
 import hosts
 import manifest
@@ -305,20 +306,9 @@ def human_confirms(d: Path) -> bool:
         trust_summary(d), "trust it")
 
 
-def person_confirms(question: str, details: list[str], act: str) -> bool:
-    """True only when a person at a terminal types `yes` to `question`. The one
-    gate for every setting an agent must not be able to change on its own word."""
-    if not (sys.stdin.isatty() and sys.stderr.isatty()):
-        return False
-    say = lambda line: print(line, file=sys.stderr)   # one stream for the whole exchange
-    say(fsio.relay(question, 2000, lines=True))
-    for line in details:
-        say(f"  {fsio.relay(line)}")
-    sys.stderr.write(f"Type yes to {act}: "); sys.stderr.flush()
-    try:
-        return sys.stdin.readline().strip() == "yes"
-    except (EOFError, OSError):
-        return False
+# The one gate for every setting an agent must not change on its own word: true only
+# when a person at a terminal types `yes`. Shared with Augur and Grille.
+person_confirms = _guard.person_confirms
 
 
 def trust_summary(d: fsio.StrPath) -> list[str]:

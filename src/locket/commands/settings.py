@@ -8,6 +8,7 @@ import os
 import sys
 import textwrap
 
+import _guard
 import fsio
 from commands import Verb
 
@@ -91,19 +92,6 @@ def show():
     return 1 if findings else 0
 
 
-def _loopback(url):
-    """Whether `url` names this machine, so embedding through it sends nothing away."""
-    import ipaddress
-    from urllib.parse import urlparse
-    host = (urlparse(url).hostname or "").lower()
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
 def _set_embed(args):
     import _embed
     import _settings
@@ -127,7 +115,7 @@ def _set_embed(args):
     if "ollama_host" in changes and not changes["ollama_host"].startswith(("http://", "https://")):
         print(f"--ollama-host needs a scheme, e.g. http://{changes['ollama_host']}", file=sys.stderr)
         return 2
-    if "ollama_host" in changes and not args.dry_run and not _loopback(changes["ollama_host"]):
+    if "ollama_host" in changes and not args.dry_run and not _guard.is_loopback(changes["ollama_host"]):
         # every text Locket embeds goes to this host, memory included: a person decides that
         import trust
         if not trust.person_confirms(
@@ -171,7 +159,7 @@ def _set_embed(args):
         touched = set(changes) | clearing | (set(_embed.CONFIG_KEYS) if args.reset else set())
         data = _settings.load()[0]
         for k in sorted(touched):
-            for p in _settings.overriding(data, "embed", k, usable=_embed._usable):
+            for p in _settings.overriding(data, "embed", k, usable=_embed.usable):
                 print(f"note: {p} sets its own {k}, so this change does not reach {p}; "
                       f"`{p} configure embedder --{k.replace('_', '-')} default` makes it follow the global one")
     show()

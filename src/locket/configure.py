@@ -60,7 +60,7 @@ def legacy_settings():
     except (OSError, ValueError, RuntimeError):
         return None
     e = data.get("embed") if isinstance(data, dict) else None
-    return {k: v for k, v in e.items() if k in _embed.CONFIG_KEYS and _embed._usable(k, e)} \
+    return {k: v for k, v in e.items() if k in _embed.CONFIG_KEYS and _embed.usable(k, e)} \
         if isinstance(e, dict) else None
 
 

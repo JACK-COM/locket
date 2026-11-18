@@ -230,6 +230,20 @@ class Registry(StoreCase):
             msg, blocking = bashguard.decide(f"cat {moved}", str(self.tmp))
         self.assertTrue(blocking and msg, msg)
 
+    def test_a_sibling_pieces_settings_are_refused(self):
+        """Augur's and Grille's settings say what runs and where text goes, so a shell
+        command naming either, by home-relative form or by an `*_HOME` move, is refused
+        on the same terms as Locket's registry, and the refusal names the file."""
+        for cmd in ("cat ~/.augur/augur.json", "echo '{}' > ~/.grille/grille.json"):
+            msg, blocking = bashguard.decide(cmd, str(self.tmp))
+            self.assertTrue(blocking and msg, cmd)
+        moved = self.tmp / "ah"
+        with mock.patch.dict(os.environ, AUGUR_HOME=str(moved)):
+            msg, blocking = bashguard.decide(f"sed -i '' s/x/y/ {moved}/augur.json", str(self.tmp))
+        self.assertTrue(blocking and str(moved) in (msg or ""), msg)
+        msg, _ = bashguard.decide("cat notes/augur.md", str(self.tmp))
+        self.assertIsNone(msg)
+
     def test_a_config_name_in_any_case_is_read(self):
         store = (self.tmp / "s").resolve(); store.mkdir()
         (store / manifest.MANIFEST).write_text("{}\n")

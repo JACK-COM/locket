@@ -15,6 +15,7 @@ import shlex
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple, Optional
 
+import _guard
 import claims
 import corpora
 import corpus
@@ -564,9 +565,9 @@ REGISTRY_REFUSAL = ("This touches Locket's trust registry or embedder settings (
 
 def registry_paths():
     """The files no agent may write: the trust registry, Locket's config, and the
-    Panoply settings that name the embedder host."""
-    return [paths.PATHS.registry, Path(os.environ.get("PANOPLY_CONFIG", str(paths.HOME / ".panoply" / "config.json"))),
-            paths.PATHS.state / "config.json"]
+    settings files panoply-lib's guard names, which say what a Panoply piece runs and
+    where it sends text."""
+    return [paths.PATHS.registry, paths.PATHS.state / "config.json", *_guard.guarded()]
 
 
 def is_registry(path):

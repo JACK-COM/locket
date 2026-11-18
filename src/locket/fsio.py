@@ -11,6 +11,8 @@ import urllib.parse
 from pathlib import Path
 from typing import IO, Any, Iterator, Optional, TextIO, Union
 
+import _guard
+
 # What every path parameter here takes: a string or anything `os.fspath` reads.
 StrPath = Union[str, "os.PathLike[str]"]
 
@@ -25,35 +27,15 @@ def inode(p: StrPath) -> Optional[tuple[int, int]]:
     return st.st_dev, st.st_ino
 
 
-_INVISIBLE = frozenset(("Cc", "Cf", "Co", "Cs", "Cn", "Zl", "Zp"))
-
-
-def relay(text: object, limit: int = 200, lines: bool = False) -> str:
-    """Text from a store, made safe to put in front of an agent or on a terminal:
-    every control, format, private-use, unassigned and line-separator character
-    becomes a space (a newline is how a planted label poses as a fresh instruction;
-    an escape sequence rewrites a terminal; bidi overrides, zero-width marks and tag
-    characters hide text from the person reading it), runs collapse, and the result
-    is cut to `limit` characters."""
-    import unicodedata
-    if lines:                               # a row the user wrote across lines keeps them
-        return "\n".join(relay(ln, limit) for ln in str(text)[:limit * 4].split("\n"))[:limit]
-    flat = "".join(" " if unicodedata.category(c) in _INVISIBLE else c for c in str(text)[:limit * 4])
-    flat = " ".join(flat.split())
-    return flat if len(flat) <= limit else flat[:limit - 1] + "\u2026"
+# Text made safe to print lives in panoply-lib's guard, shared with Augur and Grille.
+_INVISIBLE = _guard.INVISIBLE
+relay = _guard.relay
+safe = _guard.safe
 
 
 # argparse colours help on a terminal from Python 3.14; SafeOut strips the ESC of each
 # colour code and leaves `[1;34m` on screen. Every parser takes this, and its subparsers inherit it.
 PLAIN_HELP: dict = {"color": False} if sys.version_info >= (3, 14) else {}
-
-
-def safe(text: object) -> str:
-    """`text` with every control, bidi and invisible character but newline and tab made a
-    space: what SafeOut writes, for a string that reaches an agent another way."""
-    import unicodedata
-    keep = "\n\t"
-    return "".join(c if c in keep or unicodedata.category(c) not in _INVISIBLE else " " for c in str(text))
 
 
 class SafeOut:

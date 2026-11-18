@@ -224,11 +224,12 @@ SHELL_CONFIG_REFUSAL = (
     "your file-reading tool, which no Locket guard refuses; `locket schema {store}` checks it. A person "
     "edits it by hand: tell the user what you would change and why.")
 SHELL_REGISTRY_REFUSAL = (
-    "This shell command names Locket's trust registry or embedder settings ({reg}), and a shell "
-    "command naming either is refused whether or not it writes. To read them, `locket corpora` lists "
-    "the stores and `locket configure` shows each setting and where it comes from. Changing either is "
-    "a person's act at a terminal: ask the user to run  locket trust <dir>, locket untrust <dir>  or  "
-    "locket configure embedder ...  themselves.")
+    "This shell command names {reg}, which decides what Locket trusts or what a Panoply piece "
+    "runs and where it sends text, and a shell command naming it is refused whether or not it "
+    "writes. To read it, `locket corpora` lists the trusted stores, and `locket configure`, "
+    "`augur configure backend --list` and `grille check` show each setting and where it comes "
+    "from. Changing it is a person's act at a terminal: ask the user to run  locket trust <dir>, "
+    "locket untrust <dir>  or the piece's own  configure ...  themselves.")
 
 
 def _store_config(sh):
@@ -240,9 +241,10 @@ def _registry(sh):
     # A shell command naming the registry is refused whether or not it writes: no
     # agent task needs the file, and a write to it would grant trust.
     b = sh.bare
-    if (".locket" in b and ("corpora.json" in b or "config.json" in b)) \
-            or (".panoply" in b and "config.json" in b) or any(str(p) in b for p in gate.registry_paths()):
-        return SHELL_REGISTRY_REFUSAL.format(reg=paths.PATHS.registry), True
+    for p in gate.registry_paths():
+        # by full path, or by its directory and name wherever they appear (`~/.augur/augur.json`)
+        if str(p) in b or (p.parent.name in b and p.name in b):
+            return SHELL_REGISTRY_REFUSAL.format(reg=p), True
     return None
 
 

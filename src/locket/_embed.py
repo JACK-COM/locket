@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/embed.py (77b4bdf) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/embed.py (77b4bdf+uncommitted) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """embed: the embedder ladder the Panoply's pieces share.
 
 Ranks text by meaning on whatever this machine can serve, in order: ollama as it
@@ -31,6 +31,16 @@ import urllib.request
 from pathlib import Path
 
 import numpy as np
+
+try:
+    from . import _settings as _pieces_settings, _web as web
+except ImportError:
+    try:
+        import _settings as _pieces_settings
+        import _web as web
+    except ImportError:
+        import settings as _pieces_settings
+        import web
 
 # The shipped values; apply_config falls back to these, so they live in one place.
 SHIPPED = {"model": "embeddinggemma-2:270m", "ollama_host": "http://127.0.0.1:11434", "autostart": True}
@@ -107,7 +117,7 @@ def _file_venv(raw):
     return p if p.is_absolute() else None
 
 
-def _usable(key, section):
+def usable(key, section):
     """Whether `section` holds a value for `key` that may take effect."""
     v = section.get(key)
     return (isinstance(v, bool if key == "autostart" else str) and v != ""
@@ -134,7 +144,7 @@ def apply_config(section=None):
             raw = os.environ[set_by]
             value = (raw != "1") if key == "autostart" else Path(raw).expanduser() if key == "venv" else raw
             src = f"env {set_by}"
-        elif hit := next(((label, s[key]) for label, s in layers if _usable(key, s)), None):
+        elif hit := next(((label, s[key]) for label, s in layers if usable(key, s)), None):
             value = _file_venv(hit[1]) if key == "venv" else hit[1]
             src = hit[0]
         else:
@@ -145,9 +155,8 @@ def apply_config(section=None):
     _ACTIVE = None
     return out
 
-# Every piece that ranks through the venv, by its command. A new piece that does adds
-# its name here, or another piece's uninstall will take the venv from under it.
-VENV_USERS = ("locket", "grille")
+# Every piece that ranks through the venv, by its command: the pieces that keep settings.
+VENV_USERS = _pieces_settings.PIECES
 
 
 def shared_venv(me):
@@ -193,13 +202,16 @@ def tag(backend):
     return MODEL if backend == "ollama" else f"onnx:{ONNX_MODEL}@{ONNX_REVISION[:12]}"
 
 
-def _open(req, timeout):
-    """urllib with proxies from the environment only. The default also asks macOS's
-    SystemConfiguration, and after that lookup on a remote plain-http request every child
-    this process starts died of SIGSEGV before exec (an `ollama serve` spawn, a piece's
-    pdftotext). Measured under Python 3.9 and 3.14; HTTP_PROXY and NO_PROXY still apply."""
-    proxies = urllib.request.ProxyHandler(urllib.request.getproxies_environment())
-    return urllib.request.build_opener(proxies).open(req, timeout=timeout)
+def reset():
+    """Forget the resolved backend, so the next call resolves it again."""
+    global _ACTIVE
+    _ACTIVE = None
+
+
+def _open(req, timeout, follow=None):
+    """web's client: environment proxies only (see web), and no redirect followed except
+    on a download whose files are checked by digest."""
+    return web.open_url(req, timeout, follow=follow)
 
 
 def _ollama_up(timeout=1.5):
@@ -324,7 +336,7 @@ def _fetch_model(quiet):
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
             h = hashlib.sha256()
-            with _open(url, TIMEOUT) as r, open(part, "wb") as f:
+            with _open(url, TIMEOUT, follow="any") as r, open(part, "wb") as f:
                 for block in iter(lambda: r.read(1 << 20), b""):
                     h.update(block)
                     f.write(block)
@@ -446,11 +458,30 @@ def resolve_backend(want=None):
         "  3. nothing: ranking falls back to word overlap, which cannot see a paraphrase")
 
 
-def embed(texts, quiet=False, backend=None):
+def embed(texts, quiet=False, backend=None, cache=None):
     """Embed a list of strings on the resolved backend, or on `backend` if given.
-    Raises RuntimeError with a readable message."""
+    `cache` is any mapping from cache_key(backend, text) to a vector: a text found there is
+    not embedded again, and each new vector is stored in it. Raises RuntimeError with a
+    readable message."""
     name, _ = resolve_backend(backend)
-    return _embed_ollama(texts, quiet) if name == "ollama" else _embed_onnx(texts, quiet)
+    run = _embed_ollama if name == "ollama" else _embed_onnx
+    if cache is None:
+        return run(texts, quiet)
+    keys = [cache_key(name, t) for t in texts]
+    out = [cache.get(k) for k in keys]
+    todo = [i for i, v in enumerate(out) if v is None]
+    if todo:
+        for i, v in zip(todo, run([texts[i] for i in todo], quiet)):
+            out[i] = cache[keys[i]] = v
+    return out
+
+
+def cache_key(backend, text):
+    """The key a vector cache stores `text` under: the space it was embedded in and the
+    text as the embedder sees it, so a new model or a longer cut is a miss."""
+    import hashlib
+    seen = text.replace("\n", " ")[:EMBED_CHARS]
+    return f"{tag(backend)}:{hashlib.sha1(seen.encode('utf-8', 'surrogatepass')).hexdigest()}"
 
 
 # ---------------------------------------------------------------- vectors
@@ -566,7 +597,7 @@ def _selftest_fetch():
     real_open, saved = _open, dict(ONNX_SHA256)
     body = {"tokenizer.json": b"tok", ONNX_FILE: b"graph", ONNX_FILE + "_data": b"weights"}
     served = {}
-    _open = lambda url, timeout: io.BytesIO(served[url.rsplit(f"{ONNX_REVISION}/", 1)[1]])
+    _open = lambda url, timeout, follow=None: io.BytesIO(served[url.rsplit(f"{ONNX_REVISION}/", 1)[1]])
     try:
         ONNX_SHA256.update({k: hashlib.sha256(v).hexdigest() for k, v in body.items()})
         with tempfile.TemporaryDirectory() as v, settings(VENV=Path(v)):
@@ -583,7 +614,7 @@ def _selftest_fetch():
             assert (_fetch_model(quiet=True) / ONNX_FILE).read_bytes() == b"graph"
             assert data.read_bytes() == b"weights", "a verified file did not land"
             assert not model_missing(), "a fetched model reads as missing"
-        def refuse(url, timeout):
+        def refuse(url, timeout, follow=None):
             raise urllib.error.URLError("offline")
         _open = refuse
         with tempfile.TemporaryDirectory() as v, settings(VENV=Path(v)):
