@@ -5,6 +5,7 @@ import json
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from tests.harness import StoreCase
@@ -503,6 +504,21 @@ class Stores(StoreCase):
         (sd / manifest.MANIFEST).unlink()
         assert json.loads(json.dumps(manifest.MANIFEST_SCHEMA))["properties"].keys() >= {
             "belongs_to", "ledgers", "sources", "members"}, "the schema names the keys the reader takes"
+
+
+class UntrustedNote(StoreCase):
+    def test_a_verb_says_why_it_passed_over_a_store(self):
+        """A folder whose manifest changed since a person trusted it acts as no store; a
+        verb run inside it names that folder and the command that restores it, where it
+        fell back to another store in silence."""
+        work = (self.tmp / "work").resolve()
+        (work / "sub").mkdir(parents=True)
+        (work / manifest.MANIFEST).write_text("{}\n")
+        with mock.patch.object(trust, "trusted", lambda d: False):
+            note = trust.untrusted_note(work / "sub")
+        self.assertIn(str(work), note or "")
+        self.assertIn("not trusted", note or "")
+        self.assertIsNone(trust.untrusted_note(self.tmp / "elsewhere"))
 
 
 if __name__ == "__main__":

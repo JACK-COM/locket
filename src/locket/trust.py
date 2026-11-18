@@ -276,6 +276,21 @@ def untrusted_stores(session_dirs: Iterable[str]) -> list[Path]:
     return sorted(found)
 
 
+def untrusted_note(start: fsio.StrPath) -> Optional[str]:
+    """One line naming the nearest directory at or above `start`, below the home
+    directory, whose manifest Locket ignores because no person trusted it or it changed
+    since, so a verb run there says why it fell back to another store; None when there is none."""
+    d = Path(start).expanduser().absolute()
+    for p in (d, *d.parents):
+        if p == paths.HOME or p == p.parent:
+            return None
+        if manifest.has_manifest(p) and not trusted(p):
+            why = "changed since a person trusted it" if changed_since_trust(p) else "not trusted"
+            return (f"note: {p} holds a {manifest.MANIFEST} that is {why}, so it acts as no store; "
+                    f"a person runs  locket trust {p}  at a terminal to act on it")
+    return None
+
+
 def human_confirms(d: Path) -> bool:
     """True only when a person at a terminal types `yes`. Trust turns a passive
     manifest into one that can block tool calls and read files outside its

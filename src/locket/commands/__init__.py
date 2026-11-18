@@ -15,6 +15,7 @@ from typing import Any, Callable, NamedTuple, Optional
 import corpora
 import corpus
 import fsio
+import trust
 
 VERSION = ""            # this release's, set by the front before dispatch (locket.py owns it)
 
@@ -86,6 +87,10 @@ def corpus_verb(fn: Callable[[Path, list[str]], Report], header: bool = True) ->
     `header` prints the directory resolved and whether the write hook reaches it, because
     a literal path can name a directory the hook never guards."""
     def run(rest: list[str]) -> int:
+        if rest[:1] != ["all"]:
+            note = trust.untrusted_note(rest[0] if rest else os.getcwd())
+            if note:
+                print(fsio.relay(note, 400), file=sys.stderr)
         if rest[:1] == ["all"]:
             rc = 0
             for k, v in sorted(corpora.all_corpora().items()):
