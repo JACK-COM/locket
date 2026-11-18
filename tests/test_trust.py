@@ -112,6 +112,14 @@ class TrustNeedsAPerson(Scratch):
     def registered(self):
         return self.registry.exists() and str(self.clone) in self.registry.read_text()
 
+    def test_summary_reads_the_rows_file_the_hook_reads(self):
+        """What a person is shown before trusting is the rows file the trigger hook would
+        read: an empty `triggers` names `triggers.json`, never the store directory."""
+        (self.clone / "locket.json").write_text(json.dumps({"triggers": ""}))
+        (self.clone / "triggers.json").write_text(json.dumps({"rows": [
+            {"id": "r1", "tools": "Bash", "content": "x", "question": "q?", "block": True}]}))
+        self.assertIn("trigger rows: 1 in", "\n".join(trust.trust_summary(self.clone)))
+
     def test_trust_without_a_terminal_does_not_register(self):
         r = self.run_locket("trust", str(self.clone))
         self.assertNotEqual(r.returncode, 0)

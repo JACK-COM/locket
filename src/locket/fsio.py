@@ -9,9 +9,13 @@ import contextlib
 import tempfile
 import urllib.parse
 from pathlib import Path
+from typing import IO, Any, Iterator, Optional, TextIO, Union
+
+# What every path parameter here takes: a string or anything `os.fspath` reads.
+StrPath = Union[str, "os.PathLike[str]"]
 
 
-def inode(p):
+def inode(p: StrPath) -> Optional[tuple[int, int]]:
     """(st_dev, st_ino) of a path, or None. Identity for trust: `Path` equality
     calls `/users` and `/Users` two directories on a case-insensitive disk."""
     try:
@@ -24,7 +28,7 @@ def inode(p):
 _INVISIBLE = frozenset(("Cc", "Cf", "Co", "Cs", "Cn", "Zl", "Zp"))
 
 
-def relay(text, limit=200, lines=False):
+def relay(text: object, limit: int = 200, lines: bool = False) -> str:
     """Text from a store, made safe to put in front of an agent or on a terminal:
     every control, format, private-use, unassigned and line-separator character
     becomes a space (a newline is how a planted label poses as a fresh instruction;
@@ -49,20 +53,20 @@ class SafeOut:
     rule: whatever a mode prints (a title, a file name, a history line from a store)
     reaches a terminal or an agent with no control, bidi or invisible character."""
 
-    def __init__(self, stream):
+    def __init__(self, stream: TextIO):
         self._s = stream
 
-    def write(self, text):
+    def write(self, text: object) -> int:
         import unicodedata
         keep = "\n\t"
         return self._s.write("".join(c if c in keep or unicodedata.category(c) not in _INVISIBLE else " "
                                      for c in str(text)))
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return getattr(self._s, name)
 
 
-def same(a, b):
+def same(a: StrPath, b: StrPath) -> bool:
     """Whether two paths name one directory: by inode where both exist, else by
     resolved path. Spelling is not identity on a case-insensitive disk."""
     ia, ib = inode(a), inode(b)
@@ -92,7 +96,7 @@ MAX_STORE_FILES = 4000
 MAX_STORE_BYTES = 64 * 1024 * 1024
 
 
-def regular(p):
+def regular(p: StrPath) -> bool:
     """A plain file, by `lstat`: no symlink, no FIFO, no device, one hard link. A
     store is read only through files it holds itself, so a link planted in a cloned
     repository cannot make the walk read a key or a config from elsewhere on disk."""
@@ -103,7 +107,8 @@ def regular(p):
     return stat.S_ISREG(st.st_mode) and st.st_nlink == 1
 
 
-def open_safe(path, binary=False, newline=None, max_bytes=MAX_FILE_BYTES):
+def open_safe(path: StrPath, binary: bool = False, newline: Optional[str] = None,
+              max_bytes: Optional[int] = MAX_FILE_BYTES) -> IO[Any]:
     """`open` for a file a store controls, checked on the descriptor that is read:
     refused unless it is a regular file of one link under `max_bytes` (None for no
     cap), so a swap between the walk's check and this read gains nothing, and a FIFO
@@ -122,13 +127,13 @@ def open_safe(path, binary=False, newline=None, max_bytes=MAX_FILE_BYTES):
         raise
 
 
-def read_safe(path):
+def read_safe(path: StrPath) -> str:
     """A corpus file's text by `open_safe`; raises OSError on refusal."""
     with open_safe(path) as f:
         return f.read()
 
 
-def read_or_empty(path):
+def read_or_empty(path: StrPath) -> str:
     """`read_safe`, or "" for a file that is gone, unreadable or refused."""
     try:
         return read_safe(path)
@@ -136,7 +141,7 @@ def read_or_empty(path):
         return ""
 
 
-def replace_atomic(path, data, prefix, mode=None):
+def replace_atomic(path: StrPath, data: Union[str, bytes], prefix: str, mode: Optional[int] = None) -> None:
     """Write `data` (str or bytes) beside `path` and rename it over, so a reader never sees
     a partial file. The temp is removed when the write fails; a writer killed mid-way can
     still leave one, which each surface's own sweep removes."""
@@ -158,7 +163,7 @@ def replace_atomic(path, data, prefix, mode=None):
 
 
 @contextlib.contextmanager
-def sqlite_ro(db, timeout=1.0):
+def sqlite_ro(db: StrPath, timeout: float = 1.0) -> Iterator[Any]:
     """A read-only connection to the SQLite file `db`, closed on exit. The path is
     percent-quoted into the URI, so a `?` or `#` in it cannot pass as a URI parameter."""
     import sqlite3
@@ -169,7 +174,7 @@ def sqlite_ro(db, timeout=1.0):
         con.close()
 
 
-def sqlite_rows(db, sql, params=(), timeout=1.0):
+def sqlite_rows(db: StrPath, sql: str, params: tuple = (), timeout: float = 1.0) -> Optional[list[tuple]]:
     """Every row `sql` returns from `db` opened read-only, or None on any failure: no
     sqlite3 in this Python, no file, a lock, a missing table, a drifted schema. Never
     raises, because its callers run inside hooks, where a raise lets a write through."""

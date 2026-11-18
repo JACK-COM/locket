@@ -20,8 +20,7 @@ VERSION = ""            # this release's, set by the front before dispatch (lock
 
 class Report:
     """What a report mode found: the lines to show, and how many findings they hold.
-    A plain class: a NamedTuple's `count` field shadows `tuple.count`, and `dataclasses`
-    costs every hook about 3 ms of import."""
+    A plain class, since a NamedTuple's `count` field would shadow `tuple.count`."""
     __slots__ = ("lines", "count")
 
     def __init__(self, lines: list[str], count: int = 0):

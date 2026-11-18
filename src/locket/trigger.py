@@ -34,12 +34,12 @@ from pathlib import Path
 
 import hosts
 import fsio
+import manifest
 import adapters
 import corpora
 import corpus
 import trust
 
-TRIGGERS = "triggers.json"
 CAP = 12        # deliberately low: adding a row should mean arguing another one out
 
 _STR_LIST = {"type": "array", "items": {"type": "string"}}
@@ -94,9 +94,7 @@ SCHEMA = {
 
 def rows_file(root):
     """The rows file for a store: the manifest's `triggers`, else `triggers.json`."""
-    name = trust.read_manifest(root).get("triggers")
-    p = Path(name).expanduser() if isinstance(name, str) and name else Path(TRIGGERS)
-    return p if p.is_absolute() else Path(root) / p
+    return manifest.triggers_file(root, trust.read_manifest(root).get("triggers"))
 
 
 def stores_for(cwd, host=None):

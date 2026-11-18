@@ -4,34 +4,35 @@ A host's home is `paths.PATHS.host_stores[<name>]`, read at call time, so a test
 installs its own `Paths` moves the host with it. Nothing here copies a location at import.
 """
 from pathlib import Path
+from typing import Optional
 
 import fsio
 import paths
 
 
-def _home(name):
+def _home(name: str) -> Path:
     """A host's home, or a path under Locket's state that never exists where a `Paths`
     was built without that host (`Paths.under`), so a lookup matches nothing and a
     glob finds nothing; a KeyError inside a hook would let the call through."""
     return paths.PATHS.host_stores.get(name) or paths.PATHS.state / "no-host" / name
 
 
-def claude():
+def claude() -> Path:
     """Claude Code's home, the council store."""
     return _home("council")
 
 
-def hermes():
+def hermes() -> Path:
     """Hermes Agent's home."""
     return _home("hermes")
 
 
-def codex():
+def codex() -> Path:
     """Codex's home, which CODEX_HOME moves."""
     return _home("codex")
 
 
-def name_of(root):
+def name_of(root: Optional[fsio.StrPath]) -> Optional[str]:
     """The host-store name whose home is `root`, or None: by spelling first, then by
     inode, so a home reached through a symlink or `/private` keeps its members and
     exclusions, as trust already matches it."""
@@ -42,12 +43,12 @@ def name_of(root):
         (k for k, v in homes if Path(v).is_dir() and fsio.same(v, root)), None)
 
 
-def is_host(root):
+def is_host(root: Optional[fsio.StrPath]) -> bool:
     """Whether `root` is a host's home."""
     return name_of(root) is not None
 
 
-def foreign(root):
+def foreign(root: Optional[fsio.StrPath]) -> bool:
     """Whether `root` is the home of a host whose files are not this apparatus's."""
     return name_of(root) in FOREIGN
 
@@ -77,15 +78,16 @@ HOST_EXCLUDED = {
 }
 
 
-def members_of(root):
+def members_of(root: Optional[fsio.StrPath]) -> Optional[set[str]]:
     """A host store's member directories, or None where `root` is no host's home."""
     name = name_of(root)
     return set(HOST_MEMBERS[name]) if name in HOST_MEMBERS else None
 
 
-def excluded_of(root):
+def excluded_of(root: Optional[fsio.StrPath]) -> set[str]:
     """Directories a host excludes inside its members; empty where `root` is no host's home."""
-    return set(HOST_EXCLUDED.get(name_of(root), ()))
+    name = name_of(root)
+    return set(HOST_EXCLUDED.get(name, ())) if name else set()
 
 
 # Trees a package manager or a build writes: never prose, and their READMEs and

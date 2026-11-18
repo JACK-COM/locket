@@ -57,9 +57,7 @@ def config_digest(d):
     store inert until a person trusts what it now says."""
     d = Path(d)
     m = manifest.manifest_data(d)
-    rows = m.get("triggers") if isinstance(m.get("triggers"), str) and m.get("triggers") else "triggers.json"
-    rows = Path(rows).expanduser()
-    files = [manifest.manifest_file(d), d / manifest.LEGACY_MANIFEST, rows if rows.is_absolute() else d / rows]
+    files = [manifest.manifest_file(d), d / manifest.LEGACY_MANIFEST, manifest.triggers_file(d, m.get("triggers"))]
     parts: list[tuple] = []
     for f in files:
         try:
@@ -343,8 +341,7 @@ def trust_summary(d):
     for e in m.get("ledgers") or []:
         if isinstance(e, dict):
             out.append(f"ledger schema for: {e.get('path')}")
-    rows_name = m.get("triggers") if isinstance(m.get("triggers"), str) else "triggers.json"
-    rows = Path(d) / Path(rows_name).expanduser()
+    rows = manifest.triggers_file(d, m.get("triggers"))
     try:
         data = json.loads(fsio.read_safe(rows))
         rws = [r for r in (data.get("rows") or []) if isinstance(r, dict)] if isinstance(data, dict) else []

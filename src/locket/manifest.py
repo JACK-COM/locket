@@ -25,7 +25,7 @@ OLD_MANIFEST = "memfind.json"      # the name before 2026-09-21; read, migrated 
 LEGACY_MANIFEST = "reference-sources.json"
 
 
-def manifest_file(root):
+def manifest_file(root: fsio.StrPath) -> Path:
     """The manifest path for `root`: `locket.json`, else the older `memfind.json`
     where only that exists, else the new name, for writing. Every read goes
     through here so a store not yet migrated keeps working."""
@@ -37,11 +37,21 @@ def manifest_file(root):
     return old if old.is_file() else new
 
 
-def has_manifest(root):
+TRIGGERS = "triggers.json"
+
+
+def triggers_file(root: fsio.StrPath, named: object) -> Path:
+    """The trigger rows file a manifest's `triggers` value names, under `root` unless
+    absolute; `triggers.json` where it names none (absent, empty or not a string)."""
+    p = Path(named).expanduser() if isinstance(named, str) and named else Path(TRIGGERS)
+    return p if p.is_absolute() else Path(root) / p
+
+
+def has_manifest(root: fsio.StrPath) -> bool:
     return manifest_file(root).is_file()
 
 
-def manifest_data(root):
+def manifest_data(root: fsio.StrPath) -> dict:
     """The manifest file's own contents, trusted or not: for `init` editing a
     file it is about to rewrite, never for acting on one."""
     m = manifest_file(root)
@@ -145,7 +155,7 @@ MANIFEST_SCHEMA = {
 }
 
 
-def _check(value, schema, path, out):
+def _check(value: object, schema: dict, path: str, out: list[str]) -> None:
     """Structural check of `value` against the manifest schema's subset of JSON Schema,
     through panoply-lib's checker, a generated copy beside this file."""
     here = str(Path(__file__).resolve().parent)
@@ -155,7 +165,7 @@ def _check(value, schema, path, out):
     _manifest_schema.check_value(value, schema, path, out)
 
 
-def validate_manifest(root):
+def validate_manifest(root: fsio.StrPath) -> list[str]:
     """Findings for the manifest at `root` against MANIFEST_SCHEMA; [] when clean
     or absent. Structure only: a key the reader would silently ignore, a wrong
     type, a malformed source or ledger entry. Whether the values are right is
@@ -176,7 +186,7 @@ def validate_manifest(root):
     return out
 
 
-def inside(rel):
+def inside(rel: object) -> bool:
     """Whether a manifest's relative path stays inside its store: not absolute, no
     `..`. A member `/` walked the whole disk inside the write hook."""
     p = PurePosixPath(str(rel).replace("\\", "/"))

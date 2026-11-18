@@ -8,6 +8,7 @@ from pathlib import Path
 from tests.harness import fixture_env
 
 import hosts  # noqa: E402
+import manifest  # noqa: E402
 import memscan  # noqa: E402
 import paths  # noqa: E402
 import trigger as tg  # noqa: E402
@@ -28,7 +29,7 @@ def _suite():
         (proj / manifest.MANIFEST).write_text('{"triggers": "rules.json"}\n')
         transcript = Path(t) / "t.jsonl"
         transcript.write_text('{"skill": "loaded"}\n')
-        (host / tg.TRIGGERS).write_text(json.dumps({
+        (host / manifest.TRIGGERS).write_text(json.dumps({
             "quiet_under": [str(Path(t) / "quiet")],
             "rows": [
                 {"id": "git-reset", "tools": "Bash", "content": r"git\s+reset\s+--hard",
@@ -166,11 +167,11 @@ def _suite():
             "an advisory row did not reach Codex as context"
 
         assert tg.findings(host) == [] and tg.findings(other) == [], tg.findings(host)
-        bad = json.loads((host / tg.TRIGGERS).read_text())
+        bad = json.loads((host / manifest.TRIGGERS).read_text())
         bad["rows"] += [{"id": "git-reset", "tools": "(", "content": "x", "question": "q",
                          "owner": "memory/gone.md", "blok": True},
                         {"id": "csv", "tools": "x", "content": "x", "question": "q", "owner": "RULINGS.csv#nope"}]
-        (host / tg.TRIGGERS).write_text(json.dumps(bad))
+        (host / manifest.TRIGGERS).write_text(json.dumps(bad))
         found = "\n".join(tg.findings(host))
         for want in ("unknown key 'blok'", "appears twice", "tools is not a regex", "missing file: memory/gone.md",
                      "no row of RULINGS.csv carries: nope"):

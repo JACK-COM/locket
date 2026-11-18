@@ -547,11 +547,8 @@ def store_config(path):
     phys = corpora.phys_root_of(d)
     if phys is not None:
         rows = trust.read_manifest(phys).get("triggers")
-        if isinstance(rows, str) and rows:
-            target = Path(rows).expanduser()
-            target = target if target.is_absolute() else phys / target
-            if fsio.same(target, p):
-                return phys, p.name
+        if isinstance(rows, str) and rows and fsio.same(manifest.triggers_file(phys, rows), p):
+            return phys, p.name
     return None
 
 

@@ -11,6 +11,7 @@ import dataclasses
 import os
 import tempfile
 from pathlib import Path
+from typing import Any, Iterator, Mapping, Optional, Union
 
 HOME = Path.home()
 
@@ -29,26 +30,27 @@ class Paths:
     # directory or a symlink elsewhere.
     pending_dir: Path
     # Each host's core directory, a store found without a manifest.
-    host_stores: dict = dataclasses.field(default_factory=dict)
+    host_stores: dict[str, Path] = dataclasses.field(default_factory=dict)
 
     @property
-    def state(self):
+    def state(self) -> Path:
         return self.registry.parent
 
     @property
-    def cache(self):
+    def cache(self) -> Path:
         return self.state / "cache"
 
     @property
-    def usage_ledger(self):
+    def usage_ledger(self) -> Path:
         return self.state / "usage.csv"
 
     @property
-    def schema_file(self):
+    def schema_file(self) -> Path:
         return self.state / "locket.schema.json"
 
     @classmethod
-    def under(cls, state, host_stores=None, pending_dir=None):
+    def under(cls, state: Union[str, "os.PathLike[str]"], host_stores: Optional[Mapping[str, Path]] = None,
+              pending_dir: Optional[Path] = None) -> "Paths":
         """Every Locket file under `state`, for a test or a probe; host stores only as given."""
         state = Path(state)
         return cls(registry=state / "corpora.json", health_dir=state / "hook-health",
@@ -57,7 +59,7 @@ class Paths:
                    host_stores=dict(host_stores or {}))
 
     @classmethod
-    def from_env(cls, env=os.environ):
+    def from_env(cls, env: Mapping[str, str] = os.environ) -> "Paths":
         registry = Path(env.get("LOCKET_REGISTRY") or HOME / ".locket" / "corpora.json")
         state = registry.parent
         uid = os.getuid() if hasattr(os, "getuid") else "u"
@@ -71,7 +73,7 @@ class Paths:
                          "codex": Path(env.get("CODEX_HOME") or HOME / ".codex")},
         )
 
-    def replace(self, **changes):
+    def replace(self, **changes: Any) -> "Paths":
         """A copy with `changes`; the host-store table is copied too, so editing the
         copy's never reaches this one."""
         changes.setdefault("host_stores", dict(self.host_stores))
@@ -82,7 +84,7 @@ PATHS = Paths.from_env()
 
 
 @contextlib.contextmanager
-def use(p):
+def use(p: Paths) -> Iterator[Paths]:
     """Install `p` as this process's paths until the block exits."""
     global PATHS
     saved, PATHS = PATHS, p
