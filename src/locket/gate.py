@@ -47,7 +47,7 @@ _DATE = r"20\d\d[-/]\d\d(?:[-/]\d\d)?"
 # `⚠ UPDATE (2026-08-08)`, `2026-08-08: **Resolved:**`, and the italic sub-header that opens a
 # stacked block, `*Refinement, 2026-05-19:*`. The `update <date>` form alone matched none of
 # SELF.md's ten stacks. A date that scopes a live behaviour (`since 2026-09-16`, `(Peer ruling
-# 2026-08-15)`) is not history and must not match; the negatives in tests/test_memscan.py hold that line.
+# 2026-08-15)`) is not history and must not match; the negatives in tests/test_claims.py hold that line.
 HISTORY_CLAUSE = re.compile(
     r"(?:^\s*[*_]{1,2}(?:refinement|sharpening|second sharpening|third sharpening|surface note|"
     r"instances since)\b[^\n]{0,60}?" + _DATE +            # the italic stack header, line-start only
@@ -239,7 +239,7 @@ def hook_decision(name, tool_input, text, prior, docs, archived=None,
                 f"(prime-memory-discipline.md §2)."), autonomous
     # A dated history clause stacked on a durable surface is §2's forbidden shape,
     # decidable from the added text alone (a regex, with §1's scoped dates as its
-    # negatives in tests/test_memscan.py), so it fires here before any corpus is read and
+    # negatives in tests/test_claims.py), so it fires here before any corpus is read and
     # blocks a cycle like the novelty guard does. Holding spaces and ledgers never
     # reach this line: a gate transition there appends one dated clause by rule.
     stacked = HISTORY_CLAUSE.search(added)
@@ -355,7 +355,7 @@ def memfind_asked(transcript):
     command inspected by `runs_memfind`; the cheap byte test only decides which
     lines are worth parsing.
 
-    ⚠ A tool RESULT is excluded, and this file is why: the test fixtures in tests/test_memscan.py
+    ⚠ A tool RESULT is excluded, and this file is why: the test fixtures in tests/test_gate.py
     carry the markers, so a session that merely Reads memscan.py would otherwise
     satisfy the gate from the Read's own result line. Reading a file that quotes an
     invocation is not invoking it.
