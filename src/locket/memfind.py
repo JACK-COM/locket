@@ -168,7 +168,95 @@ def _write_cache(root, vecs, meta):
     fsio.replace_atomic(meta_p, json.dumps({**meta, "token": token.hex()}), ".index.json.")
 
 
+class _BuildLock:
+    """An exclusive, BLOCKING lock on `<cache_dir>/.build.lock`, so one build per store
+    runs at a time and a build that waited reuses what the first one wrote.
+
+    ⚠ Without it, every caller whose `find` timed out could start its own full build:
+    166 concurrent builds once queued each embed on the machine for 2.5 minutes, which
+    timed out more callers, which started more builds. The wait has no timeout: a build
+    hung on a wedged embedder holds every other caller until it dies, which a host's
+    hook timeout does. Where no lock can be taken the build runs unlocked, since an index
+    build must never be skipped, and says so once on stderr."""
+
+    def __init__(self, root):
+        self.root, self.fh = root, None
+
+    def _unlocked(self, why):
+        print(f"locket: building {self.root} without its build lock ({why})", file=sys.stderr)
+        return self
+
+    def __enter__(self):
+        try:
+            self.fh = open(corpus.ready_cache_dir(self.root) / ".build.lock", "a+")
+        except (OSError, RuntimeError) as e:
+            return self._unlocked(e)
+        try:
+            if sys.platform == "win32":
+                import errno
+                import msvcrt
+                while True:
+                    try:
+                        self.fh.seek(0)
+                        msvcrt.locking(self.fh.fileno(), msvcrt.LK_LOCK, 1)   # tries for 10 s, then EDEADLOCK
+                        return self
+                    except OSError as e:
+                        if e.errno != errno.EDEADLOCK:
+                            return self._unlocked(e)
+            try:
+                import fcntl
+            except ImportError:
+                return self._unlocked("no fcntl")
+            try:
+                fcntl.flock(self.fh, fcntl.LOCK_EX)
+            except OSError as e:
+                return self._unlocked(e)
+            return self
+        except BaseException:
+            self.fh.close()                 # interrupted while waiting: __exit__ will not run
+            raise
+
+    def __exit__(self, *exc):
+        if self.fh is not None:
+            if sys.platform == "win32":     # Windows may release a lock at close only lazily
+                import msvcrt
+                try:
+                    self.fh.seek(0)
+                    msvcrt.locking(self.fh.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+            self.fh.close()                 # closing releases the POSIX lock
+        return False
+
+
+def _current(root):
+    """The cached index when it matches the corpus and the active embedder, else None."""
+    meta, vec = cache_paths(root)
+    if meta.exists() and vec.exists():
+        try:
+            m = read_meta(meta)
+            if (m.get("model") == tag(resolve_backend()[0])
+                    and m.get("fingerprint") == corpus_fingerprint(root)):
+                return ([tuple(i) for i in m["items"]],
+                        _read_vectors(vec, len(m["items"]), m["dim"], m.get("token")), m["dim"])
+        except (KeyError, ValueError, TypeError, OSError):
+            pass                                       # damaged cache: rebuild
+    return None
+
+
 def build_index(root, quiet=False):
+    """Rebuild only the files that changed, one build per store at a time; a build that
+    waited on another returns that build's index when it already matches the corpus."""
+    with _BuildLock(root):
+        cached = _current(root)
+        if cached is None:
+            return _build_index(root, quiet)
+        if not quiet:
+            print(f"index current: {len(cached[0])} claims in {root}, nothing to embed", file=sys.stderr)
+        return cached
+
+
+def _build_index(root, quiet=False):
     """Rebuild only the files that changed. Returns (items, vectors, dim), the
     vectors one float32 row per item, stored unit length.
 
@@ -309,17 +397,7 @@ def load_index(root, quiet=False):
     serve-stale option on purpose: an answer drawn from a superseded corpus
     reads as current, and the refresh costs about a second. A caller that
     cannot pay that takes `load_cached` instead."""
-    meta, vec = cache_paths(root)
-    if meta.exists() and vec.exists():
-        try:
-            m = read_meta(meta)
-            if (m.get("model") == tag(resolve_backend()[0])
-                    and m.get("fingerprint") == corpus_fingerprint(root)):
-                return ([tuple(i) for i in m["items"]],
-                        _read_vectors(vec, len(m["items"]), m["dim"], m.get("token")), m["dim"])
-        except (KeyError, ValueError, TypeError, OSError):
-            pass                                       # damaged cache: rebuild below
-    return build_index(root, quiet=quiet)
+    return _current(root) or build_index(root, quiet=quiet)
 
 
 TOKEN_BYTES = 16

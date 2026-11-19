@@ -208,5 +208,74 @@ class Fingerprint(unittest.TestCase):
         self.assertNotEqual(before, after)
 
 
+class BuildLock(unittest.TestCase):
+    """One build per store at a time, and a build that waited embeds nothing new."""
+
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory(prefix="memfind-lock-")
+        self.addCleanup(tmp.cleanup)
+        self.d = Path(tmp.name)
+        (self.d / "a.md").write_text("Turbine overhaul programs cover the engine reserve for the operator.\n")
+
+    def test_concurrent_builds_embed_once(self):
+        import threading
+        import time
+        from unittest import mock
+        calls, done, active, peak = [], [], [0], [0]
+        gate, barrier = threading.Lock(), threading.Barrier(5, timeout=10)
+
+        def fake_build(root, quiet=False):
+            with gate:
+                calls.append(root)
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            time.sleep(0.2)
+            with gate:
+                active[0] -= 1
+                done.append(root)                 # the cache is current only once a build finishes
+            return ("built",)
+
+        built = []
+
+        def run():
+            barrier.wait()                        # every caller asks at the same moment
+            built.append(mf.build_index(self.d, quiet=True))
+
+        with fixture_env(), mock.patch.object(mf, "_build_index", side_effect=fake_build), \
+                mock.patch.object(mf, "_current", side_effect=lambda root: ("cached",) if done else None):
+            ts = [threading.Thread(target=run) for _ in range(5)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(timeout=20)
+        self.assertEqual(len(calls), 1, "a waiting build re-embedded instead of reusing the first")
+        self.assertEqual(peak[0], 1, "two builds of one store ran at once")
+        self.assertEqual(sorted(built), [("built",)] + [("cached",)] * 4)
+
+    def test_a_failed_build_releases_the_lock(self):
+        import threading
+        from unittest import mock
+        with fixture_env(), mock.patch.object(mf, "_current", return_value=None):
+            with mock.patch.object(mf, "_build_index", side_effect=RuntimeError("embedder down")):
+                with self.assertRaises(RuntimeError):
+                    mf.build_index(self.d, quiet=True)
+            out = []
+            with mock.patch.object(mf, "_build_index", return_value=("built",)):
+                t = threading.Thread(target=lambda: out.append(mf.build_index(self.d, quiet=True)))
+                t.start()
+                t.join(timeout=10)
+        self.assertEqual(out, [("built",)], "the lock outlived the build that raised")
+
+    def test_no_lock_still_builds(self):
+        from unittest import mock
+        import corpus
+        with fixture_env(), mock.patch.object(mf, "_current", return_value=None), \
+                mock.patch.object(corpus, "ready_cache_dir", side_effect=RuntimeError("cache dir is a link")), \
+                mock.patch.object(mf, "_build_index", return_value=("built",)) as b:
+            self.assertEqual(mf.build_index(self.d, quiet=True), ("built",))
+        b.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
