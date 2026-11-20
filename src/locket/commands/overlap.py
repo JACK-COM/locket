@@ -252,11 +252,26 @@ def cmd_dupes(root, floor=claims.PAIR_FLOOR, files=None):
     """
     out = []
     docs = corpus.corpus(root)
-    want = files or sorted(corpora.settings(root)["holding_spaces"] & set(docs))
+    missing = []
+    if files:
+        want = set()
+        for f in files:
+            hit = _doc_keys(root, f, docs)
+            want |= hit
+            if not hit:
+                missing.append(f)
+    else:
+        # Holding spaces are named by file name and docs are keyed by path inside
+        # the store, so match on the name, as `graduated` does.
+        holding = corpora.settings(root)["holding_spaces"]
+        want = {k for k in docs if Path(k).name in holding}
     scope = {k: v for k, v in docs.items() if k in want}
     if not scope:
-        out.append(f"no holding space in {root}; name a file to check one directly")
+        out.append(f"no file named {', '.join(missing)} in {root}" if missing
+                   else f"no holding space in {root}; name a file to check one directly")
         return Report(out, 0)
+    if missing:
+        out.append(f"not in {root}, skipped: {', '.join(missing)}")
     # Same ENTRY_TOKENS floor the write-time check uses. A report that flags what
     # the hook lets through is the drift this instrument exists to prevent.
     pairs = [p for p in claims.cross_file_pairs(scope, floor, same_file=True)
@@ -285,6 +300,29 @@ def _across(rest):
     floor = next((float(a) for a in rest[:1] if re.fullmatch(r"[0-9.]+", a)), claims.PAIR_FLOOR)
     cmd_across(floor).show()
     return 0
+
+
+def _doc_keys(root, name, docs):
+    """The store's files a user-supplied name resolves to: its key in the store, an
+    absolute path under the store or a joined store, or a bare file name or
+    trailing path, which matches that file in every member directory holding one.
+    An exact key wins over a trailing-path match."""
+    if name in docs:
+        return {name}
+    p = Path(name)
+    if p.is_absolute():
+        # The file's own symlink is kept (a store file may link outside the store);
+        # the root is tried as given and resolved, since either may be the
+        # spelling the registry holds.
+        roots = corpora.roots_of(Path(root))
+        for r, f in ((Path(root), Path(os.path.abspath(p))),
+                     (Path(root).resolve(), Path(os.path.realpath(p.parent)) / p.name)):
+            key = corpora.corpus_key(r, f, roots if r == Path(root) else None)
+            if key in docs:
+                return {key}
+        return set()
+    tail = "/" + p.as_posix()
+    return {k for k in docs if ("/" + Path(k).as_posix()).endswith(tail)}
 
 
 def _files(args):

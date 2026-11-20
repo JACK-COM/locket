@@ -111,6 +111,25 @@ class Graduated(StoreCase):
             "a clean run still says what it was scored against"
 
 
+class Dupes(StoreCase):
+    def test_a_holding_space_below_the_store_root_is_found_by_name(self):
+        store = self.tmp / "brain"
+        (store / "notes").mkdir(parents=True)
+        (store / manifest.MANIFEST).write_text(json.dumps({"holding_spaces": ["INBOX.md"]}))
+        corpora.clear_settings()
+        entry = "Gate: a third instance where the watcher ordering bites on a freshly built sheet."
+        (store / "notes" / "INBOX.md").write_text(f"{entry}\n\n{entry}\n")
+        for files in (None, ["INBOX.md"], ["notes/INBOX.md"], [str(store / "notes" / "INBOX.md")]):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                n = _shown(overlap.cmd_dupes(store, files=files))
+            assert n == 1 and "notes/INBOX.md (1)" in buf.getvalue(), (files, buf.getvalue())
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            assert _shown(overlap.cmd_dupes(store, files=["NOPE.md"])) == 0
+        assert "no file named NOPE.md" in buf.getvalue(), buf.getvalue()
+
+
 class IndexPairs(StoreCase):
     def test_an_index_restating_its_own_target_is_not_listed(self):
         """An index line restating the file it links to is the index doing its job; one
