@@ -202,7 +202,59 @@ class Stores(StoreCase):
         prior = rules.read_text()
         edit = {"old_string": "never from an aggregate", "new_string": "not from an aggregate"}
         msg = ledger.source_row_decision(str(rules), edit, prior)[0] or ""
-        assert "RULES.csv" not in msg, msg
+        assert "- memory/RULES.csv" not in msg, msg
+        # and a new row restating a row the file keeps is named by the file's key
+        again = '"Serve the estimate bottom-up from priced components and never from an aggregate.",pricing,2026-01-02\n'
+        msg = ledger.source_row_decision(str(rules), {"new_string": again}, prior, append=True)[0] or ""
+        assert "- memory/RULES.csv" in msg, msg
+        # the positive control: an edit that matches OTHER prose still warns, so the
+        # silence above is the hide working, never the hook deciding nothing
+        (store / "note.md").write_text("Serve the estimate top-down from one aggregate and never bottom-up.\n")
+        edit = {"old_string": "bottom-up from priced components and never from an aggregate",
+                "new_string": "top-down from one aggregate and never bottom-up"}
+        msg = ledger.source_row_decision(str(rules), edit, prior)[0] or ""
+        assert "- note.md" in msg and "- memory/RULES.csv" not in msg, msg
+
+    def test_a_root_csv_edit_still_sees_a_same_named_sibling(self):
+        """Hiding a root CSV's own rows must not hide `memory/<same name>`'s."""
+        store = self.brain()
+        (store / "memory").mkdir()
+        root, sib = store / "RULES.csv", store / "memory" / "RULES.csv"
+        root.write_text('Ruling,Area,Date\n"Quote every hangar rate per airframe and never as a flat fee.",cost,2026-01-01\n')
+        sib.write_text('Ruling,Area,Date\n"Quote the hangar rate per airframe, never as one flat fee for all.",cost,2026-01-01\n')
+        (store / manifest.MANIFEST).write_text(json.dumps({"sources": [
+            {"path": str(f), "text": "Ruling", "label": "Area"} for f in (root, sib)]}))
+        corpora.clear_settings()
+        prior = root.read_text()
+        edit = {"old_string": "and never as a flat fee", "new_string": "and never as a flat fee for all"}
+        msg = ledger.source_row_decision(str(root), edit, prior)[0] or ""
+        assert "- memory/RULES.csv" in msg, msg
+        # and the other way: editing the one below the root still sees the root one
+        prior = sib.read_text()
+        edit = {"old_string": "never as one flat fee for all", "new_string": "and never as a flat fee"}
+        msg = ledger.source_row_decision(str(sib), edit, prior)[0] or ""
+        assert "- RULES.csv#" in msg and "- memory/RULES.csv" not in msg, msg
+
+    def test_the_claim_cache_never_serves_rows_under_an_older_label(self):
+        """Claims cached while rows were labelled by file name must not come back
+        under the path labels: the cache key carries the label prefix."""
+        from unittest import mock
+        import os, time
+        store = self.brain()
+        (store / "memory").mkdir()
+        rules = store / "memory" / "RULES.csv"
+        rules.write_text("Ruling,Area,Date\n"
+                         '"Serve the estimate bottom-up from priced components and never from an aggregate.",cost,2026-01-01\n')
+        old = time.time() - 60                    # past the racy window, so the cache keeps it
+        os.utime(rules, (old, old))
+        (store / manifest.MANIFEST).write_text(json.dumps({
+            "sources": [{"path": str(rules), "text": "Ruling", "label": "Area"}]}))
+        corpora.clear_settings()
+        real = corpus.csv_keys
+        name_only = lambda root, sources=None, roots=None: {p: p.name for p in real(root, sources, roots)}
+        with mock.patch.object(corpus, "csv_keys", name_only):
+            assert "RULES.csv#cost" in corpus.claim_index(store), "the older scheme, cached"
+        assert "memory/RULES.csv#cost" in corpus.claim_index(store), "served the cached older label"
 
     def test_registered_rows_are_in_the_corpus(self):
         store = self.brain()
@@ -429,6 +481,20 @@ class Stores(StoreCase):
             assert got == {"IMPL.md", "docs/d.md", "kid/LOG.md", "kid/SHORT.md", "kid/topic_one.md"}, got
             assert set(corpus.corpus(par)) >= {"kid/topic_one.md", "RULES.csv#cost"}, "keys are composite; one CSV, once"
             assert len(corpus.csv_sources(par)) == 1, "a CSV registered by both stores is one source"
+            # A CSV living in the joined store is keyed as its markdown is, under the
+            # store's label, so a same-named CSV at the parent's root stays apart from it.
+            legacy = (kid / manifest.LEGACY_MANIFEST).read_text()
+            (kid / "RULES.csv").write_text("Area,Ruling\ncost,The joined store's own ruling on hangar rates.\n")
+            (kid / manifest.LEGACY_MANIFEST).write_text(json.dumps(
+                json.loads(legacy) + [{"path": str(kid / "RULES.csv"), "text": "Ruling", "label": "Area"}]))
+            corpora.clear_settings(); trust.register(kid)
+            kid_key = f"{corpora.store_label(kid)}/RULES.csv"
+            assert sorted(corpus.csv_keys(par).values()) == sorted(["RULES.csv", kid_key]), corpus.csv_keys(par)
+            assert {"RULES.csv#cost", f"{kid_key}#cost"} <= set(corpus.corpus(par)), sorted(corpus.corpus(par))
+            # a joined store's key is no path on disk, so only the exact-key rung finds it
+            assert [k for _p, _t, k in corpus.csv_named(par, kid_key)] == [kid_key]
+            (kid / manifest.LEGACY_MANIFEST).write_text(legacy); (kid / "RULES.csv").unlink()
+            corpora.clear_settings(); trust.register(kid)
             st = corpora.settings(par)
             assert "SHORT.md" in st["holding_spaces"] and "LOG.md" in st["ledger_surfaces"] \
                 and "SHORT.md" in st["append_surfaces"], "name-sets union upward"

@@ -290,18 +290,54 @@ def csv_keys(root: Path, sources: Optional[list[tuple[Path, str, Optional[str]]]
     `across` and `dupes` alike.
 
     Inside the store or a joined store the key is the one a markdown file gets (its
-    path under the root, or `<label>/<path>`). A CSV registered from outside every
-    root is keyed by its bare name, which reads the same on every machine, unless
-    another registered CSV shares that key; then each colliding one takes its full
-    path, so the collision costs a long label rather than a merged table. Pass the
-    `sources` and `roots` a caller already holds; on the write hook each read counts."""
+    path under the root, or `<label>/<path>`), and it never moves. A CSV registered
+    from outside every root is keyed by its bare name, which reads the same on every
+    machine, unless that name is taken by another CSV's key; then the outside one
+    yields and takes its full path, so a collision costs a long label rather than a
+    merged table, and a root `RULINGS.csv` keeps its label whatever is registered
+    beside it. Two inside keys can still meet, as when a joined store's label shadows
+    a real directory or two joined stores share a label; both then take their full
+    paths. Pass the `sources` and `roots`
+    a caller already holds; on the write hook each read counts."""
     rs = corpora.roots_of(root) if roots is None else roots
-    keys: dict[Path, str] = {}
+    inside: dict[Path, str] = {}
+    outside: dict[Path, str] = {}
     for pth, _text, _label in (csv_sources(root) if sources is None else sources):
         key = corpora.corpus_key(Path(root), pth, rs)
-        keys[pth] = pth.name if Path(key).is_absolute() else key
-    taken = Counter(keys.values())
-    return {p: (str(p) if taken[k] > 1 else k) for p, k in keys.items()}
+        if Path(key).is_absolute():
+            outside[pth] = pth.name
+        else:
+            inside[pth] = key
+    held = Counter(inside.values())
+    names = Counter(outside.values())
+    keys = {p: (str(p) if held[k] > 1 else k) for p, k in inside.items()}
+    keys.update({p: (str(p) if names[k] > 1 or k in held else k) for p, k in outside.items()})
+    return keys
+
+
+def csv_named(root: Path, name: str, bases: Optional[list[Path]] = None,
+              sources: Optional[list[tuple[Path, str, Optional[str]]]] = None
+              ) -> list[tuple[Path, str, str]]:
+    """[(path, text column, key)] of the registered CSVs a written name means, the one
+    resolver for every verb and check that takes a CSV by name. In order, the first
+    rung that matches wins: the CSV's key exactly (`memory/RULINGS.csv`); a path that
+    resolves, from any of `bases` (the store root by default), to a registered file
+    (`./RULINGS.csv`, `~/x/R.csv`, `b/../a/R.csv`); a BARE file name, written with no
+    path syntax at all, which matches every registered CSV of that name. `./X.csv` is
+    a path, so it means the root's X.csv or nothing. More than one match is the caller's to refuse,
+    never to pick from, and a path that resolves to nothing matches nothing."""
+    srcs = csv_sources(root) if sources is None else sources
+    keys = csv_keys(root, srcs)
+    exact = [(p, t, keys[p]) for p, t, _l in srcs if keys[p] == name]
+    if exact:
+        return exact
+    written = Path(name).expanduser()
+    spots = {os.path.realpath(written if written.is_absolute() else Path(b) / written)
+             for b in (bases or [root])}
+    located = [(p, t, keys[p]) for p, t, _l in srcs if os.path.realpath(p) in spots]
+    if located:
+        return located
+    return [(p, t, keys[p]) for p, t, _l in srcs if p.name == name]    # whole name: bare only
 
 
 def _rows_of(pth: Path, textcol: str, labelcol: Optional[str], out: list[tuple[str, str]],

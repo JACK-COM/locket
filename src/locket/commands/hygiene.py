@@ -4,7 +4,6 @@ against the code (cites), files past a §5 budget (budget), and ledger rows agai
 schema (ledgers).
 """
 import re
-from pathlib import Path
 from collections import defaultdict
 
 import cites
@@ -90,16 +89,13 @@ def _column_values(path, column):
 
 def csv_pointers(root):
     """[(file, csv, column, values, status)] for every query pointer in the corpus.
-    Status is `ok`, `UNREGISTERED` (no such CSV in the manifest), `AMBIGUOUS <keys>`
-    (a bare name two registered CSVs share), `NO COLUMN`, or `DANGLING <values>`
-    naming the filter values no row carries. A pointer naming a CSV's key in the
-    store resolves to that one file; keyed by bare name alone, the second file of a
-    shared name silently replaced the first."""
+    Status is `ok`, `UNREGISTERED` (no registered CSV answers to the name, a path that
+    resolves to no registered file included), `AMBIGUOUS <keys>` (a bare name two
+    registered CSVs share), `NO COLUMN`, or `DANGLING <values>` naming the filter
+    values no row carries. Names resolve through `corpus.csv_named`, relative paths
+    from the store root, the same rungs `dupes` uses; keyed by bare name alone, the
+    second file of a shared name silently replaced the first."""
     srcs = corpus.csv_sources(root)
-    keys = corpus.csv_keys(root, srcs)
-    by_name: dict = {}
-    for pth, _t, _l in srcs:
-        by_name.setdefault(pth.name, []).append(pth)
     cache, out = {}, []
     for p in corpus.md_files(root):
         txt = fsio.read_or_empty(p)
@@ -107,15 +103,15 @@ def csv_pointers(root):
             if not re.search(r"\bquery\b", txt[max(0, m.start() - 60):m.end()], re.I):
                 continue
             name, col, vals = m.group(1), m.group(2).strip(), m.group(3)
-            hits = [s for s, k in keys.items() if k == name] or by_name.get(Path(name).name, [])
+            hits = corpus.csv_named(root, name, sources=srcs)
             if not hits:
                 out.append((p.name, name, col, vals, "UNREGISTERED"))
                 continue
             if len(hits) > 1:
-                out.append((p.name, name, col, vals, "AMBIGUOUS " + " ".join(sorted(keys[h] for h in hits))))
+                out.append((p.name, name, col, vals, "AMBIGUOUS " + " ".join(sorted(k for _h, _t, k in hits))))
                 continue
             if (name, col) not in cache:
-                cache[(name, col)] = _column_values(hits[0], col)
+                cache[(name, col)] = _column_values(hits[0][0], col)
             have = cache[(name, col)]
             if have is None:
                 out.append((p.name, name, col, vals, "NO COLUMN"))

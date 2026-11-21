@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 import unittest
 
 from tests.harness import DOCS, StoreCase, shown as _shown
@@ -300,6 +301,9 @@ class SameNamedCsvs(StoreCase):
             rep = overlap.cmd_dupes(store, files=["a/RULINGS.csv"], as_json=True)
         pairs = json.loads(rep.lines[0])
         assert pairs and pairs[0]["a_label"] == "a/RULINGS.csv", pairs
+        with mock.patch.object(rows, "row_pairs", side_effect=rows.NoEmbedder("down")):
+            rep = overlap.cmd_dupes(store, files=["a/RULINGS.csv"])
+        assert rep.lines[0].startswith("a/RULINGS.csv: WORD OVERLAP ONLY"), rep.lines
 
     def test_a_pointer_by_a_shared_bare_name_is_ambiguous(self):
         from commands import hygiene
@@ -307,7 +311,8 @@ class SameNamedCsvs(StoreCase):
         (store / "note.md").write_text("See `RULINGS.csv`, query `Area=t` for the rest.\n"
                                        "And `a/RULINGS.csv`, query `Area=t` for one table.\n")
         status = {name: s for _f, name, _c, _v, s in hygiene.csv_pointers(store)}
-        assert status["RULINGS.csv"].startswith("AMBIGUOUS"), status
+        assert status["RULINGS.csv"].split()[0] == "AMBIGUOUS" \
+            and {"a/RULINGS.csv", "b/RULINGS.csv"} <= set(status["RULINGS.csv"].split()), status
         assert status["a/RULINGS.csv"] == "ok", status
 
     def test_across_keeps_same_named_csvs_as_two_files(self):
@@ -316,6 +321,23 @@ class SameNamedCsvs(StoreCase):
         held = [u for u in union if "RULINGS.csv#t" in u]
         assert len(held) == 4, sorted(union)
 
+    def test_across_knows_one_csv_by_its_path_from_both_stores(self):
+        """File identity: a CSV below one store's root, registered by that store and by
+        another, is one file with two holders. Looked up by bare name, the inside
+        store's key missed and the one file read as two."""
+        two = self.tmp / "pair"
+        (two / "alpha" / "sub").mkdir(parents=True); (two / "beta").mkdir()
+        shared = two / "alpha" / "sub" / "shared.csv"
+        shared.write_text('Ruling,Area\n"A reference ledger registered by two manifests is one file, never two.",locket\n')
+        reg = json.dumps({"sources": [{"path": str(shared), "text": "Ruling", "label": "Area"}]})
+        for s in ("alpha", "beta"):
+            (two / s / manifest.MANIFEST).write_text(reg)
+            (two / s / "note.md").write_text(f"A markdown file so store {s} has content of its own.\n")
+        corpora.clear_settings()
+        union, _, _, _ = overlap.across_pairs({"alpha": two / "alpha", "beta": two / "beta"})
+        rows = [u for u in union if "shared.csv#locket" in u]
+        assert len(rows) == 1 and rows[0].startswith("alpha+beta::"), sorted(union)
+
     def test_a_cache_built_under_the_old_labels_is_rebuilt(self):
         import memfind
         store, _ = self._store()
@@ -323,6 +345,164 @@ class SameNamedCsvs(StoreCase):
         assert fp["__row_labels__"] == corpus.ROW_LABELS
         old = {k: v for k, v in fp.items() if k != "__row_labels__"}
         assert old != fp, "an index fingerprinted before the relabel must read as stale"
+
+    def _root_and(self, other, areas=("t", "z")):
+        """A store with a root RULINGS.csv and a second RULINGS.csv at `other`."""
+        store = self.tmp / "rooted"
+        store.mkdir()
+        files = [store / "RULINGS.csv", other / "RULINGS.csv"]
+        other.mkdir(parents=True, exist_ok=True)
+        for f, area in zip(files, areas):
+            f.write_text(f'Ruling,Area\n"A ruling of area {area} living in {f.parent.name} alone.",{area}\n')
+        (store / manifest.MANIFEST).write_text(json.dumps({"sources": [
+            {"path": str(f), "text": "Ruling", "label": "Area"} for f in files]}))
+        (store / "note.md").write_text("See `RULINGS.csv`, query `Area=t` for the root ruling.\n")
+        corpora.clear_settings()
+        return store, files
+
+    def test_a_root_csv_keeps_its_label_beside_an_outside_one_of_the_same_name(self):
+        from commands import hygiene
+        outside = self.tmp / "far"
+        store, (root_csv, far_csv) = self._root_and(outside)
+        keys = corpus.csv_keys(store)
+        assert keys == {root_csv: "RULINGS.csv", far_csv: str(far_csv)}, keys
+        labels = sorted(label for label, _ in corpus.csv_rows(store))
+        assert labels == sorted(["RULINGS.csv#t", f"{far_csv}#z"]), labels
+        status = {name: s for _f, name, _c, _v, s in hygiene.csv_pointers(store)}
+        assert status["RULINGS.csv"] == "ok", "the exact key is the root file, whose Area holds t"
+
+    def test_an_exact_key_pointer_reads_its_own_file_not_a_sibling(self):
+        from commands import hygiene
+        store, _ = self._root_and(self.tmp / "rooted" / "memory")
+        status = {name: s for _f, name, _c, _v, s in hygiene.csv_pointers(store)}
+        assert status["RULINGS.csv"] == "ok", status    # memory/RULINGS.csv holds z, never t
+
+    def test_a_path_names_a_table_by_where_it_is(self):
+        store, _ = self._store()
+        for spelling in (str(store / "a" / "RULINGS.csv"), str(store / "b" / ".." / "a" / "RULINGS.csv")):
+            assert [k for _p, _t, k in overlap._tables_named(store, spelling)] == ["a/RULINGS.csv"], spelling
+
+    def test_json_keeps_a_refusal_off_stdout(self):
+        store, _ = self._store()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rep = overlap.cmd_dupes(store, files=["RULINGS.csv"], as_json=True)
+        assert rep.lines == [] and rep.count == 0, rep.lines
+        assert "names 4 registered CSVs" in err.getvalue(), err.getvalue()
+
+    def test_one_file_registered_twice_is_one_table(self):
+        store = self.tmp / "twice"
+        store.mkdir()
+        far = self.tmp / "far2"
+        far.mkdir()
+        (far / "R.csv").write_text('Ruling,Area\n"One ruling, in one file, registered two ways.",t\n')
+        (far / "link.csv").symlink_to(far / "R.csv")
+        (store / manifest.MANIFEST).write_text(json.dumps({"sources": [
+            {"path": str(far / "R.csv"), "text": "Ruling", "label": "Area"},
+            {"path": str(far / "link.csv"), "text": "Ruling", "label": "Area"}]}))
+        (store / "note.md").write_text("A markdown file so the store has content.\n")
+        corpora.clear_settings()
+        assert len(corpus.csv_rows(store)) == 1, corpus.csv_rows(store)
+
+    def test_across_resolves_a_csv_whose_name_holds_a_hash(self):
+        two = self.tmp / "hashed"
+        (two / "alpha").mkdir(parents=True); (two / "beta").mkdir()
+        odd = self.tmp / "hashed-src" / "a#b.csv"
+        odd.parent.mkdir()
+        odd.write_text('Ruling,Area\n"A ruling filed in a CSV whose own name holds a hash mark.",t\n')
+        reg = json.dumps({"sources": [{"path": str(odd), "text": "Ruling", "label": "Area"}]})
+        for s in ("alpha", "beta"):
+            (two / s / manifest.MANIFEST).write_text(reg)
+            (two / s / "note.md").write_text(f"A markdown file so store {s} has content of its own.\n")
+        corpora.clear_settings()
+        union, _, _, _ = overlap.across_pairs({"alpha": two / "alpha", "beta": two / "beta"})
+        held = [u for u in union if "a#b.csv#t" in u]
+        assert len(held) == 1 and held[0].startswith("alpha+beta::"), sorted(union)
+
+    def _pair_store(self, areas=("a1", "b1")):
+        """Exactly two registered CSVs sharing a name, the reported case, with distinct Areas."""
+        store = self.tmp / "pairstore"
+        for d, area in zip(("a", "b"), areas):
+            (store / d).mkdir(parents=True)
+            (store / d / "RULINGS.csv").write_text(
+                f'Ruling,Area\n"The only ruling the {d} table holds, area {area}.",{area}\n')
+        (store / manifest.MANIFEST).write_text(json.dumps({"sources": [
+            {"path": str(store / d / "RULINGS.csv"), "text": "Ruling", "label": "Area"} for d in ("a", "b")]}))
+        corpora.clear_settings()
+        return store
+
+    def test_two_tables_of_one_name_are_refused_and_neither_is_ranked(self):
+        from unittest import mock
+        import rows
+        store = self._pair_store()
+        (store / "note.md").write_text("A markdown file so the store has content.\n")
+        with mock.patch.object(rows, "row_pairs", return_value=([], None)) as rp:
+            rep = overlap.cmd_dupes(store, files=["RULINGS.csv"])
+        rp.assert_not_called()
+        assert rep.count == 0 and len(rep.lines) == 1 and "names 2 registered CSVs" in rep.lines[0], rep.lines
+
+    def test_pointers_resolve_against_the_file_they_name(self):
+        from commands import hygiene
+        store = self._pair_store()
+        (store / "note.md").write_text(
+            "One: `a/RULINGS.csv`, query `Area=a1` for a.\n"
+            "Two: `b/RULINGS.csv`, query `Area=a1` for the wrong table.\n"
+            "Three: `RULINGS.csv`, query `Area=a1` for either.\n"
+            "Four: `gone/RULINGS.csv`, query `Area=a1` for nothing.\n")
+        status = {name: s for _f, name, _c, _v, s in hygiene.csv_pointers(store)}
+        assert status["a/RULINGS.csv"] == "ok", status
+        assert status["b/RULINGS.csv"] == "DANGLING a1", status
+        assert status["RULINGS.csv"] == "AMBIGUOUS a/RULINGS.csv b/RULINGS.csv", status
+        assert status["gone/RULINGS.csv"] == "UNREGISTERED", status
+
+    def test_the_index_carries_the_path_labels(self):
+        """End to end through memfind: an index built here labels each row by its key."""
+        from unittest import mock
+        import memfind
+        store = self._pair_store()
+        (store / "note.md").write_text("A markdown file so the store has content to index.\n")
+        fake = lambda texts, quiet=False, backend=None, cache=None: [[1.0, float(i), 0.5] for i, _ in enumerate(texts)]
+        with mock.patch.object(memfind, "embed", side_effect=fake), \
+                mock.patch.object(memfind, "resolve_backend", return_value=("ollama", "fake")):
+            items, _vecs, _dim = memfind.build_index(store, quiet=True)
+        labels = sorted(label for label, _ in items if memfind._is_row(label))
+        assert labels == ["a/RULINGS.csv#a1", "b/RULINGS.csv#b1"], labels
+
+    def test_every_spelling_of_a_registered_csv_resolves_alike(self):
+        """One resolver behind `dupes` and the pointer check: a key, any path that
+        resolves to the file, or a bare name. Path-shaped and unregistered matches nothing."""
+        from commands import hygiene
+        store = self.tmp / "spelled"
+        (store / "sub").mkdir(parents=True)
+        far = self.tmp / "far3"
+        far.mkdir()
+        files = {"root": store / "RULINGS.csv", "sub": store / "sub" / "X.csv", "far": far / "CLAIMS.csv"}
+        for f in files.values():
+            f.write_text('Ruling,Area\n"A ruling filed here and in no other table at all.",t\n')
+        (store / manifest.MANIFEST).write_text(json.dumps({"sources": [
+            {"path": str(f), "text": "Ruling", "label": "Area"} for f in files.values()]}))
+        corpora.clear_settings()
+        cases = {"RULINGS.csv": "RULINGS.csv", "./RULINGS.csv": "RULINGS.csv",
+                 str(files["root"]): "RULINGS.csv", "sub/X.csv": "sub/X.csv", "./sub/X.csv": "sub/X.csv",
+                 "sub/../RULINGS.csv": "RULINGS.csv", "CLAIMS.csv": "CLAIMS.csv",
+                 str(files["far"]): "CLAIMS.csv", "X.csv": "sub/X.csv"}
+        for spelling, key in cases.items():
+            got = [k for _p, _t, k in corpus.csv_named(store, spelling)]
+            assert got == [key], (spelling, got)
+        for nothing in ("gone/RULINGS.csv", "./gone.csv", str(far / "nope.csv"), "./X.csv"):
+            assert corpus.csv_named(store, nothing) == [], nothing
+        (store / "note.md").write_text("".join(f"Pointer `{s}`, query `Area=t` here.\n" for s in cases)
+                                       + "Pointer `gone/RULINGS.csv`, query `Area=t` here.\n")
+        status = {name: s for _f, name, _c, _v, s in hygiene.csv_pointers(store)}
+        assert all(status[s] == "ok" for s in cases), status
+        assert status["gone/RULINGS.csv"] == "UNREGISTERED", status
+        cwd = os.getcwd()
+        try:                                  # dupes also resolves from the working directory
+            os.chdir(store / "sub")
+            assert [k for _p, _t, k in overlap._tables_named(store, "X.csv")] == ["sub/X.csv"]
+            assert [k for _p, _t, k in overlap._tables_named(store, "../RULINGS.csv")] == ["RULINGS.csv"]
+        finally:
+            os.chdir(cwd)
 
     def test_an_outside_csv_with_a_unique_name_keeps_its_bare_name(self):
         store = self.tmp / "solo"
@@ -334,6 +514,7 @@ class SameNamedCsvs(StoreCase):
             {"sources": [{"path": str(lone), "text": "Claim", "label": "Area"}]}))
         corpora.clear_settings()
         assert corpus.csv_keys(store) == {lone: "CLAIMS.csv"}
+        assert [label for label, _ in corpus.csv_rows(store)] == ["CLAIMS.csv#t"]
 
 
 class IndexPairs(StoreCase):

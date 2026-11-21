@@ -84,11 +84,13 @@ def across_pairs(stores, floor=claims.PAIR_FLOOR):
         # keyed as a row label keys it, so two CSVs sharing a name stay two files
         csvs = {k: str(p.resolve()) for p, k in corpus.csv_keys(root).items()}
         for name, body in corpus.corpus(root).items():
+            # the longest key the label starts with, never the text before its first
+            # `#`: a CSV's own name may hold one
             if name in md:
                 ident = md[name]
-            elif "#" in name and name.split("#", 1)[0] in csvs:
-                fname, tag = name.split("#", 1)
-                ident = f"{csvs[fname]}#{tag}"
+            elif (owner := max((c for c in csvs if name.startswith(c + "#")), key=len,
+                               default=None)) is not None:
+                ident = f"{csvs[owner]}#{name[len(owner) + 1:]}"
             else:
                 ident = f"{k}::{name}"
             holders.setdefault(ident, []).append(k)
@@ -247,21 +249,10 @@ def cmd_graduated(root, floor=claims.PAIR_FLOOR):
 
 
 def _tables_named(root, name):
-    """[(path, text column, key)] of the registered CSVs a user-supplied name means: its
-    key in the store (`sub/RULINGS.csv`), its resolved path, or a bare file name
-    (`./x.csv` included), which matches every registered CSV of that name. An exact
-    key or path wins over the bare-name set, so a root `RULINGS.csv` stays nameable
-    beside a `memory/RULINGS.csv`. More than one match is the caller's to refuse,
-    never to pick from."""
-    p = Path(name)
-    sources = corpus.csv_sources(Path(root))
-    keys = corpus.csv_keys(Path(root), sources)
-    exact = [(pth, text, keys[pth]) for pth, text, _label in sources
-             if keys[pth] == p.as_posix() or os.path.realpath(p) == os.path.realpath(pth)]
-    if exact:
-        return exact
-    return [(pth, text, keys[pth]) for pth, text, _label in sources
-            if len(p.parts) == 1 and p.name == pth.name]
+    """[(path, text column, key)] of the registered CSVs a name on the command line
+    means: `corpus.csv_named`, a path resolving from the working directory or the
+    store root."""
+    return corpus.csv_named(Path(root), name, bases=[Path.cwd(), Path(root)])
 
 
 def _lexical_table(pth, text, key, top, as_json, why):

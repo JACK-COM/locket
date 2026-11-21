@@ -51,6 +51,20 @@ class Rows(unittest.TestCase):
         assert base is not None and pairs[0][0] > base, (pairs, base)
         assert {pairs[0][2], pairs[0][4]} == {"row 0", "row 80"}, pairs
 
+    def test_a_table_is_its_own_rows_when_another_shares_its_name(self):
+        """Rows are selected by the CSV's key, so identical rows in a same-named CSV
+        elsewhere in the store never pair with these."""
+        import numpy as np
+        rng = np.random.default_rng(3)
+        same = rng.normal(size=8)
+        vecs = [same, same + 0.01, rng.normal(size=8), rng.normal(size=8)]
+        items = [("a/R.csv#x", "row in a"), ("b/R.csv#x", "the same row in b"),
+                 ("a/R.csv#x", "another row in a"), ("b/R.csv#x", "another row in b")]
+        idx = (items, mf._embed.normalise(np.stack(vecs)), 8)
+        assert rows._source_rows(items, "a/R.csv") == [0, 2]
+        pairs, _ = rows.row_pairs(Path("."), "a/R.csv", top=5, idx=idx)
+        assert pairs and all(p[1].startswith("a/") and p[3].startswith("a/") for p in pairs), pairs
+
     def test_a_table_with_no_indexed_rows_says_so(self):
         with self.assertRaises(LookupError):
             rows.row_pairs(Path("."), "NOPE.csv", idx=self.idx)
