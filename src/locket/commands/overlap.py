@@ -1,7 +1,9 @@
 """Where a corpus holds one claim twice: claim pairs across files (audit), across stores
 (across), inside one file (dupes), between a holding space and a durable file
-(graduated), and the files an incoming text already restates (against).
+(graduated), and the files an incoming text already restates (against). On a registered
+CSV, `dupes` ranks rows by meaning through memfind, which loads only then.
 """
+import json
 import os
 import re
 import sys
@@ -12,7 +14,7 @@ import claims
 import corpora
 import corpus
 import fsio
-from commands import Report, Tool, Verb, as_text, corpus_verb, floor_arg, report_tool
+from commands import Report, Tool, Verb, as_text, corpus_verb, floor_arg, report_tool, take_n, take_opt
 
 
 def _filter_pairs(pairs, store=lambda f: ""):
@@ -243,14 +245,76 @@ def cmd_graduated(root, floor=claims.PAIR_FLOOR):
     return Report(out, len(hits))
 
 
-def cmd_dupes(root, floor=claims.PAIR_FLOOR, files=None):
+def _table_named(root, name):
+    """(path, text column) of the registered CSV a user-supplied name means, matched by
+    file name when it is given bare (`./x.csv` included), else by resolved path, or None."""
+    p = Path(name)
+    for pth, text, _label in corpus.csv_sources(Path(root)):
+        if (p.name == pth.name if len(p.parts) == 1
+                else os.path.realpath(p) == os.path.realpath(pth)):
+            return pth, text
+    return None
+
+
+def _lexical_table(pth, text, top, as_json, why):
+    """Word-overlap row pairs inside one CSV, for a machine with no embedder: each row
+    is its own document, so a pair is two rows sharing a claim. Said so in the report,
+    and on stderr under `--json`, so the worklist still parses."""
+    docs = {f"row {i}": row for i, (_label, row) in enumerate(corpus.csv_rows_of(pth, text))}
+    best: dict = {}                    # one entry per row pair, at its best-matching claim
+    for jac, fa, fb, _sa, _sb in claims.cross_file_pairs(docs, claims.PAIR_FLOOR):
+        key = tuple(sorted((fa, fb)))
+        best[key] = max(best.get(key, 0.0), jac)
+    pairs = sorted(((j, docs[a], docs[b]) for (a, b), j in best.items()), key=lambda t: -t[0])
+    pairs = pairs[:top or 30]
+    warn = (f"{pth.name}: WORD OVERLAP ONLY. No embedder answered ({why}), so a paraphrased row "
+            f"is invisible here; {len(pairs)} pair(s) at jaccard {claims.PAIR_FLOOR}")
+    if as_json:
+        print(fsio.relay(warn, 400), file=sys.stderr)
+        return Report([json.dumps([{"score": round(j, 3), "a_label": pth.name, "a": a,
+                                    "b_label": pth.name, "b": b, "verdict": None} for j, a, b in pairs],
+                                  indent=1)], len(pairs))
+    out = [warn + "\n"] + [f"[{j:.2f}]\n   A: {fsio.relay(a)}\n   B: {fsio.relay(b)}\n" for j, a, b in pairs]
+    return Report(out, len(pairs))
+
+
+def _table_report(root, pth, text, top, incoming, against, as_json):
+    """One registered CSV by meaning, through `meaning`, or by word overlap when no
+    embedder answers. Incoming and covered rows have no word-overlap form: they say so."""
+    from commands import meaning              # memfind, and numpy with it, loads only here
+    try:
+        return meaning.cmd_table_dupes(root, pth, text, top=top, incoming=incoming,
+                                       against=against, as_json=as_json)
+    except meaning._memfind().NoEmbedder as e:
+        if incoming or against:
+            return Report([f"{pth.name}: this needs an embedder, and none answered ({fsio.relay(str(e))})"], 0)
+        return _lexical_table(pth, text, top, as_json, fsio.relay(str(e)))
+
+
+def cmd_dupes(root, floor=claims.PAIR_FLOOR, files=None, top=None, incoming=None, against=None,
+              as_json=False):
     """Repeated claims INSIDE one file. The uniqueness invariant, measured.
 
     Defaults to the holding spaces, where uniqueness is the rule (Peer ruling
     2026-08-15); pass `files` to check any other. A ledger is exempt on purpose,
-    since repetition is its shape.
+    since repetition is its shape. A reference CSV registered under `sources` holds
+    one fact per row and breaks that by paraphrase, so one named here is ranked by
+    meaning instead (`meaning.cmd_table_dupes`), and the options apply to it alone.
+    A markdown file stays on word overlap: this report has to flag exactly what the
+    write hook refuses, and the hook is lexical.
     """
-    out = []
+    out: list[str] = []
+    found = 0
+    tables = [(f, _table_named(root, f)) for f in files or ()]
+    if any(t for _f, t in tables):
+        for _f, t in tables:
+            if t:
+                rep = _table_report(root, t[0], t[1], top, incoming, against, as_json)
+                out += rep.lines
+                found += rep.count
+        files = [f for f, t in tables if not t]
+        if not files:
+            return Report(out, found)
     docs = corpus.corpus(root)
     missing = []
     if files:
@@ -269,7 +333,7 @@ def cmd_dupes(root, floor=claims.PAIR_FLOOR, files=None):
     if not scope:
         out.append(f"no file named {', '.join(missing)} in {root}" if missing
                    else f"no holding space in {root}; name a file to check one directly")
-        return Report(out, 0)
+        return Report(out, found)
     if missing:
         out.append(f"not in {root}, skipped: {', '.join(missing)}")
     # Same ENTRY_TOKENS floor the write-time check uses. A report that flags what
@@ -281,7 +345,7 @@ def cmd_dupes(root, floor=claims.PAIR_FLOOR, files=None):
                ", ".join(f"{k} ({per.get(k, 0)})" for k in sorted(scope)) + "\n")
     for jac, fa, _fb, sa, sb in pairs:
         out.append(f"[{jac:.2f}] {fa}\n   A: {fsio.relay(sa)}\n   B: {fsio.relay(sb)}\n")
-    return Report(out, len(pairs))
+    return Report(out, found + len(pairs))
 
 
 def cmd_against(root, text, top=3):
@@ -325,6 +389,32 @@ def _doc_keys(root, name, docs):
     return {k for k in docs if ("/" + Path(k).as_posix()).endswith(tail)}
 
 
+def _dupes(root, rest):
+    """`dupes`'s command line: file names, and the options a registered CSV takes. An
+    option the verb does not know, one left without its value, or one that cannot
+    apply is refused rather than read as a file name or dropped."""
+    try:
+        top, rest = take_n(rest, None)
+        incoming, rest = take_opt(rest, "--incoming")
+        against, rest = take_opt(rest, "--against")
+    except ValueError as e:
+        return Report([str(e)], 0)
+    as_json = "--json" in rest
+    files = [f for f in rest if f != "--json"]
+    unknown = [f for f in files if f.startswith("-")]
+    if unknown:
+        return Report([f"dupes does not take {', '.join(unknown)}; see  locket dupes -h"], 0)
+    if incoming and against:
+        return Report(["--incoming and --against are two different questions; ask one at a time"], 0)
+    if as_json and (incoming or against):
+        return Report(["--json writes the row-pair worklist only; drop --incoming or --against"], 0)
+    if (incoming or against or as_json or top) and not any(_table_named(root, f) for f in files):
+        return Report(["-n, --incoming, --against and --json apply to a CSV registered under "
+                       "`sources`; name one"], 0)
+    return cmd_dupes(root, files=files or None, top=top, incoming=incoming, against=against,
+                     as_json=as_json)
+
+
 def _files(args):
     files = args.get("files") or None
     return [files] if isinstance(files, str) else files     # a bare string would match as a substring
@@ -347,11 +437,19 @@ VERBS = (
                   "against itself, so a fact written into two stores is "
                   "invisible to both until this runs. Fork risk, not proof.",
                   lambda a, s: as_text(cmd_across()) or "no memory stores with markdown files found")),
-    Verb("dupes", "[corpus] [file ...]", "claims repeated inside one file; use on scratch and inbox files",
+    Verb("dupes", "[corpus] [file ...] [-n N] [--incoming rows.csv | --against file.md] [--json]",
+         "claims repeated inside one file; use on scratch and inbox files, or a registered CSV",
          "locket dupes                          the scratch and inbox files the store names\n"
-         "locket dupes council SHORT_TERM.md    one file, named as the store lists it",
-         run=corpus_verb(lambda r, rest: cmd_dupes(r, files=rest or None)),
-         mcp=report_tool("Claims repeated inside one file (holding spaces by default).",
+         "locket dupes council SHORT_TERM.md    one file, named as the store lists it\n"
+         "locket dupes notes RULINGS.csv        a registered CSV's closest row pairs, by meaning\n"
+         "locket dupes notes RULINGS.csv -n 50 --json   the same as a worklist with a verdict to fill\n"
+         "locket dupes notes RULINGS.csv --incoming new.csv   each new row against its nearest row\n"
+         "locket dupes notes RULINGS.csv --against rules/x.md rows a whole-loaded file already states",
+         # no header under --json, so the worklist redirected to a file parses as JSON
+         run=lambda rest: corpus_verb(_dupes, header="--json" not in rest)(rest),
+         mcp=report_tool("Claims repeated inside one file (holding spaces by default). A CSV "
+                         "registered under `sources` named here has its 30 closest row pairs "
+                         "ranked by meaning instead: a worklist, never a verdict.",
                          lambda r, a: cmd_dupes(r, files=_files(a)),
                          files={"type": "array", "items": {"type": "string"},
                                 "description": "File names to check instead of the defaults."})),

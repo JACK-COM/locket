@@ -276,16 +276,29 @@ def _own_csv_sources(root: Path) -> list[tuple[Path, str, Optional[str]]]:
 CSV_ERRORS = (OSError, _csv.Error, UnicodeDecodeError)
 
 
-def _rows_of(pth: Path, textcol: str, labelcol: Optional[str], out: list[tuple[str, str]]) -> None:
+def _rows_of(pth: Path, textcol: str, labelcol: Optional[str], out: list[tuple[str, str]],
+             max_bytes: Optional[int] = None) -> None:
     """Append (label, text) for one registered CSV's rows to `out`; raises one of
-    CSV_ERRORS. Into the caller's list, so the rows read before a bad one are kept."""
-    with fsio.open_safe(pth, newline="", max_bytes=None) as fh:   # declared CSVs are never capped
+    CSV_ERRORS. Into the caller's list, so the rows read before a bad one are kept.
+    A declared CSV is never capped; pass `max_bytes` for one the store never declared."""
+    with fsio.open_safe(pth, newline="", max_bytes=max_bytes) as fh:
         for r in _csv.DictReader(fh):
             t = (r.get(textcol) or "").strip()
             if not t:
                 continue
             tag = (r.get(labelcol) or "").strip() if labelcol else ""
             out.append((f"{pth.name}#{tag}", t))
+
+
+def csv_rows_of(pth: Path, textcol: str) -> list[tuple[str, str]]:
+    """[(label, text)] for one registered CSV's rows, keeping those read before any
+    error, as `csv_rows` does for the whole set."""
+    out: list[tuple[str, str]] = []
+    try:
+        _rows_of(pth, textcol, None, out)
+    except CSV_ERRORS:
+        pass
+    return out
 
 
 def csv_rows(root: Path) -> list[tuple[str, str]]:

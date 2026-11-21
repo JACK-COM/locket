@@ -129,6 +129,111 @@ class Dupes(StoreCase):
             assert _shown(overlap.cmd_dupes(store, files=["NOPE.md"])) == 0
         assert "no file named NOPE.md" in buf.getvalue(), buf.getvalue()
 
+    def _table_store(self):
+        store = self.tmp / "tables"
+        store.mkdir()
+        (store / manifest.MANIFEST).write_text(json.dumps(
+            {"sources": [{"path": "RULINGS.csv", "text": "Ruling", "label": "Area"}]}))
+        corpora.clear_settings()
+        row = "Grep every consumer of an overlapping field before calling the field dead."
+        (store / "RULINGS.csv").write_text(
+            f'Ruling,Area\n"{row}",schema\n"{row} Always.",schema\n"Paint the hangar doors on alternate days.",x\n')
+        (store / "note.md").write_text("A markdown file so the store has content.\n")
+        return store
+
+    def test_a_registered_csv_is_ranked_by_meaning_under_any_spelling_of_its_name(self):
+        from unittest import mock
+        import memfind
+        store = self._table_store()
+        canned = ([(0.9, "RULINGS.csv#schema", "a", "RULINGS.csv#schema", "b")], None)
+        for name in ("RULINGS.csv", "./RULINGS.csv", str(store / "RULINGS.csv")):
+            with mock.patch.object(memfind, "row_pairs", return_value=canned) as rp:
+                rep = overlap.cmd_dupes(store, files=[name], top=7)
+            rp.assert_called_once()
+            assert rp.call_args.args[1] == "RULINGS.csv" and rp.call_args.kwargs["top"] == 7, name
+            assert rep.count == 1 and "by meaning" in rep.lines[0], (name, rep.lines)
+
+    def test_a_csv_and_a_markdown_file_in_one_call_each_take_their_own_path(self):
+        from unittest import mock
+        import memfind
+        store = self._table_store()
+        entry = "Gate: a third instance where the watcher ordering bites on a freshly built sheet."
+        (store / "INBOX.md").write_text(f"{entry}\n\n{entry}\n")
+        canned = ([(0.9, "RULINGS.csv#schema", "a", "RULINGS.csv#schema", "b")], None)
+        with mock.patch.object(memfind, "row_pairs", return_value=canned):
+            rep = overlap.cmd_dupes(store, files=["RULINGS.csv", "INBOX.md"])
+        assert rep.count == 2, rep.lines
+        assert any("by meaning" in l for l in rep.lines) and any("INBOX.md (1)" in l for l in rep.lines)
+
+    def test_with_no_embedder_a_csv_falls_back_to_word_overlap_and_says_so(self):
+        from unittest import mock
+        import memfind
+        store = self._table_store()
+        down = memfind.NoEmbedder("no embedder")
+        with mock.patch.object(memfind, "row_pairs", side_effect=down):
+            rep = overlap.cmd_dupes(store, files=["RULINGS.csv"])
+        assert "WORD OVERLAP ONLY" in rep.lines[0] and rep.count == 1, rep.lines
+        assert "Grep every consumer" in rep.lines[1] and "Always." in rep.lines[1], rep.lines
+        with mock.patch.object(memfind, "row_pairs", side_effect=down):
+            rep = overlap.cmd_dupes(store, files=["RULINGS.csv"], as_json=True)
+        assert json.loads(rep.lines[0])[0]["verdict"] is None, "the fallback worklist still parses"
+        with mock.patch.object(memfind, "incoming_rows", side_effect=down):
+            rep = overlap.cmd_dupes(store, files=["RULINGS.csv"], incoming=str(store / "RULINGS.csv"))
+        assert "needs an embedder" in rep.lines[0], "incoming rows are never scored by word overlap"
+        # any other RuntimeError is a fault, never "no embedder"
+        with mock.patch.object(memfind, "row_pairs", side_effect=RuntimeError("a real fault")):
+            with self.assertRaises(RuntimeError):
+                overlap.cmd_dupes(store, files=["RULINGS.csv"])
+
+    def test_json_from_the_command_line_parses(self):
+        from unittest import mock
+        import memfind
+        from commands import overlap as ov
+        store = self._table_store()
+        canned = ([(0.9, "RULINGS.csv#schema", "a", "RULINGS.csv#schema", "b")], None)
+        verb = next(v for v in ov.VERBS if v.name == "dupes")
+        buf = io.StringIO()
+        with mock.patch.object(memfind, "row_pairs", return_value=canned), contextlib.redirect_stdout(buf):
+            verb.run([str(store), "RULINGS.csv", "--json"])
+        assert json.loads(buf.getvalue())[0]["a"] == "a", buf.getvalue()
+
+    def test_an_unreadable_incoming_file_names_its_real_fault(self):
+        store = self._table_store()
+        rep = overlap.cmd_dupes(store, files=["RULINGS.csv"], incoming=str(store / "absent.csv"))
+        assert "holds no" not in rep.lines[0] and "absent.csv" in rep.lines[0], rep.lines
+        (store / "wrong.csv").write_text("Claim\n\"A row under some other header entirely.\"\n")
+        rep = overlap.cmd_dupes(store, files=["RULINGS.csv"], incoming=str(store / "wrong.csv"))
+        assert "holds no `Ruling` rows" in rep.lines[0], rep.lines
+
+    def test_against_reads_a_file_outside_the_store(self):
+        from unittest import mock
+        import memfind
+        store = self._table_store()
+        rule = self.tmp / "rule.md"
+        rule.write_text("Grep every consumer of a field before you call it dead, always.\n")
+        with mock.patch.object(memfind, "covered_rows", return_value=[(0.8, "RULINGS.csv#schema", "r", "s")]) as cr:
+            rep = overlap.cmd_dupes(store, files=["RULINGS.csv"], against=str(rule))
+        assert cr.call_args.args[2] == rule.read_text() and rep.count == 1, rep.lines
+
+    def test_the_command_line_refuses_what_it_cannot_apply(self):
+        from unittest import mock
+        store = self._table_store()
+        with mock.patch.object(overlap, "cmd_dupes") as cd:
+            overlap._dupes(store, ["RULINGS.csv", "-n", "5", "--json"])
+        cd.assert_called_once_with(store, files=["RULINGS.csv"], top=5, incoming=None,
+                                   against=None, as_json=True)
+        for argv, says in ((["RULINGS.csv", "-n", "five"], "whole number"),
+                           (["RULINGS.csv", "-n", "0"], "1 or more"),
+                           (["RULINGS.csv", "--against"], "needs a value"),
+                           (["RULINGS.csv", "--incomming", "x.csv"], "does not take"),
+                           (["RULINGS.csv", "--incoming", "a.csv", "--against", "b.md"], "one at a time"),
+                           (["RULINGS.csv", "--json", "--against", "b.md"], "worklist only"),
+                           (["note.md", "--json"], "registered under")):
+            with mock.patch.object(overlap, "cmd_dupes") as cd:
+                rep = overlap._dupes(store, argv)
+            cd.assert_not_called()
+            assert says in rep.lines[0], (argv, rep.lines)
+
 
 class IndexPairs(StoreCase):
     def test_an_index_restating_its_own_target_is_not_listed(self):

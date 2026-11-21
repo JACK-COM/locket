@@ -124,6 +124,34 @@ def floor_arg(rest: list[str], default: float) -> float:
     return float(rest[0]) if rest else default
 
 
+def take_opt(rest: list[str], flag: str) -> tuple[Optional[str], list[str]]:
+    """(value, rest without `flag VALUE`), or (None, rest) when the flag is absent.
+    Raises ValueError when the flag ends the line or is followed by another option,
+    so a flag left without its value never reads as a file name."""
+    if flag not in rest:
+        return None, rest
+    j = rest.index(flag)
+    if j + 1 >= len(rest) or rest[j + 1].startswith("-"):
+        raise ValueError(f"{flag} needs a value after it")
+    return rest[j + 1], rest[:j] + rest[j + 2:]
+
+
+def take_n(rest: list[str], default: Optional[int]) -> tuple[Optional[int], list[str]]:
+    """(top, rest without `-n N`). Raises ValueError when N is missing, not a whole
+    number, or below 1. Here rather than in memfind so a verb can parse it without
+    loading numpy."""
+    if "-n" not in rest:
+        return default, rest
+    j = rest.index("-n")
+    try:
+        top = int(rest[j + 1])
+    except (IndexError, ValueError):
+        raise ValueError("-n takes a whole number, as in  -n 10") from None
+    if top < 1:
+        raise ValueError("-n takes a whole number of 1 or more, as in  -n 10")
+    return top, rest[:j] + rest[j + 2:]
+
+
 # ---------------------------------------------------------------- the MCP server's store argument
 
 STORE_ARG = {"type": "string", "description":

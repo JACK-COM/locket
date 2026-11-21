@@ -171,6 +171,12 @@ MODES
             never retired, which `graduated` cannot see. Takes no corpus.
   dupes     repeated claims INSIDE one file, which audit skips by construction.
             Use on the holding spaces (SHORT_TERM, OPEN_QUESTIONS, proposed).
+            Name a CSV registered under `sources` and its rows are ranked by
+            MEANING, since a reference table breaks one-fact-per-row by
+            paraphrase: closest pairs, `--incoming rows.csv` against the table,
+            `--against file.md` for rows a rule already states, `--json` for a
+            worklist. Ranked, never a verdict; word overlap, said so, with no
+            embedder.
   graduated holding-space claims a durable file or CSV row now holds: an entry
             promoted and never retired. Prints its scope even when clean, so a
             zero says what it was scored against. Scores ONE store: a promotion

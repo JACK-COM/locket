@@ -1,12 +1,15 @@
 """Which file already holds an idea, by meaning: memfind's verbs. memfind, and numpy with
-it, loads only when one of these runs.
+it, loads only when one of these runs, or when `dupes` names a registered CSV
+(`cmd_table_dupes`, which `overlap` imports at that moment).
 """
+import json
 import sys
+from pathlib import Path
 
 import corpora
 import corpus
 import fsio
-from commands import STORE_ARG, Tool, Verb, store_root
+from commands import STORE_ARG, Report, Tool, Verb, store_root
 
 
 def _memfind():
@@ -57,6 +60,63 @@ def _siblings_tool(args, session):
                "is a verdict, and contradictions are not detected: this is the shortlist a "
                "reader adjudicates.")
     return "\n".join(out)
+
+
+def _incoming_texts(path, text):
+    """The text column of an incoming CSV carrying the table's own header. A file that
+    cannot be read raises its own error, so a missing, linked or oversized file is
+    never reported as one with the wrong header."""
+    rows: list = []
+    corpus._rows_of(Path(path), text, None, rows, max_bytes=fsio.MAX_FILE_BYTES)
+    if not rows:
+        raise ValueError(f"{path} holds no `{text}` rows; give it the table's own header")
+    return [r for _label, r in rows]
+
+
+def cmd_table_dupes(root, pth, text, top=30, incoming=None, against=None, as_json=False):
+    """`dupes` on a registered CSV, by meaning: its closest row pairs, every incoming
+    row against its nearest row, or the rows a markdown file already states. Ranked,
+    never filtered and never a verdict (memfind's rows section says why). Raises
+    memfind.NoEmbedder for the caller's word-overlap fallback; `top` None on
+    `incoming` reports every row."""
+    memfind = _memfind()
+    name = pth.name
+    try:
+        if incoming:
+            ranked = memfind.incoming_rows(root, name, _incoming_texts(incoming, text), quiet=True)
+            shown = ranked[:top] if top else ranked
+            head = (f"the {len(shown)} highest of {len(ranked)}" if len(shown) < len(ranked)
+                    else f"all {len(ranked)}")
+            out = [f"{head} incoming row(s) against their nearest row of {name}, highest first\n"]
+            out += [f"[{c:.3f}] INCOMING: {fsio.relay(t)}\n        NEAREST {fsio.relay(lab)}: "
+                    f"{fsio.relay(r)}\n" for c, t, lab, r in shown]
+            return Report(out, len(shown))
+        if against:
+            # Any markdown file, member or not: a rule loads whole and sits outside
+            # most stores, and it is where a row's fact is most often promoted to.
+            ranked = memfind.covered_rows(root, name, fsio.read_safe(Path(against)),
+                                          top=top or 30, quiet=True)
+            out = [f"rows of {name} that {against} already states, highest first: a row a "
+                   "whole-loaded file covers is a twin, cut by hand\n"]
+            out += [f"[{c:.3f}] {fsio.relay(lab)}\n   row:  {fsio.relay(r)}\n   file: {fsio.relay(s)}\n"
+                    for c, lab, r, s in ranked]
+            return Report(out, len(ranked))
+        pairs, base = memfind.row_pairs(root, name, top=top or 30, quiet=True)
+    except (LookupError, ValueError, *corpus.CSV_ERRORS) as e:
+        return Report([f"{name}: {fsio.relay(str(e))}"], 0)
+    if as_json:
+        # The adjudication worklist: a reader fills `verdict` (dup-a, dup-b, merge or
+        # distinct) and scripts/score-verdicts.py reports precision by score band.
+        return Report([json.dumps([{"score": round(c, 3), "a_label": la, "a": a, "b_label": lb,
+                                    "b": b, "verdict": None} for c, la, a, lb, b in pairs], indent=1)],
+                      len(pairs))
+    chance = (f"; random pairs of this table reach {base:.3f} at the 99.9th percentile"
+              if base is not None else "")
+    out = [f"{name}: the {len(pairs)} closest row pairs by meaning{chance}. A worklist, not a "
+           "verdict: rows on different subjects can score high\n"]
+    out += [f"[{c:.3f}] {fsio.relay(la)} :: {fsio.relay(lb)}\n   A: {fsio.relay(a)}\n   B: {fsio.relay(b)}\n"
+            for c, la, a, lb, b in pairs]
+    return Report(out, len(pairs))
 
 
 SEE = "find"
