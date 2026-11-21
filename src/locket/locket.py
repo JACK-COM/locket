@@ -16,7 +16,7 @@ sys.path.insert(0, str(HERE))
 import cli as front  # noqa: E402
 import install  # noqa: E402
 
-__version__ = "0.14.0"                          # the one home: pyproject.toml and the formula's test read it
+__version__ = "0.14.1"                          # the one home: pyproject.toml and the formula's test read it
 
 
 def main(argv):
