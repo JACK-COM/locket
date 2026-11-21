@@ -75,7 +75,7 @@ class Layers(unittest.TestCase):
         import subprocess
         import sys
         code = (f"import sys; sys.path.insert(0, {str(SRC)!r}); import cli, memscan; "
-                "print(sorted(m for m in ('numpy', '_embed', 'memfind') if m in sys.modules))")
+                "print(sorted(m for m in ('numpy', '_embed', 'memfind', 'rows') if m in sys.modules))")
         r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
         self.assertEqual((r.returncode, r.stdout.strip()), (0, "[]"), r.stderr[-400:])
 

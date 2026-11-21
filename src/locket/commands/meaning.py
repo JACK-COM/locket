@@ -17,6 +17,12 @@ def _memfind():
     return install.load_memfind()
 
 
+def _rows():
+    """The row comparisons behind `dupes` on a CSV; memfind and numpy load with them."""
+    import rows
+    return rows
+
+
 def _script(flag):
     """`run` handing the arguments to memfind under its own spelling of the verb."""
     return lambda rest: _memfind().main(["memfind.py", flag, *rest])
@@ -76,14 +82,14 @@ def _incoming_texts(path, text):
 def cmd_table_dupes(root, pth, text, top=30, incoming=None, against=None, as_json=False):
     """`dupes` on a registered CSV, by meaning: its closest row pairs, every incoming
     row against its nearest row, or the rows a markdown file already states. Ranked,
-    never filtered and never a verdict (memfind's rows section says why). Raises
-    memfind.NoEmbedder for the caller's word-overlap fallback; `top` None on
+    never filtered and never a verdict (`rows` says why). Raises
+    rows.NoEmbedder for the caller's word-overlap fallback; `top` None on
     `incoming` reports every row."""
-    memfind = _memfind()
+    rows = _rows()
     name = pth.name
     try:
         if incoming:
-            ranked = memfind.incoming_rows(root, name, _incoming_texts(incoming, text), quiet=True)
+            ranked = rows.incoming_rows(root, name, _incoming_texts(incoming, text), quiet=True)
             shown = ranked[:top] if top else ranked
             head = (f"the {len(shown)} highest of {len(ranked)}" if len(shown) < len(ranked)
                     else f"all {len(ranked)}")
@@ -94,14 +100,14 @@ def cmd_table_dupes(root, pth, text, top=30, incoming=None, against=None, as_jso
         if against:
             # Any markdown file, member or not: a rule loads whole and sits outside
             # most stores, and it is where a row's fact is most often promoted to.
-            ranked = memfind.covered_rows(root, name, fsio.read_safe(Path(against)),
+            ranked = rows.covered_rows(root, name, fsio.read_safe(Path(against)),
                                           top=top or 30, quiet=True)
             out = [f"rows of {name} that {against} already states, highest first: a row a "
                    "whole-loaded file covers is a twin, cut by hand\n"]
             out += [f"[{c:.3f}] {fsio.relay(lab)}\n   row:  {fsio.relay(r)}\n   file: {fsio.relay(s)}\n"
                     for c, lab, r, s in ranked]
             return Report(out, len(ranked))
-        pairs, base = memfind.row_pairs(root, name, top=top or 30, quiet=True)
+        pairs, base = rows.row_pairs(root, name, top=top or 30, quiet=True)
     except (LookupError, ValueError, *corpus.CSV_ERRORS) as e:
         return Report([f"{name}: {fsio.relay(str(e))}"], 0)
     if as_json:

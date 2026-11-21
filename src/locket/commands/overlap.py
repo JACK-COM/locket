@@ -1,7 +1,7 @@
 """Where a corpus holds one claim twice: claim pairs across files (audit), across stores
 (across), inside one file (dupes), between a holding space and a durable file
 (graduated), and the files an incoming text already restates (against). On a registered
-CSV, `dupes` ranks rows by meaning through memfind, which loads only then.
+CSV, `dupes` ranks rows by meaning through `rows`, which loads memfind only then.
 """
 import json
 import os
@@ -285,7 +285,7 @@ def _table_report(root, pth, text, top, incoming, against, as_json):
     try:
         return meaning.cmd_table_dupes(root, pth, text, top=top, incoming=incoming,
                                        against=against, as_json=as_json)
-    except meaning._memfind().NoEmbedder as e:
+    except meaning._rows().NoEmbedder as e:
         if incoming or against:
             return Report([f"{pth.name}: this needs an embedder, and none answered ({fsio.relay(str(e))})"], 0)
         return _lexical_table(pth, text, top, as_json, fsio.relay(str(e)))
