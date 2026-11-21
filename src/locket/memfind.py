@@ -29,7 +29,7 @@ A corpus may also keep durable facts in a queryable CSV outside the memory
 directory. Where the corpus manifest (`locket.json`, key `sources`; the older
 standalone `reference-sources.json` is still read) registers one, every row is
 indexed alongside the markdown and ranked as its own unit, labelled
-`<file>.csv#<area>`. A store's reference CSVs can hold thousands of such rows,
+`<csv path>#<area>`. A store's reference CSVs can hold thousands of such rows,
 which a markdown-only index cannot see at all.
 
     locket find "<statement>" [corpus] [-n N]   rank candidate owners
@@ -99,12 +99,13 @@ MANIFEST = manifest.LEGACY_MANIFEST
 # and the write-time gate see the same rows this index does.
 csv_sources = corpus.csv_sources
 csv_rows = corpus.csv_rows
+ROW_LABELS = corpus.ROW_LABELS     # the label scheme's version, owned beside `corpus.csv_keys`
 
 
 def _is_row(label):
     """Is this index item a CSV row rather than a markdown file?
 
-    A row's label is `<file>.csv#<area>` and a markdown file's is its relative path,
+    A row's label is `<csv path>#<area>` and a markdown file's is its relative path,
     so the label alone decides and nothing has to be threaded through `load_index`,
     whose return signature three hooks already depend on.
     """
@@ -135,6 +136,9 @@ def corpus_fingerprint(root):
     # every file once, where the per-file reuse below would keep stale claims
     # under an unchanged file forever.
     fp["__claims__"] = claims.CLAIMS_VERSION
+    # How a CSV row is labelled. A change rebuilds the index once; rows reuse their
+    # vectors by text, so nothing is re-embedded and every row takes its new label.
+    fp["__row_labels__"] = ROW_LABELS
     return fp
 
 
@@ -284,7 +288,7 @@ def _build_index(root, quiet=False):
     # file's sentences move together, so it reuses a contiguous SLICE. A CSV row is
     # independent of its neighbours and every row below an edit shifts, so a row
     # reuses by its own TEXT. Keying a row on its label would never hit: labels are
-    # `<file>.csv#<area>` and the fingerprint is per file.
+    # `<csv path>#<area>` and the fingerprint is per file.
     old_slice = {}                                     # file -> (start, count)
     old_row = {}                                       # row text -> position
     if old_items:
@@ -656,7 +660,7 @@ EXAMPLES
   locket index myapp
 
 REFERENCE CSVs
-  A result labelled `<file>.csv#<area>` is one ROW of a reference CSV registered
+  A result labelled `<csv path>#<area>` is one ROW of a reference CSV registered
   under `sources` in `<corpus>/locket.json` (or in the older standalone
   `reference-sources.json`, still read), not a file. Rows never group, so
   several from one CSV can share the ranking; query the CSV on that `Area` for

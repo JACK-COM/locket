@@ -187,6 +187,23 @@ class Stores(StoreCase):
         assert ih == {"sub/t.md": True, "sub/gone.md": False}, ih
         shutil.rmtree(store / "sub")
 
+    def test_an_edited_row_below_the_root_never_matches_itself(self):
+        """The write hook hides the file's own rows by the key their labels carry. For a
+        CSV below the root that key is its path, and the bare name missed every row."""
+        store = self.brain()
+        (store / "memory").mkdir()
+        rules = store / "memory" / "RULES.csv"
+        rules.write_text("Ruling,Area,Date\n"
+                         '"Serve the estimate bottom-up from priced components and never from an aggregate.",cost,2026-01-01\n')
+        (store / manifest.MANIFEST).write_text(json.dumps({
+            "sources": [{"path": str(rules), "text": "Ruling", "label": "Area"}]}))
+        corpora.clear_settings()
+        assert "memory/RULES.csv#cost" in corpus.corpus(store), sorted(corpus.corpus(store))
+        prior = rules.read_text()
+        edit = {"old_string": "never from an aggregate", "new_string": "not from an aggregate"}
+        msg = ledger.source_row_decision(str(rules), edit, prior)[0] or ""
+        assert "RULES.csv" not in msg, msg
+
     def test_registered_rows_are_in_the_corpus(self):
         store = self.brain()
         # --- the CSV boundary: registered rows are IN the corpus --------------------

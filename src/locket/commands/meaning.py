@@ -79,14 +79,14 @@ def _incoming_texts(path, text):
     return [r for _label, r in rows]
 
 
-def cmd_table_dupes(root, pth, text, top=30, incoming=None, against=None, as_json=False):
+def cmd_table_dupes(root, pth, text, key, top=30, incoming=None, against=None, as_json=False):
     """`dupes` on a registered CSV, by meaning: its closest row pairs, every incoming
     row against its nearest row, or the rows a markdown file already states. Ranked,
-    never filtered and never a verdict (`rows` says why). Raises
-    rows.NoEmbedder for the caller's word-overlap fallback; `top` None on
-    `incoming` reports every row."""
+    never filtered and never a verdict (`rows` says why). `key` is the CSV's
+    key from `corpus.csv_keys`, which its index labels carry. Raises rows.NoEmbedder for the
+    caller's word-overlap fallback; `top` None on `incoming` reports every row."""
     rows = _rows()
-    name = pth.name
+    name = key
     try:
         if incoming:
             ranked = rows.incoming_rows(root, name, _incoming_texts(incoming, text), quiet=True)

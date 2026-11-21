@@ -235,6 +235,107 @@ class Dupes(StoreCase):
             assert says in rep.lines[0], (argv, rep.lines)
 
 
+class SameNamedCsvs(StoreCase):
+    """Two registered CSVs sharing a file name stay two tables everywhere a row is
+    keyed: the row labels, `corpus`, and `dupes`. Keyed on the bare name they merged."""
+
+    def _store(self):
+        store = self.tmp / "twin"
+        outside = self.tmp / "elsewhere"
+        for d in (store / "a", store / "b", outside / "x", outside / "y"):
+            d.mkdir(parents=True)
+        rows = {store / "a": "Alpha rows hold the first table's only ruling here.",
+                store / "b": "Beta rows hold the second table's only ruling here.",
+                outside / "x": "Xray rows hold the third table's only ruling here.",
+                outside / "y": "Yankee rows hold the fourth table's only ruling here."}
+        for d, row in rows.items():
+            (d / "RULINGS.csv").write_text(f'Ruling,Area\n"{row}",t\n')
+        (store / manifest.MANIFEST).write_text(json.dumps({"sources": [
+            {"path": str(d / "RULINGS.csv"), "text": "Ruling", "label": "Area"} for d in rows]}))
+        (store / "note.md").write_text("A markdown file so the store has content.\n")
+        corpora.clear_settings()
+        return store, outside
+
+    def test_each_table_keeps_its_own_label(self):
+        store, outside = self._store()
+        keys = corpus.csv_keys(store)
+        assert sorted(keys.values()) == sorted(["a/RULINGS.csv", "b/RULINGS.csv",
+                                                str(outside / "x" / "RULINGS.csv"),
+                                                str(outside / "y" / "RULINGS.csv")]), keys
+        labels = {label for label, _ in corpus.csv_rows(store)}
+        assert len(labels) == 4, labels
+        docs = corpus.corpus(store)
+        assert sum(1 for k in docs if k.endswith("RULINGS.csv#t")) == 4, sorted(docs)
+
+    def test_a_bare_name_that_means_two_tables_is_refused_and_a_key_is_not(self):
+        from unittest import mock
+        import rows
+        store, _ = self._store()
+        rep = overlap.cmd_dupes(store, files=["RULINGS.csv"])
+        assert "names 4 registered CSVs" in rep.lines[0] and "a/RULINGS.csv" in rep.lines[0], rep.lines
+        with mock.patch.object(rows, "row_pairs", return_value=([], None)) as rp:
+            overlap.cmd_dupes(store, files=["a/RULINGS.csv"])
+        assert rp.call_args.args[1] == "a/RULINGS.csv", rp.call_args
+
+    def test_an_exact_key_wins_over_a_shared_name(self):
+        store = self.tmp / "rootandsub"
+        (store / "memory").mkdir(parents=True)
+        for f in (store / "RULINGS.csv", store / "memory" / "RULINGS.csv"):
+            f.write_text(f'Ruling,Area\n"A row that lives in {f.parent.name} and nowhere else at all.",t\n')
+        (store / manifest.MANIFEST).write_text(json.dumps({"sources": [
+            {"path": str(f), "text": "Ruling", "label": "Area"}
+            for f in (store / "RULINGS.csv", store / "memory" / "RULINGS.csv")]}))
+        (store / "note.md").write_text("A markdown file so the store has content.\n")
+        corpora.clear_settings()
+        assert [k for _p, _t, k in overlap._tables_named(store, "RULINGS.csv")] == ["RULINGS.csv"]
+        assert [k for _p, _t, k in overlap._tables_named(store, "memory/RULINGS.csv")] == ["memory/RULINGS.csv"]
+
+    def test_the_word_overlap_fallback_labels_rows_with_the_key(self):
+        from unittest import mock
+        import rows
+        store, _ = self._store()
+        row = "Alpha rows hold the first table's only ruling here."
+        (store / "a" / "RULINGS.csv").write_text(f'Ruling,Area\n"{row}",t\n"{row} Again.",t\n')
+        with mock.patch.object(rows, "row_pairs", side_effect=rows.NoEmbedder("down")):
+            rep = overlap.cmd_dupes(store, files=["a/RULINGS.csv"], as_json=True)
+        pairs = json.loads(rep.lines[0])
+        assert pairs and pairs[0]["a_label"] == "a/RULINGS.csv", pairs
+
+    def test_a_pointer_by_a_shared_bare_name_is_ambiguous(self):
+        from commands import hygiene
+        store, _ = self._store()
+        (store / "note.md").write_text("See `RULINGS.csv`, query `Area=t` for the rest.\n"
+                                       "And `a/RULINGS.csv`, query `Area=t` for one table.\n")
+        status = {name: s for _f, name, _c, _v, s in hygiene.csv_pointers(store)}
+        assert status["RULINGS.csv"].startswith("AMBIGUOUS"), status
+        assert status["a/RULINGS.csv"] == "ok", status
+
+    def test_across_keeps_same_named_csvs_as_two_files(self):
+        store, _ = self._store()
+        union, _, _, _ = overlap.across_pairs({"twin": store})
+        held = [u for u in union if "RULINGS.csv#t" in u]
+        assert len(held) == 4, sorted(union)
+
+    def test_a_cache_built_under_the_old_labels_is_rebuilt(self):
+        import memfind
+        store, _ = self._store()
+        fp = memfind.corpus_fingerprint(store)
+        assert fp["__row_labels__"] == corpus.ROW_LABELS
+        old = {k: v for k, v in fp.items() if k != "__row_labels__"}
+        assert old != fp, "an index fingerprinted before the relabel must read as stale"
+
+    def test_an_outside_csv_with_a_unique_name_keeps_its_bare_name(self):
+        store = self.tmp / "solo"
+        store.mkdir()
+        lone = self.tmp / "far" / "CLAIMS.csv"
+        lone.parent.mkdir()
+        lone.write_text('Claim,Area\n"A lone claim registered from outside the store.",t\n')
+        (store / manifest.MANIFEST).write_text(json.dumps(
+            {"sources": [{"path": str(lone), "text": "Claim", "label": "Area"}]}))
+        corpora.clear_settings()
+        assert corpus.csv_keys(store) == {lone: "CLAIMS.csv"}
+
+
 class IndexPairs(StoreCase):
     def test_an_index_restating_its_own_target_is_not_listed(self):
         """An index line restating the file it links to is the index doing its job; one

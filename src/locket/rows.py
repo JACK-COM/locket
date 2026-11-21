@@ -40,15 +40,11 @@ def _embedded(texts, root):
         raise NoEmbedder(str(e)) from e
 
 
-def _source_rows(items, name):
-    """Index positions of one registered CSV's rows, in file order. `name` is the
-    file name the row labels carry (`<file>.csv#<area>`).
-
-    ⚠ The label carries the file NAME, not its path, so two registered CSVs sharing a
-    name in different directories read here as one table: their rows pair with each
-    other and share one mean. The index's label scheme decides that, and `find` and
-    the cache depend on it, so a store that registers two such files should rename one."""
-    prefix = f"{name}#"
+def _source_rows(items, key):
+    """Index positions of one registered CSV's rows, in file order. `key` is the CSV's
+    key from `corpus.csv_keys`, its path in the store, which every row label starts with
+    (`<key>#<area>`), so two CSVs sharing a file name stay two tables."""
+    prefix = f"{key}#"
     return [i for i, (label, _) in enumerate(items) if label.startswith(prefix)]
 
 

@@ -180,7 +180,7 @@ def grep_assist(pattern, root, top=4):
             "grep cannot see (a paraphrase shares too few tokens to match at all).\n"
             + "\n".join(lines)
             + "\nRead them as candidates, never as a verdict; the scores adjudicate nothing "
-              "(prime-memory-discipline 2e). A `<file>.csv#<area>` result is one ROW of a reference "
+              "(prime-memory-discipline 2e). A `<csv path>#<area>` result is one ROW of a reference "
               "CSV rather than a file, so query that CSV on `Area=` for the rest.")
 
 

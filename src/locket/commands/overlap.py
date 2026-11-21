@@ -81,7 +81,8 @@ def across_pairs(stores, floor=claims.PAIR_FLOOR):
     for k, root in sorted(stores.items()):
         rs = corpora.roots_of(root)
         md = {corpora.corpus_key(root, p, rs): str(p.resolve()) for p in corpus.md_files(root)}
-        csvs = {p.name: str(p.resolve()) for p, _, _ in corpus.csv_sources(root)}
+        # keyed as a row label keys it, so two CSVs sharing a name stay two files
+        csvs = {k: str(p.resolve()) for p, k in corpus.csv_keys(root).items()}
         for name, body in corpus.corpus(root).items():
             if name in md:
                 ident = md[name]
@@ -245,50 +246,57 @@ def cmd_graduated(root, floor=claims.PAIR_FLOOR):
     return Report(out, len(hits))
 
 
-def _table_named(root, name):
-    """(path, text column) of the registered CSV a user-supplied name means, matched by
-    file name when it is given bare (`./x.csv` included), else by resolved path, or None."""
+def _tables_named(root, name):
+    """[(path, text column, key)] of the registered CSVs a user-supplied name means: its
+    key in the store (`sub/RULINGS.csv`), its resolved path, or a bare file name
+    (`./x.csv` included), which matches every registered CSV of that name. An exact
+    key or path wins over the bare-name set, so a root `RULINGS.csv` stays nameable
+    beside a `memory/RULINGS.csv`. More than one match is the caller's to refuse,
+    never to pick from."""
     p = Path(name)
-    for pth, text, _label in corpus.csv_sources(Path(root)):
-        if (p.name == pth.name if len(p.parts) == 1
-                else os.path.realpath(p) == os.path.realpath(pth)):
-            return pth, text
-    return None
+    sources = corpus.csv_sources(Path(root))
+    keys = corpus.csv_keys(Path(root), sources)
+    exact = [(pth, text, keys[pth]) for pth, text, _label in sources
+             if keys[pth] == p.as_posix() or os.path.realpath(p) == os.path.realpath(pth)]
+    if exact:
+        return exact
+    return [(pth, text, keys[pth]) for pth, text, _label in sources
+            if len(p.parts) == 1 and p.name == pth.name]
 
 
-def _lexical_table(pth, text, top, as_json, why):
+def _lexical_table(pth, text, key, top, as_json, why):
     """Word-overlap row pairs inside one CSV, for a machine with no embedder: each row
     is its own document, so a pair is two rows sharing a claim. Said so in the report,
     and on stderr under `--json`, so the worklist still parses."""
     docs = {f"row {i}": row for i, (_label, row) in enumerate(corpus.csv_rows_of(pth, text))}
     best: dict = {}                    # one entry per row pair, at its best-matching claim
     for jac, fa, fb, _sa, _sb in claims.cross_file_pairs(docs, claims.PAIR_FLOOR):
-        key = tuple(sorted((fa, fb)))
-        best[key] = max(best.get(key, 0.0), jac)
+        pair = tuple(sorted((fa, fb)))
+        best[pair] = max(best.get(pair, 0.0), jac)
     pairs = sorted(((j, docs[a], docs[b]) for (a, b), j in best.items()), key=lambda t: -t[0])
     pairs = pairs[:top or 30]
-    warn = (f"{pth.name}: WORD OVERLAP ONLY. No embedder answered ({why}), so a paraphrased row "
+    warn = (f"{key}: WORD OVERLAP ONLY. No embedder answered ({why}), so a paraphrased row "
             f"is invisible here; {len(pairs)} pair(s) at jaccard {claims.PAIR_FLOOR}")
     if as_json:
         print(fsio.relay(warn, 400), file=sys.stderr)
-        return Report([json.dumps([{"score": round(j, 3), "a_label": pth.name, "a": a,
-                                    "b_label": pth.name, "b": b, "verdict": None} for j, a, b in pairs],
+        return Report([json.dumps([{"score": round(j, 3), "a_label": key, "a": a,
+                                    "b_label": key, "b": b, "verdict": None} for j, a, b in pairs],
                                   indent=1)], len(pairs))
     out = [warn + "\n"] + [f"[{j:.2f}]\n   A: {fsio.relay(a)}\n   B: {fsio.relay(b)}\n" for j, a, b in pairs]
     return Report(out, len(pairs))
 
 
-def _table_report(root, pth, text, top, incoming, against, as_json):
+def _table_report(root, pth, text, key, top, incoming, against, as_json):
     """One registered CSV by meaning, through `meaning`, or by word overlap when no
     embedder answers. Incoming and covered rows have no word-overlap form: they say so."""
     from commands import meaning              # memfind, and numpy with it, loads only here
     try:
-        return meaning.cmd_table_dupes(root, pth, text, top=top, incoming=incoming,
+        return meaning.cmd_table_dupes(root, pth, text, key, top=top, incoming=incoming,
                                        against=against, as_json=as_json)
     except meaning._rows().NoEmbedder as e:
         if incoming or against:
-            return Report([f"{pth.name}: this needs an embedder, and none answered ({fsio.relay(str(e))})"], 0)
-        return _lexical_table(pth, text, top, as_json, fsio.relay(str(e)))
+            return Report([f"{key}: this needs an embedder, and none answered ({fsio.relay(str(e))})"], 0)
+        return _lexical_table(pth, text, key, top, as_json, fsio.relay(str(e)))
 
 
 def cmd_dupes(root, floor=claims.PAIR_FLOOR, files=None, top=None, incoming=None, against=None,
@@ -305,11 +313,19 @@ def cmd_dupes(root, floor=claims.PAIR_FLOOR, files=None, top=None, incoming=None
     """
     out: list[str] = []
     found = 0
-    tables = [(f, _table_named(root, f)) for f in files or ()]
+    tables = [(f, _tables_named(root, f)) for f in files or ()]
     if any(t for _f, t in tables):
-        for _f, t in tables:
-            if t:
-                rep = _table_report(root, t[0], t[1], top, incoming, against, as_json)
+        for f, t in tables:
+            if len(t) > 1:
+                refusal = (f"{f} names {len(t)} registered CSVs ({', '.join(k for _p, _t, k in t)}); "
+                           "name one by its path in the store")
+                if as_json:                      # stdout stays parseable JSON
+                    print(fsio.relay(refusal, 400), file=sys.stderr)
+                else:
+                    out.append(refusal)
+            elif t:
+                pth, text, key = t[0]
+                rep = _table_report(root, pth, text, key, top, incoming, against, as_json)
                 out += rep.lines
                 found += rep.count
         files = [f for f, t in tables if not t]
@@ -408,7 +424,7 @@ def _dupes(root, rest):
         return Report(["--incoming and --against are two different questions; ask one at a time"], 0)
     if as_json and (incoming or against):
         return Report(["--json writes the row-pair worklist only; drop --incoming or --against"], 0)
-    if (incoming or against or as_json or top) and not any(_table_named(root, f) for f in files):
+    if (incoming or against or as_json or top) and not any(_tables_named(root, f) for f in files):
         return Report(["-n, --incoming, --against and --json apply to a CSV registered under "
                        "`sources`; name one"], 0)
     return cmd_dupes(root, files=files or None, top=top, incoming=incoming, against=against,

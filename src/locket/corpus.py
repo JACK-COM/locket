@@ -10,7 +10,7 @@ import os
 import stat
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
@@ -276,18 +276,49 @@ def _own_csv_sources(root: Path) -> list[tuple[Path, str, Optional[str]]]:
 CSV_ERRORS = (OSError, _csv.Error, UnicodeDecodeError)
 
 
+# How a CSV row is labelled. memfind fingerprints it, so a change here rebuilds every
+# index once; rows reuse their vectors by text, so nothing is re-embedded.
+# 2: `<csv key>#<area>`, the CSV's path in the store. 1 was its bare file name.
+ROW_LABELS = 2
+
+
+def csv_keys(root: Path, sources: Optional[list[tuple[Path, str, Optional[str]]]] = None,
+             roots: Optional[list[Path]] = None) -> dict[Path, str]:
+    """{path: key} for every CSV the store registers. A row's label is `<key>#<label
+    value>`, so the key is what keeps two CSVs apart: keyed on the file NAME, two
+    `RULINGS.csv` in different directories merged into one table for `corpus`,
+    `across` and `dupes` alike.
+
+    Inside the store or a joined store the key is the one a markdown file gets (its
+    path under the root, or `<label>/<path>`). A CSV registered from outside every
+    root is keyed by its bare name, which reads the same on every machine, unless
+    another registered CSV shares that key; then each colliding one takes its full
+    path, so the collision costs a long label rather than a merged table. Pass the
+    `sources` and `roots` a caller already holds; on the write hook each read counts."""
+    rs = corpora.roots_of(root) if roots is None else roots
+    keys: dict[Path, str] = {}
+    for pth, _text, _label in (csv_sources(root) if sources is None else sources):
+        key = corpora.corpus_key(Path(root), pth, rs)
+        keys[pth] = pth.name if Path(key).is_absolute() else key
+    taken = Counter(keys.values())
+    return {p: (str(p) if taken[k] > 1 else k) for p, k in keys.items()}
+
+
 def _rows_of(pth: Path, textcol: str, labelcol: Optional[str], out: list[tuple[str, str]],
-             max_bytes: Optional[int] = None) -> None:
+             max_bytes: Optional[int] = None, key: Optional[str] = None) -> None:
     """Append (label, text) for one registered CSV's rows to `out`; raises one of
     CSV_ERRORS. Into the caller's list, so the rows read before a bad one are kept.
-    A declared CSV is never capped; pass `max_bytes` for one the store never declared."""
+    A declared CSV is never capped; pass `max_bytes` for one the store never declared.
+    `key` is the CSV's key from `csv_keys`; without one the label falls back to the file name,
+    which is only safe for a file read on its own."""
+    prefix = key or pth.name
     with fsio.open_safe(pth, newline="", max_bytes=max_bytes) as fh:
         for r in _csv.DictReader(fh):
             t = (r.get(textcol) or "").strip()
             if not t:
                 continue
             tag = (r.get(labelcol) or "").strip() if labelcol else ""
-            out.append((f"{pth.name}#{tag}", t))
+            out.append((f"{prefix}#{tag}", t))
 
 
 def csv_rows_of(pth: Path, textcol: str) -> list[tuple[str, str]]:
@@ -303,11 +334,13 @@ def csv_rows_of(pth: Path, textcol: str) -> list[tuple[str, str]]:
 
 def csv_rows(root: Path) -> list[tuple[str, str]]:
     """[(label, text)] for every registered CSV row, in file order, labelled
-    `<file>.csv#<label value>`. Errors in one file skip that file, never raise."""
+    `<csv_key>#<label value>`. Errors in one file skip that file, never raise."""
     out: list[tuple[str, str]] = []
-    for source in csv_sources(root):
+    sources = csv_sources(root)
+    keys = csv_keys(root, sources)
+    for pth, text, label in sources:
         try:
-            _rows_of(*source, out)
+            _rows_of(pth, text, label, out, key=keys[pth])
         except CSV_ERRORS:
             continue
     return out
@@ -389,13 +422,14 @@ def _file_claims(p: Path) -> list[claims.Claim]:
     return list(claims.claims(claims.strip(fsio.read_safe(p))))
 
 
-def _csv_claims(pth: Path, textcol: str, labelcol: Optional[str]) -> list[tuple[str, list[claims.Claim]]]:
+def _csv_claims(pth: Path, textcol: str, labelcol: Optional[str],
+                key: Optional[str] = None) -> list[tuple[str, list[claims.Claim]]]:
     """[(label, claims)] per row of one registered CSV, rows with no claim kept, so
     every label `corpus()` would carry is still a file in the index. A file that
     stops parsing keeps the rows before the fault, as `csv_rows` does."""
     rows: list[tuple[str, str]] = []
     try:
-        _rows_of(pth, textcol, labelcol, rows)
+        _rows_of(pth, textcol, labelcol, rows, key=key)
     except CSV_ERRORS:
         pass
     return [(label, list(claims.claims(claims.strip(t)))) for label, t in rows]
@@ -506,10 +540,15 @@ def claim_index(root: Path, csv: bool = True) -> claims.ClaimIndex:
             continue
     if csv:
         grouped: dict[str, list] = {}
-        for source in csv_sources(root):
-            key = "\0".join([str(source[0]), source[1], source[2] or ""])
+        sources = csv_sources(root)
+        keys = csv_keys(root, sources, rs)
+        for pth, text, label in sources:
+            prefix = keys[pth]
+            # the label prefix is part of the cache key, so an entry cached under the
+            # older name-only labels is never served back
+            key = "\0".join([str(pth), text, label or "", prefix])
             try:
-                rows = cache.claims_of(key, source[0], _csv_claims, *source)
+                rows = cache.claims_of(key, pth, _csv_claims, pth, text, label, prefix)
             except OSError:
                 continue
             for label, cl in rows:

@@ -213,7 +213,8 @@ def source_row_decision(path: fsio.StrPath, tool_input: dict, prior: str, append
     if phys is None:
         return None, False
     root = corpora.top_of(phys)
-    src = [(s, t, lab) for s, t, lab in corpus.csv_sources(root) if s.resolve() == p.resolve()]
+    sources = corpus.csv_sources(root)
+    src = [(s, t, lab) for s, t, lab in sources if s.resolve() == p.resolve()]
     if not src:
         return None, False
     textcol = src[0][1]
@@ -236,10 +237,13 @@ def source_row_decision(path: fsio.StrPath, tool_input: dict, prior: str, append
     if not added:
         return None, False
     # The file's own rows are scored as they will stand after the write, minus the
-    # new ones, so an edited row never matches the version it replaces.
-    index, own = corpus.claim_index(root), f"{p.name}#"
+    # new ones, so an edited row never matches the version it replaces. The rows are
+    # hidden by the key their index labels carry, which is the file's path in the
+    # store: its bare name missed every CSV registered below the root.
+    key = corpus.csv_keys(root, sources)[src[0][0]]
+    index, own = corpus.claim_index(root), f"{key}#"
     kept = Counter(after) - Counter(added)
-    stands = {p.name: "\n".join(claims.strip(t) for t in kept.elements() if t)}
+    stands = {key: "\n".join(claims.strip(t) for t in kept.elements() if t)}
     lines = []
     for row in added:
         ranked = [r for r in claims.score_against(row, index, hide=lambda k: k.startswith(own), extra=stands)[:3]
