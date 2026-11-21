@@ -27,7 +27,7 @@ Then ask your agent to run `locket help install` and follow it. `locket doctor` 
 
 ## Requirements
 
-Python 3.9 or later and numpy. Ranking by meaning uses [ollama](https://ollama.com) 0.36 or later serving `embeddinggemma-2:270m`, or onnxruntime in the virtualenv the Panoply pieces share; without either, Locket compares words and says so. Supported hosts are Claude Code, Codex, Hermes Agent and any MCP client (`locket mcp`). Tested on macOS and Linux (Debian, Python 3.12); on Windows, run it under WSL.
+Python 3.11 or later and numpy. Ranking by meaning uses [ollama](https://ollama.com) 0.36 or later serving `embeddinggemma-2:270m`, or onnxruntime in the virtualenv the Panoply pieces share; without either, Locket compares words and says so. Supported hosts are Claude Code, Codex, Hermes Agent and any MCP client (`locket mcp`). Tested on macOS and Linux (Debian, Python 3.12); on Windows, run it under WSL.
 
 ## Developing
 
@@ -36,7 +36,7 @@ Python 3.9 or later and numpy. Ranking by meaning uses [ollama](https://ollama.c
 - A host is one row in `hosts.TABLE`, naming its home, the directories in it that are memory, and its module, plus that module under `src/locket/adapters/`. The module provides the hook face and the install face declared in `adapters/__init__.py`. The hooks, `install`, `uninstall` and `doctor` all read the hosts off the table, and `make typecheck` fails while a module lacks part of either face.
 - A verb is one `Verb` in its family's `VERBS` under `src/locket/commands/`. The command line, its help and the MCP server's tools are all built from it.
 
-`make test` checks the panoply-lib copies and the types (mypy, reading the code as Python 3.9 does), then runs `tests/` (stdlib `unittest`) and `locket selftest`, the install smoke check a package can run. Modules whose names start with an underscore are copies kept in step by panoply-lib; change them there.
+`make test` checks the panoply-lib copies and the types (mypy, reading the code as Python 3.11 does), then runs `tests/` (stdlib `unittest`) and `locket selftest`, the install smoke check a package can run. Modules whose names start with an underscore are copies kept in step by panoply-lib; change them there.
 
 ## Releasing
 

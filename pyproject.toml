@@ -7,7 +7,7 @@ name = "locket"
 dynamic = ["version"]
 description = "Keeps an AI agent's memory from holding the same fact twice."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = ["numpy>=1.22"]
@@ -30,7 +30,7 @@ locket = ["INSTALL-locket.md"]
 [tool.mypy]
 # `make typecheck`. The scripts import their siblings bare, so the package directory is
 # the import root; the underscore modules are panoply-lib copies, checked in panoply-lib.
-python_version = "3.9"
+python_version = "3.11"
 files = ["src/locket"]
 exclude = ['^src/locket/_[a-z]']
 mypy_path = "src/locket"

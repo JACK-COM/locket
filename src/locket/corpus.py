@@ -552,7 +552,7 @@ def _decode(value: object, rows: bool = False) -> list:
     return out
 
 
-_CACHES = {}
+_CACHES: "dict[str, ClaimCache]" = {}
 
 
 def claim_cache(root: Path) -> "ClaimCache":
