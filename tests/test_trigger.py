@@ -207,6 +207,41 @@ class PatternTypes(unittest.TestCase):
                 self.assertFalse(tg._transcript_has(tr, bad))
 
 
+class Compaction(unittest.TestCase):
+    LOAD = '{"type":"user","message":"skills/software-dev/SKILL.md"}'
+    PAT = r"skills/software-dev/SKILL\.md"
+
+    def _has(self, *lines):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            tr = Path(t) / "t.jsonl"
+            tr.write_text("\n".join(lines) + "\n")
+            return tg._transcript_has(tr, self.PAT)
+
+    def test_a_load_before_the_last_compaction_no_longer_counts(self):
+        for boundary in ('{"type":"system","subtype":"compact_boundary"}',
+                         '{"type":"compacted","payload":{}}'):
+            self.assertFalse(self._has(self.LOAD, boundary, '{"type":"user"}'), boundary)
+
+    def test_the_summary_naming_the_load_does_not_count(self):
+        summary = '{"type":"user","isCompactSummary":true,"message":"skills/software-dev/SKILL.md"}'
+        self.assertFalse(self._has(self.LOAD, '{"subtype":"compact_boundary"}', summary))
+
+    def test_a_long_summary_with_its_flag_past_the_scan_cap_does_not_count(self):
+        # Claude Code writes the flag after the message body, which can pass MAX_SCAN
+        summary = ('{"type":"user","message":"skills/software-dev/SKILL.md ' + "x" * 70000
+                   + '","isCompactSummary":true}')
+        self.assertFalse(self._has(self.LOAD, '{"subtype":"compact_boundary"}', summary))
+
+    def test_a_load_after_the_compaction_counts(self):
+        self.assertTrue(self._has('{"subtype":"compact_boundary"}', self.LOAD))
+        self.assertTrue(self._has(self.LOAD))
+        self.assertTrue(self._has(self.LOAD, '{"subtype":"compact_boundary"}',
+                                  '{"subtype":"compact_boundary"}', self.LOAD), "after the last of two")
+        self.assertFalse(self._has('{"subtype":"compact_boundary"}', self.LOAD,
+                                   '{"subtype":"compact_boundary"}'), "between two")
+
+
 class TriggerBehaviour(unittest.TestCase):
     def test_behaviour(self):
         with fixture_env():

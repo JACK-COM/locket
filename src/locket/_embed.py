@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/embed.py (b4a5413) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/embed.py (3117b28) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """embed: the embedder ladder the Panoply's pieces share.
 
 Ranks text by meaning on whatever this machine can serve, in order: ollama as it
@@ -23,6 +23,7 @@ without register-matched negatives; easy ones measure topic.
 import contextlib
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -280,6 +281,18 @@ def _add_venv():
     if sp.is_dir() and str(sp) not in sys.path:
         import site
         site.addsitedir(str(sp))
+
+
+def venv_mismatch():
+    """The Python versions the shared venv was built for, when none is the running one: its
+    packages are then invisible here and the in-process rung is silently absent. Empty when the
+    venv is absent, matches, or is a Windows venv, whose layout carries no version."""
+    if os.name == "nt" or not (VENV / "lib").is_dir():
+        return []
+    built = sorted(p.name for p in (VENV / "lib").glob("python3.*")    # never a free-threaded 3.Nt
+                   if re.fullmatch(r"python3\.\d+", p.name) and (p / "site-packages").is_dir())
+    running = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    return [] if running in built else built
 
 
 def _import_onnx():

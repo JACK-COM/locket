@@ -2,6 +2,7 @@
 import contextlib
 import io
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -86,6 +87,22 @@ class ConfigureBehaviour(unittest.TestCase):
     def test_behaviour(self):
         with fixture_env():
             _suite()
+
+
+class VenvMismatch(unittest.TestCase):
+    def test_a_venv_built_by_another_python_is_named(self):
+        running = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        saved = _embed.VENV
+        with tempfile.TemporaryDirectory() as t:
+            try:
+                _embed.VENV = Path(t)
+                self.assertEqual(_embed.venv_mismatch(), [], "an absent lib/ is not a mismatch")
+                (Path(t) / "lib" / "python3.0" / "site-packages").mkdir(parents=True)
+                self.assertEqual(_embed.venv_mismatch(), ["python3.0"])
+                (Path(t) / "lib" / running / "site-packages").mkdir(parents=True)
+                self.assertEqual(_embed.venv_mismatch(), [], "a venv holding the running version matches")
+            finally:
+                _embed.VENV = saved
 
 
 if __name__ == "__main__":

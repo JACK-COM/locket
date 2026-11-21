@@ -123,6 +123,11 @@ def _haystack(tool_input, fields):
 
 
 TRANSCRIPT_TAIL = 8 * 1024 * 1024
+# A transcript line marking a compaction: Claude Code's `compact_boundary` system entry,
+# Codex's `compacted` rollout item. The summary written after it names what was loaded
+# without carrying it, so it never counts as the load.
+_COMPACTION = re.compile(r'"subtype"\s*:\s*"compact_boundary"|"type"\s*:\s*"compacted"')
+_SUMMARY = '"isCompactSummary":true'
 OVERLAP = 4096          # a match no longer than this is found across a window boundary
 MAX_WINDOWS = 16        # 1 MB of a call read, at most
 
@@ -164,7 +169,16 @@ def _transcript_has(path, pattern):
             fh.seek(0, os.SEEK_END)               # load or answer sits; never the whole log
             fh.seek(max(0, fh.tell() - TRANSCRIPT_TAIL))
             tail = fh.read().decode("utf-8", errors="replace")
-        return any(rx.search(line[:fsio.MAX_SCAN]) for line in tail.splitlines())
+        lines = tail.splitlines()
+        # Only what follows the last compaction is still in the model's context: a skill
+        # loaded before it left with the summary, so the row has to fire again.
+        cut = max((i for i, line in enumerate(lines) if _COMPACTION.search(line[:fsio.MAX_SCAN])),
+                  default=-1)
+        # the summary flag follows the message, so it is looked for on the whole line, past
+        # MAX_SCAN; a plain substring test stays linear on any length. Claude Code writes
+        # compact JSON, so the flag carries no spaces.
+        return any(rx.search(line[:fsio.MAX_SCAN]) for line in lines[cut + 1:]
+                   if _SUMMARY not in line)
     except (OSError, re.error, TypeError):     # TypeError: a row's pattern that is no string
         return False
 

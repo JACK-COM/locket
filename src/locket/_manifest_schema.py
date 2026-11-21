@@ -1,4 +1,4 @@
-# GENERATED from panoply-lib/manifest_schema.py (f08210c+uncommitted) by sync.sh: edit the source and rerun sync.sh, never this copy.
+# GENERATED from panoply-lib/manifest_schema.py (d71a252) by sync.sh: edit the source and rerun sync.sh, never this copy.
 """manifest_schema: structural checks of a piece's JSON manifest against its schema.
 
 Each piece owns its schema as a dict; this checks a manifest against it and writes

@@ -191,6 +191,20 @@ def check_embedder(m, row):
         row("warn", "embedder", "none; `find` falls back to word overlap and misses paraphrases", fix)
 
 
+def check_venv(m, row):
+    """A shared venv built by another Python than the one running Locket, whose packages
+    Locket cannot import: `python3` on PATH moves with Homebrew, the keg's interpreter does not."""
+    import _embed
+    built = _embed.venv_mismatch()
+    if built:
+        ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+        row("warn", "venv", f"{_embed.VENV} was built for {', '.join(built)}; Locket runs Python {ver} "
+            "and cannot import its packages",
+            f"rebuild it with Locket's own interpreter: {shlex.quote(sys.executable)} -m venv --clear "
+            f"{shlex.quote(str(_embed.VENV))} && {shlex.quote(str(_embed.VENV / 'bin' / 'python'))} "
+            "-m pip install onnxruntime tokenizers")
+
+
 def check_index(m, row):
     """A meaning index for every store that holds markdown."""
     # an empty store (an auto-memory folder no session has written to) has nothing to
@@ -252,7 +266,7 @@ def check_hosts(m, row):
 # Run in order, each adding its rows through `row(level, what, detail, fix=None)`; a new
 # check is one function placed here, a host's own checks live in its adapter module.
 CHECKS = (check_command, check_selftest, check_stores, check_trust, check_config, check_embedder,
-          check_index, check_csv_size, check_hosts, check_hook_health, check_schema, check_old_links)
+          check_venv, check_index, check_csv_size, check_hosts, check_hook_health, check_schema, check_old_links)
 
 
 def cmd_doctor(version=""):
